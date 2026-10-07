@@ -63,6 +63,9 @@ When a session hands work to subagents, or runs a whole workflow of them, CTally
   finishes its own turn at once, and would otherwise look done for as long as they run, sometimes hours. CTally
   keeps it cyan until they return and Claude has taken in their results, and prefix + J leaves it alone till
   then.
+- **Stopping by hand counts.** Press Esc, dismiss a question, or kill agents or a workflow, and Claude Code
+  runs no hook to say so. CTally reads it from the transcripts instead: the session shows **done** within a
+  couple of seconds, and the agents you stopped leave the agents line.
 
 `ctally list` shows the count too. This needs the subagent hooks that `ctally setup` adds; if you set up
 CTally before they existed, run `ctally setup` again and restart your sessions.
@@ -80,7 +83,8 @@ you've switched them on.
   lists them too.
 - **Colours**: a bar turns amber at 75% and red at 90%. Numbers more than an hour old are dimmed.
 - **Hitting a limit** shows it at 100% at once, and the sessions it stopped as **limit**. A prompt you send
-  before it resets doesn't make them look busy, because it can't get through.
+  before it resets doesn't make them look busy, because it can't get through. A limit reset early starts a new
+  window, and the meter follows it from the next reply.
 - **tmux's status line** gets `5h 71% 7d 49%` after the counts, coloured the same way, and `ctally usage`
   prints the lot:
 
@@ -244,7 +248,7 @@ Two pieces, connected by a folder:
    | `PermissionRequest` | `waiting`, the moment a permission, a question or a plan to approve is on screen |
    | `Stop` | `done`, or still `working` if subagents or a workflow run on in the background |
    | `StopFailure` | `limited` when the usage limit stopped the turn; `waiting` for a login or billing problem; else `done` |
-   | `Notification` | `waiting` (idle input, or a permission prompt still open) |
+   | `Notification` | `waiting` (a permission prompt still open); idle input after a turn that never ended, as Esc leaves it, means `done` |
    | `SessionEnd` | removes the file |
    | `SubagentStart` / `SubagentStop` | adds / removes a file per agent in `~/.claude/ctally.d/.agents/<session id>/` |
 
@@ -252,7 +256,11 @@ Two pieces, connected by a folder:
    does the idle notification count while the session's agents are still out.
    A usage limit hit is also noted in `~/.claude/ctally.d/.limit`: what Claude Code said, and when the limit
    resets, from the status line. Until then a new prompt leaves the session `limited`, and the limit shows
-   as used up. The note goes once a turn gets through, or Claude Code says the limit has reset.
+   as used up. The note goes once a turn gets through, Claude Code says the limit has reset, or the status
+   line shows a new window.
+   Esc and killed agents get no hook, so CTally also reads the end of each busy session's transcript, and of
+   its agents' transcripts: a stop there with nothing after it means the turn is over, and an agent whose
+   transcript ends interrupted (or that Claude Code marks `stoppedByUser`) is gone.
    Inside tmux, a change of state also redraws tmux's status lines, so the counts there update at once.
 
    **The status line.** `ctally-statusline.sh` saves what Claude Code hands its status line, the latest from

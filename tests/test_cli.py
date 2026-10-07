@@ -1,6 +1,7 @@
 """`ctally status`, `list` and `jump`."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -56,6 +57,20 @@ def test_status_counts_most_urgent_first(state, capsys):
     assert capsys.readouterr().out == "!1 ▶1 ✓2 ·1\n"
     cli.main(["status", "--tmux"])
     assert capsys.readouterr().out == "#[fg=#ffb329]!1 #[fg=#4accf2]▶1 #[fg=#45e087]✓2 #[fg=#99a6bd]·1#[default]\n"
+
+
+def test_a_turn_stopped_with_esc_counts_as_done(state, capsys, monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    monkeypatch.setattr(cli, "PROJECTS_DIR", projects)
+    now = time.time()
+    stopped = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(now - 20))
+    (projects / "-w").mkdir(parents=True)
+    (projects / "-w" / "a.jsonl").write_text(json.dumps({"type": "user", "timestamp": stopped, "message": {
+        "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}) + "\n")
+    write(state, "a", f"working {os.getpid()} p\n", mtime=now - 25)
+    write(state, "b", f"working {os.getpid()} p\n")
+    assert cli.main(["status"]) == 0
+    assert capsys.readouterr().out == "▶1 ✓1\n"
 
 
 def test_limited_sessions_count_as_waiting_but_jump_skips_them(state, capsys, monkeypatch):

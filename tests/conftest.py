@@ -104,10 +104,13 @@ def real_setup_untouched():
 
 @pytest.fixture(autouse=True)
 def own_usage_and_prefs(tmp_path_factory, monkeypatch):
-    """Usage limits and preferences come from each test's own files, never the real
-    ~/.claude.json, status line or CTally settings."""
-    from ctally import usage
+    """Usage limits, preferences and transcripts come from each test's own files, never the
+    real ~/.claude.json, status line, CTally settings or ~/.claude/projects."""
+    from ctally import cli, sessions, usage
     home = tmp_path_factory.mktemp("usage")
+    # Nor real transcripts.
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", home / "projects")
+    monkeypatch.setattr(cli, "PROJECTS_DIR", home / "projects")
     monkeypatch.setattr(usage, "CLAUDE_JSON", home / ".claude.json")
     monkeypatch.setattr(usage, "STATUS_LINE", home / ".statusline")
     monkeypatch.setenv("CTALLY_CLAUDE_JSON", str(home / ".claude.json"))

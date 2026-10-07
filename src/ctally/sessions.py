@@ -4,7 +4,8 @@ CTally's hooks keep one file per session in ~/.claude/ctally.d/<session id>, hol
 "<state> <pid> <project name>" (working | done | waiting | limited; anything else means
 idle), and a file per running subagent in ~/.claude/ctally.d/.agents/<session id>/. A session
 stopped by the plan's usage limit shows as waiting until the limit resets (.limit says when).
-Each session's name
+A turn I stop by hand (Esc), and agents I kill, get no hook at all, so the transcripts are
+what show those. Each session's name
 and directory come from its transcript in ~/.claude/projects/, where it sits in tmux from
 its process's environment, and what a workflow is up to from its journal.
 """
@@ -17,6 +18,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
@@ -88,6 +90,82 @@ class Session:
     limited: bool = False           # waiting on the plan's usage limit, not on me
 
 
+# MARK: Stopping by hand
+
+# What Claude Code writes in a transcript when I press Esc: "[Request interrupted by user]", or
+# "…by user for tool use]" when a tool was running. A subagent's transcript gets it too.
+INTERRUPTED = "[Request interrupted by user"
+# What a command I run in Claude Code leaves, /compact or a "!" shell command, say: nothing
+# that starts Claude on a turn (and a command that does, starts it with a hook).
+COMMANDS = ("/", "<command-", "<local-command-", "<bash-")
+
+
+def _records(tail: bytes):
+    """A transcript's records, newest first. The first line of a stretch read from the
+    middle may be cut short, and simply won't parse."""
+    for line in reversed(tail.split(b"\n")):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            yield record
+
+
+def _texts(record: dict) -> list[str]:
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [part.get("text") or "" for part in content if isinstance(part, dict) and part.get("type") == "text"]
+    return []
+
+
+def _when(record: dict) -> float | None:
+    """A record's time ("2026-10-07T10:28:25.991Z"), in seconds since the epoch."""
+    try:
+        return datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00")).timestamp()
+    except (KeyError, ValueError):
+        return None
+
+
+def stop_in(tail: bytes) -> float | None:
+    """When the session's turn was stopped by hand, if the end of its transcript says so and
+    nothing has happened since: Esc pressed, its agents killed, or the conversation moved on
+    to another session id (which this one will never hear of again). None otherwise."""
+    for record in _records(tail):
+        if record.get("isSidechain"):
+            continue
+        kind = record.get("type")
+        if kind == "continued-in" or (kind == "system" and record.get("subtype") == "agents_killed"):
+            return _when(record)
+        if kind == "assistant":
+            return None                     # Claude answered after any stop
+        if kind == "user" and not record.get("isMeta") and not record.get("isVisibleInTranscriptOnly"):
+            texts = _texts(record)
+            if any(text.startswith(INTERRUPTED) for text in texts):
+                return _when(record)
+            if texts and all(text.lstrip().startswith(COMMANDS) for text in texts):
+                continue
+            return None                     # a prompt, or a tool's result: the turn went on
+    return None
+
+
+def cut_short(tail: bytes) -> bool:
+    """Whether a subagent's transcript ends with the agent stopped: interrupted (killed, or
+    Esc pressed while it ran), or given up on an API error such as the usage limit."""
+    for record in _records(tail):
+        kind = record.get("type")
+        if kind == "assistant":
+            return bool(record.get("isApiErrorMessage"))
+        if kind == "user" and not record.get("isMeta"):
+            return any(text.startswith(INTERRUPTED) for text in _texts(record))
+    return False
+
+
 # MARK: Session names
 
 class Names:
@@ -105,6 +183,7 @@ class Names:
         path: str | None = None
         custom: str | None = None
         generated: str | None = None
+        stopped: float | None = None        # when I last stopped its turn, if nothing came after
         modified: float = -1
         last_look: float = 0
 
@@ -112,12 +191,13 @@ class Names:
         self.projects = projects
         self.entries: dict[str, Names.Entry] = {}
 
-    def info(self, sid: str) -> tuple[str | None, str | None]:
+    def info(self, sid: str, busy: bool = False) -> tuple[str | None, str | None]:
         """Cheap to call every poll: the transcript is looked at every few seconds at most,
         and read only when it has changed since."""
         entry = self.entries.setdefault(sid, Names.Entry())
-        # Claude names a session after its first prompt, so look harder until it has.
-        every = 2 if (entry.custom or entry.generated) is None else 5
+        # Claude names a session after its first prompt, so look harder until it has; and
+        # while it's busy, so a turn I stop shows as over soon after.
+        every = 2 if busy or (entry.custom or entry.generated) is None else 5
         now = time.monotonic()
         if now - entry.last_look >= every:
             entry.last_look = now
@@ -128,6 +208,12 @@ class Names:
         """The session's transcript, once a look for its name has found it."""
         entry = self.entries.get(sid)
         return entry.transcript if entry else None
+
+    def stopped(self, sid: str) -> float | None:
+        """When I stopped the session's turn by hand, as its transcript's last look found:
+        see stop_in."""
+        entry = self.entries.get(sid)
+        return entry.stopped if entry else None
 
     def forget(self, keep: set[str]) -> None:
         self.entries = {k: v for k, v in self.entries.items() if k in keep}
@@ -152,6 +238,7 @@ class Names:
             return
         if entry.path is None:
             entry.path = self._cwd(tail, last=True)
+        entry.stopped = stop_in(tail)
 
         # Newest first; the first line of the window may be cut, and simply won't parse.
         custom = generated = None
@@ -243,7 +330,11 @@ class AgentWatcher:
     ~/.claude/ctally.d/.agents/<session id>/, holding the agent's type: that says how many
     run. Beside the session's transcript, a workflow keeps a journal with a line as each of
     its agents starts (and in which phase) and as each ends, and a plain agent leaves a note
-    of what it was asked to do: that says what they're doing."""
+    of what it was asked to do: that says what they're doing.
+
+    An agent I kill, or one cut short by Esc or the usage limit, gets no SubagentStop, so its
+    file stays. Its own transcript says it's over (and its note, when I killed it), and it
+    counts as gone."""
 
     EVERY = 2   # a workflow's progress, between agents coming and going
     GENERIC = {"", "general-purpose", "workflow-subagent"}
@@ -263,6 +354,9 @@ class AgentWatcher:
         activity: Agents | None = None
         journals: dict = field(default_factory=dict)        # by path
         descriptions: dict = field(default_factory=dict)    # by agent id
+        transcripts: dict = field(default_factory=dict)     # by agent id: its path
+        over: dict = field(default_factory=dict)            # by agent id: (when read, whether over)
+        abandoned: bool = False
 
     def __init__(self, directory: Path):
         self.dir = directory
@@ -285,15 +379,30 @@ class AgentWatcher:
             look.activity = self._examine(folder, transcript, look)
         return look.activity
 
+    def abandoned(self, sid: str) -> bool:
+        """Whether the session's turn ended leaving agents to run on, and those have all
+        been stopped since: nothing will come back to start Claude again."""
+        look = self.looks.get(sid)
+        return bool(look and look.abandoned)
+
     def forget(self, keep: set[str]) -> None:
         self.looks = {k: v for k, v in self.looks.items() if k in keep}
 
     def _examine(self, folder: Path, transcript: Path | None, look: Look) -> Agents | None:
+        look.abandoned = False
         # Dot files are the hook's own notes, not agents.
         try:
-            agents = sorted(p for p in os.listdir(folder) if not p.startswith("."))
+            listed = sorted(p for p in os.listdir(folder) if not p.startswith("."))
         except OSError:
             return None
+        agents = listed
+        if transcript is not None:
+            base = transcript.with_suffix("")
+            agents = [agent for agent in listed if not self._over(base, agent, look)]
+            look.transcripts = {k: v for k, v in look.transcripts.items() if k in listed}
+            look.over = {k: v for k, v in look.over.items() if k in listed}
+            # The hook's marker: the turn is over, and only these agents kept it going.
+            look.abandoned = bool(listed) and not agents and (folder / ".background").exists()
         if not agents:
             return None
         types, oldest = {}, float("inf")
@@ -309,7 +418,6 @@ class AgentWatcher:
         running, started, done, detail = len(agents), 0, 0, None
         if transcript is None:
             return Agents(running)
-        base = transcript.with_suffix("")       # <projects>/<directory>/<session id>/
 
         if "workflow-subagent" in types.values():
             # The workflows running now: a journal but no final record yet, and written to
@@ -353,6 +461,42 @@ class AgentWatcher:
             kind = types.get(agent, "")
             detail = look.descriptions[agent] or (None if kind in AgentWatcher.GENERIC else kind)
         return Agents(running, started, done, detail)
+
+    TAIL = 16 * 1024
+
+    def _over(self, base: Path, agent: str, look: Look) -> bool:
+        """Whether an agent the hook still lists has in fact stopped; read again only when
+        its transcript or note changes. base is <projects>/<directory>/<session id>/."""
+        path = look.transcripts.get(agent)
+        if path is None:
+            path = base / "subagents" / f"agent-{agent}.jsonl"
+            if not path.exists():               # a workflow's agents sit by its run
+                path = next(iter((base / "subagents" / "workflows").glob(f"*/agent-{agent}.jsonl")), None)
+                if path is None:
+                    return False                # nothing written yet
+            look.transcripts[agent] = path
+        note = path.with_name(f"agent-{agent}.meta.json")
+        try:
+            stat = path.stat()
+            noted = note.stat().st_mtime if note.exists() else 0
+        except OSError:
+            return False
+        key = (stat.st_mtime, stat.st_size, noted)
+        known = look.over.get(agent)
+        if known and known[0] == key:
+            return known[1]
+        over = False
+        try:
+            if noted and json.loads(note.read_bytes()).get("stoppedByUser") is True:
+                over = True
+            else:
+                with open(path, "rb") as f:
+                    f.seek(max(0, stat.st_size - AgentWatcher.TAIL))
+                    over = cut_short(f.read())
+        except (OSError, ValueError, AttributeError):
+            pass
+        look.over[agent] = (key, over)
+        return over
 
     @staticmethod
     def _read(path: Path, modified: float, size: int, known: Journal | None) -> Journal:
@@ -400,6 +544,20 @@ class LimitHit(NamedTuple):
     def holds(self, now: float) -> bool:
         """Until it resets; not knowing when, until the hook sees a turn get through."""
         return self.resets_at is None or now < self.resets_at
+
+
+def stopped_by_hand(names: Names, watcher: AgentWatcher, sid: str, modified: float) -> bool:
+    """Whether a session the hooks last left working, or waiting on me, is in fact sitting
+    idle because I stopped it: Esc pressed, or its agents killed, after the hooks last wrote
+    (modified, give or take the moment between a hook and the transcript), or left only
+    stopped agents to wait for. Claude Code runs no hook for either. Look at the session's
+    name first, which reads its transcript."""
+    if watcher.activity(sid, names.transcript(sid)) is not None:
+        return False                    # agents still at work, so the session is too
+    if watcher.abandoned(sid):
+        return True
+    stopped = names.stopped(sid)
+    return stopped is not None and stopped >= modified - 2
 
 
 def read_limit(directory: Path = STATE_DIR) -> LimitHit | None:
@@ -486,10 +644,13 @@ class StateReader:
 
     def _snapshot(self, name: str) -> Session:
         entry = self.cache[name]
-        title, path = self.names.info(name)
         state, limited = entry.state, entry.limited
+        busy = state in (State.WORKING, State.WAITING) and not limited
+        title, path = self.names.info(name, busy=busy)
         if limited and not (self.limit and self.limit.holds(time.time())):
             state, limited = State.DONE, False      # the limit is over; the session just sits
+        if busy and stopped_by_hand(self.names, self.watcher, name, entry.modified):
+            state = State.DONE
         return Session(id=name, state=state, label=entry.label, pid=entry.pid,
                        title=title, path=path,
                        tmux=self.locator.location(name, entry.pid),

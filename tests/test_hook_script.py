@@ -122,10 +122,27 @@ def test_idle_prompt_while_agents_run_is_ignored(hook):
     assert hook.state(SID) == "working"
 
 
-def test_idle_prompt_after_an_interrupted_turn_says_waiting(hook):
+def test_idle_prompt_after_an_interrupted_turn_says_done(hook):
     hook("working", payload(prompt="again"))     # Esc: no Stop follows
     hook("waiting", payload(notification_type="idle_prompt"))
+    assert hook.state(SID) == "done"
+
+
+def test_idle_prompt_leaves_an_open_question_waiting(hook):
+    hook("asking", payload(hook_event_name="PermissionRequest"))
+    hook("waiting", payload(notification_type="idle_prompt"))
     assert hook.state(SID) == "waiting"
+
+
+def test_claude_back_at_work_clears_the_background_marker(hook):
+    hook("working", payload())
+    hook("agent-start", payload(agent_id="a1", agent_type="general-purpose"))
+    hook("done", payload(background_tasks=[{"id": "a1", "type": "subagent", "status": "running"}]))
+    assert hook.agents(SID) == [".background", "a1"]
+    hook("working", payload(hook_event_name="PreToolUse", agent_id="a1"))    # the agent's own tool
+    assert hook.agents(SID) == [".background", "a1"]
+    hook("working", payload(hook_event_name="UserPromptSubmit"))            # Claude itself
+    assert hook.agents(SID) == ["a1"]
 
 
 def test_news_notifications_are_ignored(hook):
@@ -376,3 +393,31 @@ def test_status_line_writes_nothing_where_it_cant(tmp_path):
     (tmp_path / ".claude").write_text("a file where the folder should be")
     done = status_line(tmp_path, LIMITS, "echo still here")
     assert (done.returncode, done.stdout, done.stderr) == (0, "still here\n", "")
+
+
+def test_status_line_ends_a_limit_reset_early(tmp_path):
+    state = tmp_path / ".claude" / "ctally.d"
+    state.mkdir(parents=True)
+    limit = state / ".limit"
+    limit.write_text(f"1791361800 {SESSION_HIT}\n")
+    status_line(tmp_path, LIMITS)                                           # the same window
+    assert limit.exists()
+    week = {"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791361800 + 30},
+                            "seven_day": {"used_percentage": 0, "resets_at": 1791630000}}}
+    status_line(tmp_path, week)                                             # a clock's slack, no more
+    assert limit.exists()
+    later = {"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791378000}}}
+    done = status_line(tmp_path, json.dumps(later, separators=(" , ", " : ")))   # a new window, however spaced
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    assert not limit.exists()
+
+
+def test_status_line_keeps_a_limit_it_cant_place(tmp_path):
+    state = tmp_path / ".claude" / "ctally.d"
+    state.mkdir(parents=True)
+    for note in (f"0 {SESSION_HIT}", "1791361800 You've hit your Fable limit", "junk"):
+        (state / ".limit").write_text(note + "\n")
+        later = {"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791378000}}}
+        done = status_line(tmp_path, later)
+        assert (done.returncode, done.stderr) == (0, "")
+        assert (state / ".limit").exists(), note

@@ -4,12 +4,13 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 
 import pytest
 
 from conftest import dead_pid, sleeper, wait_for
 
-from ctally.sessions import AgentWatcher, Agents, Names, State, StateReader, TmuxLocator
+from ctally.sessions import AgentWatcher, Agents, Names, State, StateReader, TmuxLocator, cut_short, stop_in
 
 LIVE = os.getpid()
 
@@ -324,6 +325,197 @@ def test_summary_and_progress_strings():
     assert Agents(2).progress is None
     assert Agents(2, started=16, done=12).progress == "12/16"
     assert Agents(2, started=3, done=5).progress == "3/3"            # never more than started
+
+
+# MARK: Stopping by hand
+
+def at(seconds: float) -> str:
+    """A transcript's timestamp: "2026-10-07T10:28:25.991Z"."""
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def said(text: str, when: float, **extra) -> dict:
+    return {"type": "user", "timestamp": at(when), "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            **extra}
+
+
+def answered(when: float, **extra) -> dict:
+    return {"type": "assistant", "timestamp": at(when), "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Done."}]}, **extra}
+
+
+def tool_result(when: float) -> dict:
+    return {"type": "user", "timestamp": at(when), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
+
+
+def jsonl(records: list) -> bytes:
+    return "".join(json.dumps(r) + "\n" for r in records).encode()
+
+
+ESC, ESC_IN_TOOL = "[Request interrupted by user]", "[Request interrupted by user for tool use]"
+T = 1791368905.991
+
+
+def test_esc_with_nothing_after_is_a_stop():
+    tail = jsonl([said("go", T - 60), answered(T - 30), said(ESC, T),
+                  {"type": "last-prompt", "lastPrompt": "go"}, {"type": "custom-title", "customTitle": "x"},
+                  {"type": "attachment", "timestamp": at(T + 1), "attachment": {"type": "todo"}},
+                  said("Another Claude session sent a message", T + 2, isMeta=True)])
+    assert stop_in(tail) == pytest.approx(T, abs=0.001)
+    assert stop_in(jsonl([answered(T - 30), tool_result(T - 1), said(ESC_IN_TOOL, T)])) == pytest.approx(T, abs=0.001)
+
+
+def test_anything_said_or_done_after_esc_means_no_stop():
+    assert stop_in(jsonl([said(ESC, T), answered(T + 5)])) is None
+    assert stop_in(jsonl([said(ESC, T), said("try again", T + 5)])) is None
+    assert stop_in(jsonl([said(ESC, T), {"type": "user", "timestamp": at(T + 5), "message": {"content": "plain"}}])) is None
+    assert stop_in(jsonl([said("go", T), answered(T + 5)])) is None
+    assert stop_in(b"") is None
+
+
+def test_killed_agents_and_a_move_to_another_session_are_stops():
+    killed = {"type": "system", "subtype": "agents_killed", "timestamp": at(T), "isMeta": False}
+    assert stop_in(jsonl([answered(T - 9), killed])) == pytest.approx(T, abs=0.001)
+    moved = {"type": "continued-in", "timestamp": at(T + 3), "continuedInSessionId": "s2"}
+    assert stop_in(jsonl([answered(T - 9), said(ESC, T), killed, moved])) == pytest.approx(T + 3, abs=0.001)
+
+
+def test_commands_and_compaction_after_esc_are_passed_over():
+    tail = jsonl([answered(T - 9), said(ESC, T), said("/compact", T + 700),
+                  said("<local-command-caveat>The command below was run directly</local-command-caveat>", T + 700,
+                       isMeta=True),
+                  said("<command-name>/compact</command-name>\n<command-message>compact</command-message>", T + 700),
+                  {"type": "system", "subtype": "compact_boundary", "timestamp": at(T + 790)},
+                  said("This session is being continued from a previous conversation", T + 790,
+                       isVisibleInTranscriptOnly=True, isCompactSummary=True),
+                  said("<local-command-stdout>Compacted</local-command-stdout>", T + 790),
+                  said("<bash-input>ls</bash-input>", T + 800)])
+    assert stop_in(tail) == pytest.approx(T, abs=0.001)
+
+
+def test_a_stretch_cut_mid_line_and_sidechains():
+    tail = jsonl([answered(T - 9), said(ESC, T), answered(T + 5, isSidechain=True)])
+    assert stop_in(tail[40:]) == pytest.approx(T, abs=0.001)
+    assert stop_in(jsonl([{"type": "user", "message": {"content": [{"type": "text", "text": ESC}]}}])) is None
+
+
+def test_an_agent_cut_short():
+    assert cut_short(jsonl([answered(T - 9), tool_result(T - 5), said(ESC, T)]))
+    limit = answered(T, isApiErrorMessage=True)
+    limit["message"]["content"][0]["text"] = "You've hit your session limit · resets 7:30pm"
+    assert cut_short(jsonl([tool_result(T - 5), limit]))
+    assert not cut_short(jsonl([said("Find the callers", T - 9), answered(T)]))
+    assert not cut_short(jsonl([answered(T - 9), tool_result(T)]))
+    assert not cut_short(jsonl([answered(T - 9), said("queued note", T, isMeta=True)]))
+
+
+def agent_transcript(path, agent: str, records: list, run: str | None = None, note: dict | None = None):
+    folder = path.with_suffix("") / "subagents"
+    if run:
+        folder = folder / "workflows" / run
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"agent-{agent}.jsonl").write_bytes(jsonl(records))
+    if note is not None:
+        (folder / f"agent-{agent}.meta.json").write_text(json.dumps(note))
+
+
+def test_stopped_agents_are_not_counted(dirs):
+    state, projects = dirs
+    path = transcript(projects, "s", [{"cwd": "/w"}])
+    agents_folder(state, "s", {"live": "Explore", "killed": "general-purpose", "esc": "Plan", "limit": "Explore",
+                               "wf1": "workflow-subagent", "unwritten": "Explore"})
+    agent_transcript(path, "live", [said("Find", T - 9), answered(T)])
+    agent_transcript(path, "killed", [said("Build", T - 9), answered(T - 5)],
+                     note={"agentType": "general-purpose", "description": "Build", "stoppedByUser": True})
+    agent_transcript(path, "esc", [said("Plan", T - 9), said(ESC, T)])
+    agent_transcript(path, "limit", [said("Go", T - 9), answered(T, isApiErrorMessage=True)])
+    agent_transcript(path, "wf1", [said("Review", T - 9), said(ESC, T)], run="wf_one")
+    activity = AgentWatcher(state / ".agents").activity("s", path)
+    assert activity.running == 2                        # "live", and "unwritten", just set off
+
+
+def test_an_agent_resumed_after_esc_counts_again(dirs):
+    state, projects = dirs
+    path = transcript(projects, "s", [{"cwd": "/w"}])
+    folder = agents_folder(state, "s", {"a1": "Explore"})
+    agent_transcript(path, "a1", [said("Find", T - 9), said(ESC, T)])
+    watcher = AgentWatcher(state / ".agents")
+    assert watcher.activity("s", path) is None
+    agent_transcript(path, "a1", [said("Find", T - 9), said(ESC, T), said("go on", T + 5), answered(T + 9)])
+    os.utime(folder, (time.time() + 5, time.time() + 5))
+    assert watcher.activity("s", path) == Agents(1, detail="Explore")
+
+
+def stuck(dirs, word: str, records: list, hooked: float, agents: dict | None = None) -> tuple:
+    state, projects = dirs
+    path = transcript(projects, "s", records)
+    write(state, "s", f"{word} {LIVE} p\n", mtime=hooked)
+    if agents is not None:
+        agents_folder(state, "s", agents)
+    return state, projects, path
+
+
+def test_a_turn_stopped_with_esc_is_done(dirs):
+    now = time.time()
+    state, projects, _ = stuck(dirs, "working", [said("go", now - 60), answered(now - 30), said(ESC, now - 20)],
+                               hooked=now - 25)
+    [session] = StateReader(state, projects).poll()
+    assert session.state is State.DONE
+
+
+def test_a_question_dismissed_with_esc_is_done(dirs):
+    now = time.time()
+    state, projects, _ = stuck(dirs, "waiting", [answered(now - 30), tool_result(now - 20), said(ESC_IN_TOOL, now - 20)],
+                               hooked=now - 21)
+    [session] = StateReader(state, projects).poll()
+    assert session.state is State.DONE
+
+
+def test_a_hook_after_the_stop_wins(dirs):
+    now = time.time()
+    state, projects, _ = stuck(dirs, "working", [answered(now - 30), said(ESC, now - 20)], hooked=now - 5)
+    [session] = StateReader(state, projects).poll()
+    assert session.state is State.WORKING
+
+
+def test_agents_still_at_work_keep_a_stopped_session_working(dirs):
+    now = time.time()
+    state, projects, path = stuck(dirs, "working", [answered(now - 30), said(ESC, now - 20)], hooked=now - 25,
+                                  agents={"bg": "Explore"})
+    agent_transcript(path, "bg", [said("Find", now - 40), answered(now - 1)])
+    [session] = StateReader(state, projects).poll()
+    assert (session.state, session.agents) == (State.WORKING, Agents(1, detail="Explore"))
+
+
+def test_waiting_only_on_killed_agents_is_done(dirs):
+    now = time.time()
+    # The turn ended with an agent in the background; then I stopped that agent, from its list.
+    state, projects, path = stuck(dirs, "working", [said("go", now - 90), answered(now - 60)], hooked=now - 60,
+                                  agents={"bg": "general-purpose"})
+    (state / ".agents" / "s" / ".background").write_text("")
+    agent_transcript(path, "bg", [said("Build", now - 70), said(ESC, now - 10)],
+                     note={"description": "Build", "stoppedByUser": True})
+    [session] = StateReader(state, projects).poll()
+    assert (session.state, session.agents) == (State.DONE, None)
+
+
+def test_killed_agents_mid_turn_leave_claude_working(dirs):
+    now = time.time()
+    # No marker: Claude itself is at work, and only its agent was stopped.
+    state, projects, path = stuck(dirs, "working", [said("go", now - 90), answered(now - 60)], hooked=now - 5,
+                                  agents={"bg": "general-purpose"})
+    agent_transcript(path, "bg", [said("Build", now - 70), said(ESC, now - 10)], note={"stoppedByUser": True})
+    [session] = StateReader(state, projects).poll()
+    assert (session.state, session.agents) == (State.WORKING, None)
+
+
+def test_limited_sessions_are_left_to_the_limit(dirs):
+    now = time.time()
+    state, projects, _ = stuck(dirs, "limited", [answered(now - 30), said(ESC, now - 20)], hooked=now - 25)
+    (state / ".limit").write_text(f"{int(now) + 3600} You've hit your session limit\n")
+    [session] = StateReader(state, projects).poll()
+    assert (session.state, session.limited) == (State.WAITING, True)
 
 
 # MARK: tmux

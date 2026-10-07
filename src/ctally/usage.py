@@ -147,6 +147,8 @@ def with_hit(usage: Usage | None, hit: LimitHit | None, now: float) -> Usage | N
         resets = current.resets_at              # it was hit in the window these numbers are for
     if resets is None or now >= resets:
         return usage
+    if current is not None and current.resets_at is not None and current.resets_at > resets + 60:
+        return usage                            # reset early: these numbers are a new window's
     if current is None:
         _, _, title, short, tag = next(window for window in WINDOWS if window[1] == key)
         current = Limit(key, title, short, tag, 100.0, resets)

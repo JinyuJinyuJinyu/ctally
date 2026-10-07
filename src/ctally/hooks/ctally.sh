@@ -15,7 +15,8 @@
 # Subagents, a workflow's included, each get a file in ~/.claude/ctally.d/.agents/<session
 # id>/ while they run. A turn that ends with agents or a workflow still running in the
 # background isn't done: the session stays "working" until they finish and Claude has
-# taken in their results.
+# taken in their results. Meanwhile a .background file there says Claude itself is idle, so
+# CTally can tell when those agents have all been stopped (killed agents get no hook).
 #
 # Inside tmux, a change of state also redraws tmux's status lines, so CTally's counts
 # there change at once. Silent, and always exits 0, so it never gets in Claude Code's way.
@@ -146,10 +147,13 @@ case "$state" in
         state=working
         ;;
       quota_auto_resume_stale) rm -f "$limit" ;;
-      # Waiting on its own agents, not on me.
+      # Idle at the prompt: nothing new after a finished turn, one waiting on its own agents,
+      # or a question still open. After a turn that never said it was over, which is what
+      # Esc leaves, the turn is done.
       idle_prompt)
-        case "$before" in done* | limited*) exit 0 ;; esac
+        case "$before" in done* | limited* | waiting*) exit 0 ;; esac
         [ -d "$agents" ] && exit 0
+        state=done
         ;;
       # News, not a question.
       agent_completed | auth_success | elicitation_complete | elicitation_response | \
@@ -165,6 +169,8 @@ case "$state" in
     case "$before" in
       limited*) [ "$(field hook_event_name)" = UserPromptSubmit ] && limit_holds && exit 0 ;;
     esac
+    # Claude itself at work again, not just one of its agents.
+    [ -z "$(field agent_id)" ] && rm -f "$agents/.background" 2>/dev/null
     ;;
   *) exit 0 ;;
 esac

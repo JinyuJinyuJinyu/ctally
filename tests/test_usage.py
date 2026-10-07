@@ -295,6 +295,14 @@ def test_a_hit_without_a_reset_time_borrows_the_window_it_was_hit_in():
     assert with_hit(live, stale, 1791360100) == live
 
 
+def test_a_limit_reset_early_is_over():
+    # Hit at 99%, resetting at 1791361800; then reset early: a new window, ending later.
+    fresh = parse_live({"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791378000}}}, 1791360200)
+    assert with_hit(fresh, hit(1791361800), 1791360300) == fresh
+    same = parse_live({"rate_limits": {"five_hour": {"used_percentage": 99, "resets_at": 1791361830}}}, 1791360200)
+    assert with_hit(same, hit(1791361800), 1791360300).limits[0].percent == 100           # a clock's slack
+
+
 def test_a_hit_with_nothing_else_known():
     full = with_hit(None, hit(1791361800), 1791360100)
     assert [(l.title, l.percent, l.tag) for l in full.limits] == [("Current session", 100, "5h")]

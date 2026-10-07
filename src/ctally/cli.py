@@ -30,7 +30,7 @@ from typing import NamedTuple
 
 from . import __version__, system
 from . import usage as limits
-from .sessions import STATE_DIR, read_limit
+from .sessions import PROJECTS_DIR, STATE_DIR, AgentWatcher, Names, read_limit, stopped_by_hand
 
 GLYPH = {"waiting": "!", "working": "▶", "done": "✓", "idle": "·"}
 COLOUR = {"waiting": "#ffb329", "working": "#4accf2", "done": "#45e087", "idle": "#99a6bd"}
@@ -57,6 +57,7 @@ def live_sessions() -> list[Live]:
     except OSError:
         names = []
     limit = read_limit(STATE_DIR)
+    transcripts, watcher = Names(PROJECTS_DIR), AgentWatcher(STATE_DIR / ".agents")
     for name in names:
         path = STATE_DIR / name
         try:
@@ -72,15 +73,20 @@ def live_sessions() -> list[Live]:
         state = fields[0] if fields[0] in RANK else "idle"
         if state == "limited" and not (limit and limit.holds(time.time())):
             state = "done"                  # the limit is over; the session just sits
+        if state in ("working", "waiting"):
+            transcripts.info(name)
+            if stopped_by_hand(transcripts, watcher, name, modified):
+                state = "done"
         found.append(Live(RANK[state], modified, state, pid, name, " ".join(fields[2:]) or "?"))
     return sorted(found)
 
 
 def agents_running(sid: str) -> int:
-    try:
-        return sum(1 for n in os.listdir(STATE_DIR / ".agents" / sid) if not n.startswith("."))
-    except OSError:
-        return 0
+    """Not counting those stopped without a word to the hooks."""
+    transcripts = Names(PROJECTS_DIR)
+    transcripts.info(sid)
+    activity = AgentWatcher(STATE_DIR / ".agents").activity(sid, transcripts.transcript(sid))
+    return activity.running if activity else 0
 
 
 def status(tmux: bool) -> None:

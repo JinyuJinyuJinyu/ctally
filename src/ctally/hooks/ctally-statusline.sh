@@ -8,6 +8,9 @@
 # the latest from any session (the limits are your account's, not a session's), and prints
 # nothing of its own. Given the command of a status line you already had, it runs that with
 # the same input, so it still shows. Always exits as that command does, or 0.
+#
+# A usage limit the hook noted as hit (.limit) is over once its window has moved on: a limit
+# reset early starts a new window, which ends later than the one that was used up.
 
 input=$(cat)
 
@@ -18,6 +21,19 @@ case "$input" in
     tmp="$dir/.statusline.$$"
     printf '%s\n' "$input" 2>/dev/null > "$tmp" && mv -f "$tmp" "$dir/.statusline" 2>/dev/null \
       || rm -f "$tmp" 2>/dev/null
+    if [ -f "$dir/.limit" ]; then
+      read -r hit message < "$dir/.limit" 2>/dev/null
+      case "$message" in
+        *"session limit"*) window=five_hour ;;
+        *"weekly limit"*) window=seven_day ;;
+        *) window="" ;;
+      esac
+      resets=""
+      [ -n "$window" ] && resets=$(printf '%s\n' "$input" | grep -o "\"$window\"[[:space:]]*:[[:space:]]*{[^}]*}" \
+        | grep -o '"resets_at"[[:space:]]*:[[:space:]]*[0-9]*' | head -n 1 | sed 's/.*:[[:space:]]*//')
+      [ "${hit:-0}" -gt 0 ] 2>/dev/null && [ "${resets:-0}" -gt $((hit + 60)) ] 2>/dev/null \
+        && rm -f "$dir/.limit"
+    fi
     ;;
 esac
 
