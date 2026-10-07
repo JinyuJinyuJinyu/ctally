@@ -61,6 +61,7 @@ struct SessionSnapshot: Equatable {
     var pid: pid_t = 0         // the claude process, from the hook
     var title: String? = nil   // session name, from the transcript
     var path: String? = nil    // directory the session started in, from the transcript
+    var tmux: String? = nil    // where it sits in tmux, "report:0.2", if it runs there
 }
 
 /// CTally's shape: a hexagon standing on a point, shared by the badges, the list's marks and
@@ -207,6 +208,57 @@ final class SessionInfoReader {
     }
 }
 
+// MARK: - tmux locations
+
+/// Where each session sits in tmux ("report:0.2"), for its row. Asking tmux means running
+/// it, so that happens off the main thread, at most every few seconds per session, and the
+/// answer turns up on a later poll.
+final class TmuxLocator {
+
+    private struct Entry {
+        var location: String?
+        var checked = Date.distantPast
+        var asking = false
+    }
+
+    private static let every: TimeInterval = 10   // panes move and get renumbered, rarely
+
+    private var entries: [String: Entry] = [:]       // main thread only
+    private let queue = DispatchQueue(label: "ctally.tmux")
+
+    func location(for id: String, pid: pid_t) -> String? {
+        var entry = entries[id] ?? Entry()
+        if !entry.asking, pid > 0, Date().timeIntervalSince(entry.checked) >= TmuxLocator.every {
+            entry.asking = true
+            queue.async { [weak self] in
+                let found = TmuxLocator.lookUp(pid)
+                DispatchQueue.main.async {
+                    guard var answered = self?.entries[id] else { return }   // the session has ended
+                    answered.location = found
+                    answered.checked = Date()
+                    answered.asking = false
+                    self?.entries[id] = answered
+                }
+            }
+        }
+        entries[id] = entry
+        return entry.location
+    }
+
+    func forget(allBut ids: Set<String>) {
+        entries = entries.filter { ids.contains($0.key) }
+    }
+
+    private static func lookUp(_ pid: pid_t) -> String? {
+        guard let tmux = Processes.tmuxPane(of: pid),
+              let answer = Processes.run(tmux.binary, ["-S", tmux.socket, "display-message", "-p", "-t", tmux.pane,
+                                                       "#{session_name}:#{window_index}.#{pane_index}"])
+        else { return nil }
+        let location = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        return location.isEmpty ? nil : location
+    }
+}
+
 // MARK: - State directory
 
 /// Watches one state file per session.
@@ -231,6 +283,7 @@ final class StateReader {
 
     private let dir: URL
     private let namer: SessionInfoReader
+    private let locator = TmuxLocator()
     private var cache: [String: Session] = [:]
     private var firstSeen: [String: Date] = [:]
     private var lastPrune = Date.distantPast
@@ -263,6 +316,7 @@ final class StateReader {
 
         prune()
         namer.forget(allBut: Set(cache.keys))
+        locator.forget(allBut: Set(cache.keys))
 
         // Oldest session first, so rows never shuffle under me.
         let ordered = cache.keys.sorted {
@@ -287,7 +341,8 @@ final class StateReader {
                                label: session?.label ?? "",
                                pid: session?.pid ?? 0,
                                title: info.title,
-                               path: info.path)
+                               path: info.path,
+                               tmux: locator.location(for: name, pid: session?.pid ?? 0))
     }
 
     private func read(_ path: String, modified: Date, size: Int) -> Session? {
@@ -315,6 +370,92 @@ final class StateReader {
             cache[name] = nil
             firstSeen[name] = nil
         }
+    }
+}
+
+// MARK: - Processes
+
+/// What CTally needs to know about other processes: their terminal, their parents, the
+/// environment they started with, and a way to run a tool and read its answer.
+enum Processes {
+
+    /// For a process started inside tmux: the tmux binary to talk to its server with, the
+    /// server's socket, and the process's pane ("%3"). tmux leaves TMUX ("<socket>,<server
+    /// pid>,<session>") and TMUX_PANE in the environment of everything started inside it.
+    static func tmuxPane(of pid: pid_t) -> (binary: String, socket: String, pane: String)? {
+        guard let environment = launchInfo(of: pid)?.environment,
+              let server = environment["TMUX"], let pane = environment["TMUX_PANE"] else { return nil }
+        let parts = server.split(separator: ",").map(String.init)
+        guard parts.count >= 2 else { return nil }
+        // The server's own binary, so client and server always match.
+        let fromServer = pid_t(parts[1]).flatMap { launchInfo(of: $0)?.path }.flatMap { $0.hasPrefix("/") ? $0 : nil }
+        guard let binary = fromServer ?? installedTmux() else { return nil }
+        return (binary, parts[0], pane)
+    }
+
+    static func installedTmux() -> String? {
+        ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux", "/usr/bin/tmux"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    static func info(_ pid: pid_t) -> kinfo_proc? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        return info
+    }
+
+    /// The controlling terminal, as Terminal names its tabs' ttys: "/dev/ttys005".
+    static func tty(of pid: pid_t) -> String? {
+        guard let device = info(pid)?.kp_eproc.e_tdev, device != -1,
+              let name = devname(device, S_IFCHR) else { return nil }
+        let tty = String(cString: name)
+        return tty.hasPrefix("tty") ? "/dev/" + tty : nil
+    }
+
+    /// The executable path and environment a process started with (KERN_PROCARGS2: argc,
+    /// the path, padding, the arguments, then the environment, all NUL-terminated).
+    static func launchInfo(of pid: pid_t) -> (path: String, environment: [String: String])? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+
+        let argc = buffer.withUnsafeBytes { $0.load(as: Int32.self) }
+        var offset = MemoryLayout<Int32>.size
+        func next() -> String? {
+            guard offset < size else { return nil }
+            let end = buffer[offset..<size].firstIndex(of: 0) ?? size
+            defer { offset = end + 1 }
+            return String(decoding: buffer[offset..<end], as: UTF8.self)
+        }
+        guard let path = next() else { return nil }
+        while offset < size, buffer[offset] == 0 { offset += 1 }
+        for _ in 0..<max(argc, 0) { _ = next() }
+        var environment: [String: String] = [:]
+        while let entry = next(), !entry.isEmpty {
+            guard let equals = entry.firstIndex(of: "=") else { continue }
+            environment[String(entry[..<equals])] = String(entry[entry.index(after: equals)...])
+        }
+        return (path, environment)
+    }
+
+    /// Runs a tool to completion, quietly; its output if it succeeded.
+    @discardableResult
+    static func run(_ path: String, _ arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
     }
 }
 
@@ -358,22 +499,16 @@ final class SessionFocuser {
     }
 
     private static func focusNow(_ pid: pid_t) {
-        guard let launch = launchInfo(of: pid) else { return }
-        if let server = launch.environment["TMUX"], let pane = launch.environment["TMUX_PANE"] {
-            focusTmux(pane: pane, server: server)
-        } else if let tty = tty(of: pid) {
+        if let tmux = Processes.tmuxPane(of: pid) {
+            focusTmux(tmux)
+        } else if let tty = Processes.tty(of: pid) {
             raise(tty: tty, hostedBy: pid)
         }
     }
 
-    private static func focusTmux(pane: String, server: String) {
-        // TMUX is "<socket>,<server pid>,<session index>"; run the server's own binary.
-        let parts = server.split(separator: ",").map(String.init)
-        guard parts.count >= 2 else { return }
-        let fromServer = pid_t(parts[1]).flatMap { launchInfo(of: $0)?.path }
-        guard let binary = fromServer.flatMap({ $0.hasPrefix("/") ? $0 : nil }) ?? installedTmux() else { return }
-        let socket = parts[0]
-        @discardableResult func tmux(_ args: String...) -> String? { run(binary, ["-S", socket] + args) }
+    private static func focusTmux(_ target: (binary: String, socket: String, pane: String)) {
+        let (binary, socket, pane) = target
+        @discardableResult func tmux(_ args: String...) -> String? { Processes.run(binary, ["-S", socket] + args) }
 
         tmux("select-window", "-t", pane)
         tmux("select-pane", "-t", pane)
@@ -398,10 +533,10 @@ final class SessionFocuser {
                 .joined(separator: " ")
             let quoted = command.replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
-            run("/usr/bin/osascript", ["-e", "tell application \"Terminal\"",
-                                       "-e", "do script \"\(quoted)\"",
-                                       "-e", "activate",
-                                       "-e", "end tell"])
+            Processes.run("/usr/bin/osascript", ["-e", "tell application \"Terminal\"",
+                                                 "-e", "do script \"\(quoted)\"",
+                                                 "-e", "activate",
+                                                 "-e", "end tell"])
         }
     }
 
@@ -409,7 +544,7 @@ final class SessionFocuser {
     private static func raise(tty: String, hostedBy pid: pid_t) {
         guard let app = hostApp(of: pid) else { return }
         if app.bundleIdentifier == terminal {
-            run("/usr/bin/osascript", raiseTab.flatMap { ["-e", $0] } + [tty])
+            Processes.run("/usr/bin/osascript", raiseTab.flatMap { ["-e", $0] } + [tty])
         } else {
             DispatchQueue.main.async { app.activate(options: [.activateIgnoringOtherApps]) }
         }
@@ -422,78 +557,12 @@ final class SessionFocuser {
             if let app = NSRunningApplication(processIdentifier: current), app.activationPolicy == .regular {
                 return app
             }
-            guard let up = processInfo(current)?.kp_eproc.e_ppid, up > 1, up != current else { return nil }
+            guard let up = Processes.info(current)?.kp_eproc.e_ppid, up > 1, up != current else { return nil }
             current = up
         }
         return nil
     }
 
-    private static func installedTmux() -> String? {
-        ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux", "/usr/bin/tmux"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    // MARK: Processes
-
-    private static func processInfo(_ pid: pid_t) -> kinfo_proc? {
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
-        return info
-    }
-
-    /// The controlling terminal, as Terminal names its tabs' ttys: "/dev/ttys005".
-    private static func tty(of pid: pid_t) -> String? {
-        guard let device = processInfo(pid)?.kp_eproc.e_tdev, device != -1,
-              let name = devname(device, S_IFCHR) else { return nil }
-        let tty = String(cString: name)
-        return tty.hasPrefix("tty") ? "/dev/" + tty : nil
-    }
-
-    /// The executable path and environment a process started with (KERN_PROCARGS2: argc,
-    /// the path, padding, the arguments, then the environment, all NUL-terminated).
-    private static func launchInfo(of pid: pid_t) -> (path: String, environment: [String: String])? {
-        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
-        var buffer = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
-
-        let argc = buffer.withUnsafeBytes { $0.load(as: Int32.self) }
-        var offset = MemoryLayout<Int32>.size
-        func next() -> String? {
-            guard offset < size else { return nil }
-            let end = buffer[offset..<size].firstIndex(of: 0) ?? size
-            defer { offset = end + 1 }
-            return String(decoding: buffer[offset..<end], as: UTF8.self)
-        }
-        guard let path = next() else { return nil }
-        while offset < size, buffer[offset] == 0 { offset += 1 }
-        for _ in 0..<max(argc, 0) { _ = next() }
-        var environment: [String: String] = [:]
-        while let entry = next(), !entry.isEmpty {
-            guard let equals = entry.firstIndex(of: "=") else { continue }
-            environment[String(entry[..<equals])] = String(entry[entry.index(after: equals)...])
-        }
-        return (path, environment)
-    }
-
-    /// Runs a tool to completion, quietly; its output if it succeeded.
-    @discardableResult
-    private static func run(_ path: String, _ arguments: [String]) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
-    }
 }
 
 // MARK: - View
@@ -556,6 +625,7 @@ final class TallyView: NSView {
         let session: SessionSnapshot
         let title: String          // session name, numbered when two share one
         let path: String           // directory, with ~ for home
+        let tmux: String           // "report:0.2", or empty outside tmux
     }
 
     /// One big badge, or one of a few side by side with a caption under each.
@@ -585,9 +655,10 @@ final class TallyView: NSView {
     private static let markX: CGFloat = 12         // mark centre, from the row's left edge
     private static let textX: CGFloat = 30         // text start, from the row's left edge
     private static let stateWidth: CGFloat = 46    // right-hand column for the state word
-    private static let widthRange: ClosedRange<CGFloat> = 200...300
+    private static let widthRange: ClosedRange<CGFloat> = 200...320
     private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
     private static let pathFont = NSFont.systemFont(ofSize: 10)
+    private static let tmuxFont = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .medium)
     private static let stateFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
     private static let captionTitleFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
     private static let captionPathFont = NSFont.systemFont(ofSize: 9)
@@ -776,7 +847,8 @@ final class TallyView: NSView {
         rows = visible.map { session in
             Row(session: session,
                 title: titles[session.id] ?? "",
-                path: session.path.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "")
+                path: session.path.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "",
+                tmux: session.tmux ?? "")
         }
 
         // Wide enough for the longest name or path, within reason; longer ones truncate.
@@ -785,7 +857,7 @@ final class TallyView: NSView {
         }
         let widest = rows.map {
             max(measure($0.title, TallyView.titleFont) + 8 + TallyView.stateWidth,
-                measure($0.path, TallyView.pathFont))
+                measure($0.path, TallyView.pathFont) + ($0.tmux.isEmpty ? 0 : 10 + measure($0.tmux, TallyView.tmuxFont)))
         }.max() ?? 0
         let wanted = 2 * TallyView.padding + TallyView.textX + widest
         listWidth = min(max(wanted, TallyView.widthRange.lowerBound), TallyView.widthRange.upperBound)
@@ -856,7 +928,7 @@ final class TallyView: NSView {
         if isList {
             drawList()
         } else if rows.isEmpty {
-            drawChip(Row(session: SessionSnapshot(id: "", state: .idle, label: ""), title: "", path: ""),
+            drawChip(Row(session: SessionSnapshot(id: "", state: .idle, label: ""), title: "", path: "", tmux: ""),
                      in: bounds, chip: TallyView.single)
         } else {
             let chip = self.chip
@@ -926,7 +998,9 @@ final class TallyView: NSView {
         drawText(row.title,
                  in: NSRect(x: inner.minX, y: inner.midY, width: inner.width, height: inner.height / 2),
                  font: TallyView.captionTitleFont, color: NSColor(white: 0.95, alpha: 1), alignment: .center)
-        drawText(row.path,
+        // In tmux, where to find it there; otherwise where it runs.
+        let detail = row.tmux.isEmpty ? row.path : row.tmux + " · " + (row.path as NSString).lastPathComponent
+        drawText(detail,
                  in: NSRect(x: inner.minX, y: inner.minY, width: inner.width, height: inner.height / 2),
                  font: TallyView.captionPathFont, color: NSColor(white: 0.95, alpha: 0.6),
                  alignment: .center, truncation: .byTruncatingMiddle)
@@ -1065,7 +1139,16 @@ final class TallyView: NSView {
                  in: NSRect(x: upper.maxX - TallyView.stateWidth, y: upper.minY, width: TallyView.stateWidth,
                             height: upper.height),
                  font: TallyView.stateFont, color: state.accent, alignment: .right)
-        drawText(row.path, in: lower, font: TallyView.pathFont, color: NSColor(white: 0.95, alpha: 0.6),
+        // Where it sits in tmux, at the end of the directory line; the path gives way to it.
+        var pathLine = lower
+        if !row.tmux.isEmpty {
+            let width = min(ceil((row.tmux as NSString).size(withAttributes: [.font: TallyView.tmuxFont]).width),
+                            lower.width / 2)
+            drawText(row.tmux, in: NSRect(x: lower.maxX - width, y: lower.minY, width: width, height: lower.height),
+                     font: TallyView.tmuxFont, color: NSColor(white: 0.95, alpha: 0.5), alignment: .right)
+            pathLine.size.width -= width + 10
+        }
+        drawText(row.path, in: pathLine, font: TallyView.pathFont, color: NSColor(white: 0.95, alpha: 0.6),
                  alignment: .left, truncation: .byTruncatingMiddle)
     }
 

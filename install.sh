@@ -3,6 +3,8 @@
 # feed it. Safe to re-run: it replaces the app and keeps your preferences.
 #
 #   ./install.sh              build, install, hook into Claude Code, start CTally
+#   ./install.sh --tmux       also set up tmux: prefix + J jumps to the session that needs
+#                             you, and the status line shows the counts
 #   ./install.sh --no-hooks   leave ~/.claude/settings.json alone
 #   ./install.sh --no-launch  install without starting CTally
 set -euo pipefail
@@ -10,11 +12,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$ROOT/build"
 APP="$HOME/Applications/CTally.app"
+CLI="$HOME/.local/bin/ctally"
 BUNDLE_ID="io.github.jinyujinyujinyu.ctally"
 hooks=1
 launch=1
+tmux=0
 for arg in "$@"; do
   case "$arg" in
+    --tmux) tmux=1 ;;
     --no-hooks) hooks=0 ;;
     --no-launch) launch=0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -74,6 +79,18 @@ if [ "$hooks" = 1 ]; then
   chmod +x "$HOME/.claude/hooks/ctally.sh"
   /usr/bin/python3 "$ROOT/scripts/configure-hooks.py" install
   echo "    Restart any Claude Code sessions already running so they pick up the hooks."
+fi
+
+echo "==> installing the ctally command at $CLI"
+mkdir -p "$(dirname "$CLI")"
+cp "$ROOT/bin/ctally" "$CLI"
+chmod +x "$CLI"
+
+if [ "$tmux" = 1 ]; then
+  echo "==> setting up tmux"
+  "$ROOT/scripts/configure-tmux.sh" install "$CLI"
+elif command -v tmux >/dev/null; then
+  echo "    Using tmux? ./install.sh --tmux adds a jump key and status-line counts."
 fi
 
 if [ "$launch" = 1 ]; then

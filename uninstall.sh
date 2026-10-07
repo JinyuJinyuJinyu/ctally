@@ -1,6 +1,7 @@
 #!/bin/bash
-# Remove CTally: the app, its hooks in ~/.claude/settings.json (backed up first), the hook
-# script, its state files and its preferences. Other Claude Code settings stay as they are.
+# Remove CTally: the app, its hooks in ~/.claude/settings.json and its block in your tmux
+# config (both backed up first), the hook script, the ctally command, its state files and
+# its preferences. Other Claude Code and tmux settings stay as they are.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -16,6 +17,10 @@ rm -f "$HOME/.claude/hooks/ctally.sh" "$HOME/.claude/hooks/claude-pet.sh"
 rmdir "$HOME/.claude/hooks" 2>/dev/null || true
 rm -rf "$HOME/.claude/ctally.d"
 if [ -L "$HOME/.claude/claude-pet.d" ]; then rm -f "$HOME/.claude/claude-pet.d"; fi
+
+echo "==> taking CTally out of tmux"
+"$ROOT/scripts/configure-tmux.sh" uninstall
+rm -f "$HOME/.local/bin/ctally"
 
 echo "==> removing ${APP:?}"
 rm -rf "${APP:?}"
