@@ -647,7 +647,8 @@ enum Processes {
 
 /// Brings a session's terminal to the front. Inside tmux, that means switching tmux to the
 /// session's pane, then raising the Terminal tab attached to that tmux session (or opening
-/// one if none is); outside tmux, raising the tab the session runs in. The claude process
+/// one if none is); outside tmux, raising the tab the session runs in, or with no terminal
+/// at all (the Claude desktop app), the app it runs in. The claude process
 /// says which: tmux leaves TMUX (its socket) and TMUX_PANE (the exact pane) in the
 /// environment of everything started inside it. All of this shells out, so it runs off the
 /// main thread, and it stays silent when anything along the way is missing.
@@ -685,8 +686,9 @@ final class SessionFocuser {
     private static func focusNow(_ pid: pid_t) {
         if let tmux = Processes.tmuxPane(of: pid) {
             focusTmux(tmux)
-        } else if let tty = Processes.tty(of: pid) {
-            raise(tty: tty, hostedBy: pid)
+        } else {
+            // No tty for a session in the Claude desktop app: its app still comes forward.
+            raise(tty: Processes.tty(of: pid), hostedBy: pid)
         }
     }
 
@@ -725,13 +727,26 @@ final class SessionFocuser {
     }
 
     /// Raises the tab showing `tty` in Terminal; any other app, just brought forward.
-    private static func raise(tty: String, hostedBy pid: pid_t) {
+    private static func raise(tty: String?, hostedBy pid: pid_t) {
         guard let app = hostApp(of: pid) else { return }
-        if app.bundleIdentifier == terminal {
+        if let tty = tty, app.bundleIdentifier == terminal {
             Processes.run("/usr/bin/osascript", raiseTab.flatMap { ["-e", $0] } + [tty])
         } else {
-            DispatchQueue.main.async { app.activate(options: [.activateIgnoringOtherApps]) }
+            activate(app)
         }
+    }
+
+    /// Brings an app forward the way the Dock does. Since macOS 14 an app can't push itself
+    /// past the active one, and CTally is never active, so asking the app directly may be
+    /// ignored; Launch Services may still do it.
+    private static func activate(_ app: NSRunningApplication) {
+        guard let url = app.bundleURL else {
+            app.activate(options: [])
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
 
     /// The nearest ancestor that is an ordinary app: Terminal, for a shell in one of its tabs.
@@ -867,6 +882,9 @@ final class TallyView: NSView {
     var onFold: (Bool) -> Void = { _ in }
     /// A click on a row (or a badge) asks for that session's terminal.
     var onSelect: (SessionSnapshot) -> Void = { _ in }
+    /// The indicator was dropped somewhere new.
+    var onDragEnd: () -> Void = {}
+    var isDragging: Bool { press?.dragging == true }
 
     private let epoch = CACurrentMediaTime()
     private let foldButton = FoldButton()
@@ -943,9 +961,13 @@ final class TallyView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { press = nil }
-        guard press?.dragging == false,
-              let index = item(at: convert(event.locationInWindow, from: nil)) else { return }
+        guard let press = press else { return }
+        self.press = nil
+        if press.dragging {
+            onDragEnd()
+            return
+        }
+        guard let index = item(at: convert(event.locationInWindow, from: nil)) else { return }
         onSelect(rows[index].session)
     }
 
@@ -1733,6 +1755,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         view.folded = UserDefaults.standard.bool(forKey: AppController.foldedKey)
         view.onFold = { [weak self] in self?.setFolded($0) }
         view.onSelect = { [weak self] in self?.focuser.focus($0.pid) }
+        view.onDragEnd = { [weak self] in self?.settleAfterDrag() }
         panel.contentView = view
 
         statusItem = makeStatusItem()
@@ -1912,14 +1935,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Size to what the view wants, keeping the bottom-right corner planted. Also does the
     /// initial placement, so it must compare the origin and not just the size.
     private func fit() {
+        // While I'm dragging it, the pointer places it; it settles once I let go.
+        guard !view.isDragging else { return }
         let wanted = view.preferredSize
         let anchor = restoredAnchor()
         var target = NSRect(x: anchor.x - wanted.width, y: anchor.y,
                             width: wanted.width, height: wanted.height)
-        // A tall list slides down rather than run off the top of the screen; the saved
-        // corner stays where I put it, for when the list shrinks again.
+        // A tall list slides down rather than run off the top of the screen, and a wide one
+        // right rather than off the left edge; the saved corner stays where I put it, for
+        // when the list shrinks again.
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: anchor.x - 1, y: anchor.y + 1)) }) {
             let visible = screen.visibleFrame
+            target.origin.x = max(min(target.minX, visible.maxX - target.width), visible.minX)
             target.origin.y = max(min(target.minY, visible.maxY - target.height), visible.minY)
         }
         let frame = panel.frame
@@ -1955,6 +1982,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         timers.append(timer)
     }
 
+    /// Dropped partly off-screen or over the Dock, it is pulled back inside, and where it
+    /// lands is the corner it grows from from now on.
+    private func settleAfterDrag() {
+        if let visible = (panel.screen ?? NSScreen.main)?.visibleFrame {
+            let frame = panel.frame
+            panel.setFrameOrigin(NSPoint(x: max(min(frame.minX, visible.maxX - frame.width), visible.minX),
+                                         y: max(min(frame.minY, visible.maxY - frame.height), visible.minY)))
+        }
+        saveAnchor()
+        fit()
+    }
+
     private func saveAnchor() {
         let frame = panel.frame
         UserDefaults.standard.set([Double(frame.maxX), Double(frame.minY)],
@@ -1972,9 +2011,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// A position saved on a monitor that is no longer attached must not come back off-screen.
+    /// A drop is settled inside the screen, so just inside the corner is enough: a folded bar
+    /// set against the top of the screen is shorter than any wider margin.
     private func isOnScreen(_ anchor: CGPoint) -> Bool {
         NSScreen.screens.contains {
-            $0.visibleFrame.contains(CGPoint(x: anchor.x - 60, y: anchor.y + 60))
+            $0.visibleFrame.contains(CGPoint(x: anchor.x - 1, y: anchor.y + 1))
         }
     }
 

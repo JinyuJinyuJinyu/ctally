@@ -22,9 +22,11 @@ dir="$HOME/.claude/ctally.d"
 input=""
 [ -t 0 ] || input=$(cat)
 
-# A string field of that JSON, by name.
+# A string field of that JSON, by name. The first one: a tool's input, later in the same
+# JSON, can carry fields of its own by the same names ("session_id", say).
 field() {
-  printf '%s\n' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+  printf '%s\n' "$input" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 \
+    | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
 # A name that is safe to use as a file name, or nothing.
@@ -67,7 +69,7 @@ case "$state" in
     agent=$(safe "$(field agent_id)")
     [ -n "$agent" ] || exit 0
     mkdir -p "$agents" 2>/dev/null
-    field agent_type > "$agents/$agent" 2>/dev/null
+    field agent_type 2>/dev/null > "$agents/.$agent" && mv -f "$agents/.$agent" "$agents/$agent" 2>/dev/null
     exit 0
     ;;
   agent-stop)
@@ -100,7 +102,10 @@ case "$state" in
 esac
 
 mkdir -p "$dir" 2>/dev/null
+# Write beside the file and rename it into place, so CTally never reads it half-written.
+# The dot keeps CTally from taking the temporary file for a session.
+tmp="$dir/.$session.$$"
 printf '%s %s %s\n' "$state" "${CLAUDE_PID:-$PPID}" "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")" \
-  > "$file" 2>/dev/null
+  2>/dev/null > "$tmp" && mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 [ "${before%% *}" = "$state" ] || redraw_tmux
 exit 0

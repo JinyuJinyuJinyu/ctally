@@ -163,7 +163,8 @@ Two pieces, connected by a folder:
    | Event | State written |
    |---|---|
    | `UserPromptSubmit` | `working` |
-   | `PreToolUse` | `working` (back to work after a permission prompt) |
+   | `PreToolUse` | `working` (a tool is about to run) |
+   | `PostToolUse` | `working` (back to work after a permission prompt) |
    | `Stop` | `done`, or still `working` if subagents or a workflow run on in the background |
    | `Notification` | `waiting` (a permission prompt, or idle input) |
    | `SessionEnd` | removes the file |
@@ -185,6 +186,7 @@ To add the hooks by hand, copy `hooks/ctally.sh` to `~/.claude/hooks/` and merge
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" done" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" waiting" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" end" }] }],
@@ -209,8 +211,9 @@ conversations otherwise.
 ### Terminal support
 
 Clicking a session works best in **Terminal.app**, with or without tmux: CTally finds the exact tab, or the
-exact tmux pane and the tab attached to it. In other terminals (iTerm2, VS Code, …) it still switches tmux to
-the right pane and brings the app forward, but can't pick the tab. The prefix + J jump key works in any terminal.
+exact tmux pane and the tab attached to it. In other terminals (iTerm2, VS Code, …) and for sessions in the
+Claude desktop app, it still switches tmux to the right pane and brings the app forward, but can't pick the
+tab. The prefix + J jump key works in any terminal.
 
 ## Uninstall
 

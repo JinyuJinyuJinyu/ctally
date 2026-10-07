@@ -21,7 +21,8 @@ HOOK = '"$HOME/.claude/hooks/ctally.sh"'
 # Each event, and the state it reports. No "matcher": these events take none.
 EVENTS = {
     "UserPromptSubmit": "working",  # a turn starts
-    "PreToolUse": "working",        # back to work after a permission prompt
+    "PreToolUse": "working",        # a tool is about to run
+    "PostToolUse": "working",       # back to work after a permission prompt
     "Stop": "done",                 # the turn is over, unless agents still run behind it
     "Notification": "waiting",      # a permission prompt, or idle waiting for input
     "SessionEnd": "end",            # the session is gone
@@ -34,9 +35,8 @@ EVENTS = {
 MARKERS = ("ctally", "claude-pet")
 
 
-def is_ours(group):
-    return any(marker in hook.get("command", "")
-               for hook in group.get("hooks", []) for marker in MARKERS)
+def is_ours(hook):
+    return any(marker in hook.get("command", "") for marker in MARKERS)
 
 
 def configure(settings, install):
@@ -44,7 +44,14 @@ def configure(settings, install):
     settings = json.loads(json.dumps(settings))  # work on a copy
     hooks = settings.get("hooks", {})
     for event in list(hooks):
-        kept = [group for group in hooks[event] if not is_ours(group)]
+        kept = []
+        for group in hooks[event]:
+            # Only our hooks go: others sharing a group with them (merged in by hand) stay.
+            theirs = [hook for hook in group.get("hooks", []) if not is_ours(hook)]
+            if len(theirs) == len(group.get("hooks", [])):
+                kept.append(group)
+            elif theirs:
+                kept.append({**group, "hooks": theirs})
         if kept:
             hooks[event] = kept
         else:
@@ -67,9 +74,17 @@ def main():
     path = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else "~/.claude/settings.json")
 
     settings = {}
-    if os.path.exists(path):
+    # Only a file that is really not there counts as empty. One that merely can't be seen (no
+    # permission, or a sandbox hiding it) would otherwise be replaced by just our hooks.
+    try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
+        exists = True
+    except FileNotFoundError:
+        exists = False
+    except OSError as error:
+        sys.exit(f"Can't read {path} ({error.strerror}); left it alone.")
+    if exists:
         try:
             settings = json.loads(text) if text.strip() else {}
         except json.JSONDecodeError as error:
@@ -78,11 +93,11 @@ def main():
             sys.exit(f"{path} does not hold a JSON object; left it alone.")
 
     updated = configure(settings, install)
-    if updated == settings and os.path.exists(path):
+    if updated == settings and exists:
         print(f"Claude Code hooks already {'installed' if install else 'removed'} in {path}")
         return
 
-    if os.path.exists(path):
+    if exists:
         # Never overwrite an earlier backup, even one made the same second.
         stamp = time.strftime('%Y%m%d-%H%M%S')
         backup, n = f"{path}.bak.{stamp}", 1
@@ -91,15 +106,17 @@ def main():
             backup = f"{path}.bak.{stamp}-{n}"
         shutil.copy2(path, backup)
         print(f"Backed up {path} to {backup}")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # A symlink (into a dotfiles checkout, say) is written through, not replaced by a file.
+    target = os.path.realpath(path)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
     # Write beside the file, then swap it in, so a crash can't leave half a settings file.
-    fd, temp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.", suffix=".json")
+    fd, temp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".settings.", suffix=".json")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(updated, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    if os.path.exists(path):
-        shutil.copymode(path, temp)
-    os.replace(temp, path)
+    if os.path.exists(target):
+        shutil.copymode(target, temp)
+    os.replace(temp, target)
     print(f"Claude Code hooks {'installed in' if install else 'removed from'} {path}")
 
 
