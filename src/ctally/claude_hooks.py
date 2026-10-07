@@ -25,13 +25,16 @@ SCRIPT = Path.home() / ".claude" / "hooks" / "ctally.sh"
 HOOK = '"$HOME/.claude/hooks/ctally.sh"'
 STATUS = '"$HOME/.claude/hooks/ctally-statusline.sh"'    # beside it
 
-# Each event, and the state it reports. No "matcher": these events take none.
+# Each event, and the state it reports. No "matcher": each hook hears all of its event.
 EVENTS = {
     "UserPromptSubmit": "working",  # a turn starts
     "PreToolUse": "working",        # a tool is about to run
     "PostToolUse": "working",       # back to work after a permission prompt
+    "PostToolUseFailure": "working",  # the same, when the tool failed
+    "PermissionRequest": "asking",  # a permission, a question or a plan to approve, on screen
     "Stop": "done",                 # the turn is over, unless agents still run behind it
-    "Notification": "waiting",      # a permission prompt, or idle waiting for input
+    "StopFailure": "failed",        # the turn ended on an error: the usage limit, say
+    "Notification": "waiting",      # a permission prompt still open, or idle waiting for input
     "SessionEnd": "end",            # the session is gone
     "SubagentStart": "agent-start", # a subagent, maybe one of a workflow's, sets off
     "SubagentStop": "agent-stop",   # and comes back

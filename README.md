@@ -18,7 +18,8 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 | | State | Meaning |
 |---|---|---|
 | ▶ cyan | **working** | Claude's turn: it's working, or its subagents or a workflow still are |
-| ⏸ amber | **waiting** | your turn: a permission prompt, or it's waiting for input |
+| ⏸ amber | **waiting** | your turn: a permission prompt, a question or a plan to approve, or it's waiting for input |
+| ⏸ amber | **limit** | stopped by your plan's usage limit; it turns to done when the limit resets |
 | ✓ green | **done** | your turn: the turn finished, and it stays here until your next prompt |
 | • slate | **idle** | nothing running |
 
@@ -78,6 +79,8 @@ you've switched them on.
 - **Hover over any of them** for the details, and how fresh they are. The menu bar (top bar) icon's menu
   lists them too.
 - **Colours**: a bar turns amber at 75% and red at 90%. Numbers more than an hour old are dimmed.
+- **Hitting a limit** shows it at 100% at once, and the sessions it stopped as **limit**. A prompt you send
+  before it resets doesn't make them look busy, because it can't get through.
 - **tmux's status line** gets `5h 71% 7d 49%` after the counts, coloured the same way, and `ctally usage`
   prints the lot:
 
@@ -110,7 +113,8 @@ started inside it.
 - **Click a row** and tmux switches to that exact pane. Then the Terminal tab attached to that tmux session
   comes forward, or a new Terminal window attaches to it if no tab shows it.
 - **prefix + J jumps to the session that needs you**, without touching the mouse: waiting sessions first,
-  then finished ones, longest-waiting first. Press it again for the next one.
+  then finished ones, longest-waiting first, passing over those stopped by the usage limit. Press it again
+  for the next one.
 - **The counts sit in tmux's status line** (`!1 ▶2 ✓5`: waiting, working, done), and they change the moment a
   session does. Your plan's session and week usage follow them (`5h 71% 7d 49%`).
 
@@ -236,14 +240,19 @@ Two pieces, connected by a folder:
    |---|---|
    | `UserPromptSubmit` | `working` |
    | `PreToolUse` | `working` (a tool is about to run) |
-   | `PostToolUse` | `working` (back to work after a permission prompt) |
+   | `PostToolUse` / `PostToolUseFailure` | `working` (back to work after a permission prompt) |
+   | `PermissionRequest` | `waiting`, the moment a permission, a question or a plan to approve is on screen |
    | `Stop` | `done`, or still `working` if subagents or a workflow run on in the background |
-   | `Notification` | `waiting` (a permission prompt, or idle input) |
+   | `StopFailure` | `limited` when the usage limit stopped the turn; `waiting` for a login or billing problem; else `done` |
+   | `Notification` | `waiting` (idle input, or a permission prompt still open) |
    | `SessionEnd` | removes the file |
    | `SubagentStart` / `SubagentStop` | adds / removes a file per agent in `~/.claude/ctally.d/.agents/<session id>/` |
 
    A `waiting` never overwrites `done`: Claude Code also sends its idle notification after a turn ends. Nor
    does the idle notification count while the session's agents are still out.
+   A usage limit hit is also noted in `~/.claude/ctally.d/.limit`: what Claude Code said, and when the limit
+   resets, from the status line. Until then a new prompt leaves the session `limited`, and the limit shows
+   as used up. The note goes once a turn gets through, or Claude Code says the limit has reset.
    Inside tmux, a change of state also redraws tmux's status lines, so the counts there update at once.
 
    **The status line.** `ctally-statusline.sh` saves what Claude Code hands its status line, the latest from
@@ -266,7 +275,10 @@ CTally's as one quoted argument: `"\"$HOME/.claude/hooks/ctally-statusline.sh\" 
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" asking" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" done" }] }],
+    "StopFailure":      [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" failed" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" waiting" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" end" }] }],
     "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" agent-start" }] }],

@@ -54,6 +54,36 @@ def test_unknown_words_mean_idle_and_junk_is_skipped(dirs):
     assert [(s.id, s.state) for s in sessions] == [("a", State.IDLE)]
 
 
+def test_limited_shows_as_waiting_until_the_limit_resets(dirs):
+    state, projects = dirs
+    write(state, "a", f"limited {LIVE} p\n")
+    reader = StateReader(state, projects)
+    write(state, ".limit", f"{int(time.time()) + 3600} You've hit your session limit · resets 7:30pm\n")
+    [session] = reader.poll()
+    assert (session.state, session.limited) == (State.WAITING, True)
+    write(state, ".limit", "0 You've hit your Fable limit\n")              # when: not known
+    assert reader.poll()[0].limited
+    write(state, ".limit", f"{int(time.time()) - 5} You've hit your session limit\n")
+    [session] = reader.poll()
+    assert (session.state, session.limited) == (State.DONE, False)   # over: it just sits there
+    (state / ".limit").unlink()                                      # a turn has got through since
+    assert reader.poll()[0].state is State.DONE
+
+
+def test_the_limit_note(dirs):
+    from ctally.sessions import read_limit
+    state, _ = dirs
+    assert read_limit(state) is None
+    write(state, ".limit", "1791379800 You've hit your session limit · resets 7:30pm (Australia/Sydney)\n", mtime=1000)
+    hit = read_limit(state)
+    assert (hit.resets_at, hit.key, hit.noted) == (1791379800, ("session",), 1000)
+    assert hit.holds(1791379799) and not hit.holds(1791379800)
+    write(state, ".limit", "0 You've hit your weekly limit\n")
+    assert (read_limit(state).resets_at, read_limit(state).key, read_limit(state).holds(9e12)) == (None, ("week",), True)
+    write(state, ".limit", "junk\n")
+    assert (read_limit(state).resets_at, read_limit(state).key) == (None, None)
+
+
 def test_state_words_any_case():
     assert State.parse("DONE") is State.DONE
     assert State.parse("") is State.IDLE

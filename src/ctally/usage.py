@@ -11,6 +11,9 @@ Two places, both written by Claude Code, both only read here: no network, no cre
 - CTally's status line saves what Claude Code hands every status line after each reply: the
   session and the week, nothing else (~/.claude/ctally.d/.statusline). Where it's newer, it
   wins for those two.
+
+Neither moves when a request is refused for the limit, so the hook's note of a limit hit
+(~/.claude/ctally.d/.limit) marks that one used up until it resets.
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from .sessions import STATE_DIR
+from .sessions import STATE_DIR, LimitHit, read_limit
 
 CLAUDE_JSON = Path(os.environ.get("CTALLY_CLAUDE_JSON") or Path.home() / ".claude.json")
 STATUS_LINE = STATE_DIR / ".statusline"
@@ -39,6 +42,7 @@ WINDOWS = (
 )
 PERIODS = {"session": "session", "daily": "day", "weekly": "week", "monthly": "month"}
 SEVERITY = {"warning": 1, "critical": 2, "exceeded": 2, "rejected": 2, "limited": 2}
+SPANS = {("session",): 5 * 3600, ("week",): 7 * 86400}     # how long each window runs
 
 
 class Limit(NamedTuple):
@@ -91,7 +95,8 @@ def read(path: Path | None = None, live: Path | None = None) -> Usage | None:
         cached = parse(json.loads((path or CLAUDE_JSON).read_text()))
     except (OSError, ValueError):
         cached = None
-    return merge(cached, read_live(live))
+    live = live or STATUS_LINE
+    return with_hit(merge(cached, read_live(live)), read_limit(live.parent), time.time())
 
 
 def read_live(path: Path | None = None) -> Usage | None:
@@ -127,6 +132,28 @@ def merge(cached: Usage | None, live: Usage | None) -> Usage | None:
     fresh = {limit.key: limit for limit in live.limits}
     limits = [fresh.pop(limit.key, limit) for limit in cached.limits] + list(fresh.values())
     return Usage(_ordered(limits), live.fetched_at)
+
+
+def with_hit(usage: Usage | None, hit: LimitHit | None, now: float) -> Usage | None:
+    """The limit a turn just ran into, used up whatever the numbers said: the refused request
+    doesn't update them, so they'd sit at 99%, say, until Claude Code next fetched /usage."""
+    key = hit.key if hit else None
+    if key is None:
+        return usage
+    current = next((limit for limit in usage.limits if limit.key == key), None) if usage else None
+    resets = hit.resets_at
+    if (resets is None and current is not None and current.resets_at is not None
+            and hit.noted >= current.resets_at - SPANS[key]):
+        resets = current.resets_at              # it was hit in the window these numbers are for
+    if resets is None or now >= resets:
+        return usage
+    if current is None:
+        _, _, title, short, tag = next(window for window in WINDOWS if window[1] == key)
+        current = Limit(key, title, short, tag, 100.0, resets)
+        usage = Usage(_ordered((usage.limits if usage else ()) + (current,)),
+                      usage.fetched_at if usage else hit.noted)
+    full = current._replace(percent=max(current.percent, 100.0), resets_at=resets, severity="exceeded")
+    return usage._replace(limits=tuple(full if limit.key == key else limit for limit in usage.limits))
 
 
 def parse(config) -> Usage | None:
@@ -300,6 +327,7 @@ class UsageReader:
     def __init__(self, path: Path | None = None, live: Path | None = None):
         self._cache = _Watched(path or CLAUDE_JSON, lambda data, _: parse(data))
         self._live = _Watched(live or STATUS_LINE, parse_live)
+        self._hits = self._live.path.parent        # the hook's .limit sits beside it
         self._checked = -math.inf
         self._usage: Usage | None = None
 
@@ -307,7 +335,7 @@ class UsageReader:
         now = time.monotonic()
         if now - self._checked >= UsageReader.EVERY:
             self._checked = now
-            self._usage = merge(self._cache.poll(), self._live.poll())
+            self._usage = with_hit(merge(self._cache.poll(), self._live.poll()), read_limit(self._hits), time.time())
         return self._usage
 
 

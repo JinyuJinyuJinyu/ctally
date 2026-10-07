@@ -995,7 +995,8 @@ class TallyView(QWidget):
         lower = QRectF(left, main.y() + half, width, half - 2)
         draw_text(painter, row.title, QRectF(upper.x(), upper.y(), upper.width() - TallyView.STATE_WIDTH - 6, upper.height()),
                   self.fonts.title, white(0.95, 1))
-        draw_text(painter, state.value, QRectF(upper.right() - TallyView.STATE_WIDTH, upper.y(), TallyView.STATE_WIDTH, upper.height()),
+        word = "limit" if row.session.limited else state.value     # stopped by the usage limit
+        draw_text(painter, word, QRectF(upper.right() - TallyView.STATE_WIDTH, upper.y(), TallyView.STATE_WIDTH, upper.height()),
                   self.fonts.state, ACCENT[state], Qt.AlignRight)
         # Where it sits in tmux, at the end of the directory line; the path gives way to it.
         path_line = QRectF(lower)

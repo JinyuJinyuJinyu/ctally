@@ -1,8 +1,10 @@
 """What CTally knows about Claude Code sessions.
 
 CTally's hooks keep one file per session in ~/.claude/ctally.d/<session id>, holding
-"<state> <pid> <project name>" (working | done | waiting; anything else means idle), and a
-file per running subagent in ~/.claude/ctally.d/.agents/<session id>/. Each session's name
+"<state> <pid> <project name>" (working | done | waiting | limited; anything else means
+idle), and a file per running subagent in ~/.claude/ctally.d/.agents/<session id>/. A session
+stopped by the plan's usage limit shows as waiting until the limit resets (.limit says when).
+Each session's name
 and directory come from its transcript in ~/.claude/projects/, where it sits in tmux from
 its process's environment, and what a workflow is up to from its journal.
 """
@@ -17,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import NamedTuple
 
 from . import system
 
@@ -82,6 +85,7 @@ class Session:
     path: str | None = None         # directory the session started in, from the transcript
     tmux: str | None = None         # where it sits in tmux, "report:0.2", if it runs there
     agents: Agents | None = None    # its subagents, while any run
+    limited: bool = False           # waiting on the plan's usage limit, not on me
 
 
 # MARK: Session names
@@ -380,6 +384,35 @@ class AgentWatcher:
 
 # MARK: The state directory
 
+class LimitHit(NamedTuple):
+    """The usage limit a turn last ran into, as the hook noted it in .limit: what Claude Code
+    said, and when the limit resets if the status line knew."""
+    resets_at: float | None
+    message: str            # "You've hit your session limit · resets 7:30pm (Australia/Sydney)"
+    noted: float            # when it was hit
+
+    @property
+    def key(self) -> tuple | None:
+        """Which of the usage limits it is, as usage.Limit.key has it, if that's clear."""
+        text = self.message.lower()
+        return ("session",) if "session limit" in text else ("week",) if "weekly limit" in text else None
+
+    def holds(self, now: float) -> bool:
+        """Until it resets; not knowing when, until the hook sees a turn get through."""
+        return self.resets_at is None or now < self.resets_at
+
+
+def read_limit(directory: Path = STATE_DIR) -> LimitHit | None:
+    path = directory / ".limit"
+    try:
+        noted = path.stat().st_mtime
+        resets, _, message = path.read_text(errors="replace").strip().partition(" ")
+    except OSError:
+        return None
+    seconds = int(resets) if resets.isdigit() else 0
+    return LimitHit(float(seconds) if seconds else None, message, noted)
+
+
 class StateReader:
     """Watches one state file per session, and the folder of running agents beside it."""
 
@@ -392,6 +425,7 @@ class StateReader:
         label: str
         modified: float
         size: int
+        limited: bool = False
 
         @property
         def alive(self) -> bool:
@@ -405,6 +439,7 @@ class StateReader:
         self.cache: dict[str, StateReader.Entry] = {}
         self.first_seen: dict[str, float] = {}
         self.last_prune = 0.0
+        self.limit: LimitHit | None = None
 
     def poll(self) -> list[Session]:
         try:
@@ -434,6 +469,7 @@ class StateReader:
         self.first_seen = {k: v for k, v in self.first_seen.items() if k in names}
 
         self._prune()
+        self.limit = read_limit(self.dir)
         keep = set(self.cache)
         self.names.forget(keep)
         self.locator.forget(keep)
@@ -451,10 +487,14 @@ class StateReader:
     def _snapshot(self, name: str) -> Session:
         entry = self.cache[name]
         title, path = self.names.info(name)
-        return Session(id=name, state=entry.state, label=entry.label, pid=entry.pid,
+        state, limited = entry.state, entry.limited
+        if limited and not (self.limit and self.limit.holds(time.time())):
+            state, limited = State.DONE, False      # the limit is over; the session just sits
+        return Session(id=name, state=state, label=entry.label, pid=entry.pid,
                        title=title, path=path,
                        tmux=self.locator.location(name, entry.pid),
-                       agents=self.watcher.activity(name, self.names.transcript(name)))
+                       agents=self.watcher.activity(name, self.names.transcript(name)),
+                       limited=limited)
 
     @staticmethod
     def _read(path: Path, modified: float, size: int) -> StateReader.Entry | None:
@@ -466,7 +506,9 @@ class StateReader:
             return None
         # "<word> <pid> <project name>": the name may itself contain spaces.
         pid = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else 0
-        return StateReader.Entry(State.parse(fields[0]), pid, " ".join(fields[2:]), modified, size)
+        limited = fields[0] == "limited"
+        state = State.WAITING if limited else State.parse(fields[0])
+        return StateReader.Entry(state, pid, " ".join(fields[2:]), modified, size, limited)
 
     def _prune(self) -> None:
         """Sessions killed without a SessionEnd hook leave their file behind, and any

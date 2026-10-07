@@ -1,11 +1,16 @@
 #!/bin/sh
 # Claude Code hook for CTally: records this session's state where CTally looks.
 #
-#   ctally.sh working | done | waiting | end | agent-start | agent-stop
+#   ctally.sh working | asking | done | failed | waiting | end | agent-start | agent-stop
 #
 # Writes ~/.claude/ctally.d/<session id> as "<state> <claude pid> <project folder>";
 # "end" removes it. A "waiting" never overwrites "done": Claude Code also sends its idle
 # notification after a turn has finished, and the turn being finished is what matters.
+# "asking" is a permission, a question or a plan put to me, the moment it's on screen.
+#
+# A turn stopped by the plan's usage limit leaves the session "limited", and notes the
+# limit in ~/.claude/ctally.d/.limit as "<Unix time it resets, or 0> <what Claude Code
+# said>". A prompt sent before then goes nowhere, so it leaves the session limited too.
 #
 # Subagents, a workflow's included, each get a file in ~/.claude/ctally.d/.agents/<session
 # id>/ while they run. A turn that ends with agents or a workflow still running in the
@@ -41,6 +46,7 @@ session=$(safe "${CLAUDE_CODE_SESSION_ID:-$(field session_id)}")
 session="${session:-default}"
 file="$dir/$session"
 agents="$dir/.agents/$session"
+limit="$dir/.limit"
 before=$(cat "$file" 2>/dev/null)
 
 # In the background, with nothing left attached to Claude Code's pipes.
@@ -56,6 +62,36 @@ redraw_tmux() {
 background_running() {
   printf '%s\n' "$input" | tr '{' '\n' | grep -E '"status" *: *"(running|pending)"' \
     | grep -qE '"type" *: *"(subagent|workflow)"'
+}
+
+# Notes the usage limit a turn just ran into: which one, as Claude Code put it ("You've hit
+# your session limit · resets 7:30pm (Australia/Sydney)"), and when that window resets, from
+# what CTally's status line saw last. 0 when that's not known.
+note_limit() {
+  message=$(field last_assistant_message)
+  case "$message" in
+    *"session limit"*) window=five_hour ;;
+    *"weekly limit"*) window=seven_day ;;
+    *) window="" ;;
+  esac
+  resets=0
+  if [ -n "$window" ]; then
+    resets=$(grep -o "\"$window\":{[^}]*}" "$dir/.statusline" 2>/dev/null | grep -o '"resets_at":[0-9]*' \
+      | head -n 1 | sed 's/.*://')
+    [ "${resets:-0}" -gt "$(date +%s)" ] 2>/dev/null || resets=0
+  fi
+  mkdir -p "$dir" 2>/dev/null
+  printf '%s %s\n' "$resets" "$message" 2>/dev/null > "$limit.$$" && mv -f "$limit.$$" "$limit" 2>/dev/null \
+    || rm -f "$limit.$$" 2>/dev/null
+}
+
+# Whether that limit still holds: until it resets, or, not knowing when, until something
+# shows it has.
+limit_holds() {
+  [ -f "$limit" ] || return 1
+  read -r resets _ < "$limit" 2>/dev/null
+  case "$resets" in "" | *[!0-9]*) resets=0 ;; esac
+  [ "$resets" -eq 0 ] || [ "$resets" -gt "$(date +%s)" ]
 }
 
 case "$state" in
@@ -79,6 +115,7 @@ case "$state" in
     exit 0
     ;;
   done)
+    rm -f "$limit"               # a turn got through, so no limit is in the way now
     if background_running; then
       # Not done yet: the marker says so to the idle notification that follows.
       state=working
@@ -87,17 +124,48 @@ case "$state" in
       rm -rf "$agents"           # nothing of this session's is running any more
     fi
     ;;
-  waiting)
-    case "$before" in done*) exit 0 ;; esac
-    case "$(field notification_type)" in
-      # Waiting on its own agents, not on me.
-      idle_prompt) [ -d "$agents" ] && exit 0 ;;
-      # News, not a question.
-      agent_completed | auth_success | elicitation_complete | elicitation_response | \
-      computer_use_enter | computer_use_exit) exit 0 ;;
+  failed)
+    # Claude Code gave up on the turn, and says why.
+    case "$(field error)" in
+      rate_limit)
+        state=limited
+        note_limit
+        ;;
+      # Mine to sort out.
+      authentication_failed | oauth_org_not_allowed | verification_required | account_on_hold | billing_error)
+        state=waiting ;;
+      # Overloaded, a server error, and so on: the turn is over, the error on screen.
+      *) state=done ;;
     esac
     ;;
-  working) ;;
+  waiting)
+    case "$(field notification_type)" in
+      # The usage limit is over: Claude carries on by itself, or waits for me to say so.
+      quota_auto_resume_fired)
+        rm -f "$limit"
+        state=working
+        ;;
+      quota_auto_resume_stale) rm -f "$limit" ;;
+      # Waiting on its own agents, not on me.
+      idle_prompt)
+        case "$before" in done* | limited*) exit 0 ;; esac
+        [ -d "$agents" ] && exit 0
+        ;;
+      # News, not a question.
+      agent_completed | auth_success | elicitation_complete | elicitation_response | \
+      computer_use_enter | computer_use_exit | quota_auto_resume_disabled | push_notification | \
+      model_refusal_fallback | auth_storage_failure) exit 0 ;;
+      *) case "$before" in done* | limited*) exit 0 ;; esac ;;
+    esac
+    ;;
+  asking) state=waiting ;;
+  working)
+    # A prompt sent while the limit holds goes nowhere. Anything Claude does shows it has
+    # got through: a tool, a permission, the end of the turn.
+    case "$before" in
+      limited*) [ "$(field hook_event_name)" = UserPromptSubmit ] && limit_holds && exit 0 ;;
+    esac
+    ;;
   *) exit 0 ;;
 esac
 

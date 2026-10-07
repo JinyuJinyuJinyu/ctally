@@ -30,11 +30,12 @@ from typing import NamedTuple
 
 from . import __version__, system
 from . import usage as limits
-from .sessions import STATE_DIR
+from .sessions import STATE_DIR, read_limit
 
 GLYPH = {"waiting": "!", "working": "▶", "done": "✓", "idle": "·"}
 COLOUR = {"waiting": "#ffb329", "working": "#4accf2", "done": "#45e087", "idle": "#99a6bd"}
-RANK = {"waiting": 0, "done": 1, "working": 2, "idle": 3}
+# Stopped by the usage limit: shown as waiting, but nothing there for me to do.
+RANK = {"waiting": 0, "done": 1, "working": 2, "limited": 2, "idle": 3}
 LEVEL_COLOUR = ("#99a6bd", "#ffb329", "#ff6661")    # usage: fine, getting close, nearly out
 
 
@@ -55,6 +56,7 @@ def live_sessions() -> list[Live]:
         names = [n for n in os.listdir(STATE_DIR) if not n.startswith(".")]
     except OSError:
         names = []
+    limit = read_limit(STATE_DIR)
     for name in names:
         path = STATE_DIR / name
         try:
@@ -68,6 +70,8 @@ def live_sessions() -> list[Live]:
         if not system.is_alive(pid):
             continue
         state = fields[0] if fields[0] in RANK else "idle"
+        if state == "limited" and not (limit and limit.holds(time.time())):
+            state = "done"                  # the limit is over; the session just sits
         found.append(Live(RANK[state], modified, state, pid, name, " ".join(fields[2:]) or "?"))
     return sorted(found)
 
@@ -82,7 +86,8 @@ def agents_running(sid: str) -> int:
 def status(tmux: bool) -> None:
     counts: dict[str, int] = {}
     for session in live_sessions():
-        counts[session.state] = counts.get(session.state, 0) + 1
+        state = "waiting" if session.state == "limited" else session.state
+        counts[state] = counts.get(state, 0) + 1
     items = []
     for state in ("waiting", "working", "done", "idle"):
         if counts.get(state):

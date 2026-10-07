@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ctally import usage
-from ctally.usage import Limit, Usage, UsageReader, merge, parse, parse_live
+from ctally.usage import Limit, Usage, UsageReader, merge, parse, parse_live, with_hit
 
 ACCOUNT = "00000000-0000-4000-8000-000000000001"
 FETCHED = 1_791_352_784_726            # ms
@@ -264,6 +264,55 @@ def test_reader_looks_only_every_so_often(tmp_path):
     assert reader.poll() is None                     # within the couple of seconds
     reader._checked -= UsageReader.EVERY
     assert reader.poll() is not None
+
+
+# MARK: A limit hit
+
+def hit(resets_at=None, message="You've hit your session limit · resets 7:30pm (Australia/Sydney)", noted=1791360000):
+    from ctally.sessions import LimitHit
+    return LimitHit(resets_at, message, noted)
+
+
+def test_a_hit_limit_is_used_up_whatever_the_numbers_said():
+    live = parse_live(status_line(five=99.4), 1791359000)               # the last reply before the hit
+    now = 1791360100
+    full = with_hit(live, hit(1791361800), now)
+    session = full.limits[0]
+    assert (session.percent, session.resets_at, session.level, usage.percent_text(session)) == (100, 1791361800, 2, "100%")
+    assert full.limits[1] == live.limits[1] and full.fetched_at == live.fetched_at
+    assert with_hit(parse_live(status_line(five=109), 1), hit(1791361800), now).limits[0].percent == 109
+    assert with_hit(live, hit(1791361800), 1791361800) == live          # it has reset
+    weekly = with_hit(live, hit(1791630000, "You've hit your weekly limit"), now)
+    assert [l.percent for l in weekly.limits] == [99.4, 100]
+    assert with_hit(live, hit(1791361800, "You've hit your Fable limit"), now) == live
+    assert with_hit(live, None, now) == live
+
+
+def test_a_hit_without_a_reset_time_borrows_the_window_it_was_hit_in():
+    live = parse_live(status_line(five=97), 1791359000)                  # resets 1791361800
+    assert with_hit(live, hit(None, noted=1791361800 - 3600), 1791360100).limits[0].percent == 100
+    stale = hit(None, noted=1791361800 - 6 * 3600)                       # hit in an earlier window
+    assert with_hit(live, stale, 1791360100) == live
+
+
+def test_a_hit_with_nothing_else_known():
+    full = with_hit(None, hit(1791361800), 1791360100)
+    assert [(l.title, l.percent, l.tag) for l in full.limits] == [("Current session", 100, "5h")]
+    assert full.fetched_at == 1791360000
+    assert with_hit(None, hit(None), 1791360100) is None
+
+
+def test_read_and_the_reader_see_the_hook_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(UsageReader, "EVERY", 0)
+    live = tmp_path / ".statusline"
+    data = status_line(five=99)
+    data["rate_limits"]["five_hour"]["resets_at"] = int(time.time()) + 3600
+    live.write_text(json.dumps(data))
+    reader = UsageReader(tmp_path / ".claude.json", live)
+    assert reader.poll().limits[0].percent == 99
+    (tmp_path / ".limit").write_text("0 You've hit your session limit · resets 7:30pm\n")
+    assert reader.poll().limits[0].percent == 100
+    assert usage.read(tmp_path / ".claude.json", live).limits[0].percent == 100
 
 
 # MARK: Words

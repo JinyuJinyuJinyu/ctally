@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 
 from conftest import DATA, HOOK
 
@@ -230,6 +231,107 @@ def test_replay_of_a_real_session(hook):
     assert [state for _, state, _ in trace[settled:]] == ["done", "working", "done", None]
     assert hook.agents(sid) is None
     assert json.loads((DATA / "hooks.log").read_text().splitlines()[0].split("\t", 2)[2])["session_id"] == sid
+
+
+# MARK: Questions, and turns that fail
+
+def test_asking_says_waiting_at_once_even_after_done(hook):
+    hook("working", payload())
+    hook("asking", payload(hook_event_name="PermissionRequest", tool_name="AskUserQuestion"))
+    assert hook.state(SID) == "waiting"
+    hook("working", payload(hook_event_name="PostToolUseFailure"))
+    assert hook.state(SID) == "working"
+    hook("done", payload())
+    hook("asking", payload(tool_name="Bash"))      # a background agent wants a permission
+    assert hook.state(SID) == "waiting"
+
+
+SESSION_HIT = "You've hit your session limit · resets 7:30pm (Australia/Sydney)"
+
+
+def failed(hook, error="rate_limit", message=SESSION_HIT, **fields):
+    """StopFailure, as Claude Code sends it: UTF-8 as it is, not \\u escapes."""
+    return hook("failed", json.dumps(payload(hook_event_name="StopFailure", error=error,
+                                             last_assistant_message=message, **fields), ensure_ascii=False))
+
+
+def seen_limits(hook, five_hour: int, seven_day: int) -> None:
+    """What CTally's status line saved after the last reply."""
+    hook.dir.mkdir(parents=True, exist_ok=True)
+    (hook.dir / ".statusline").write_text(json.dumps({"session_id": "other", "rate_limits": {
+        "five_hour": {"used_percentage": 99.4, "resets_at": five_hour},
+        "seven_day": {"used_percentage": 61, "resets_at": seven_day}}}, separators=(",", ":")))
+
+
+def noted(hook) -> str | None:
+    try:
+        return (hook.dir / ".limit").read_text()
+    except OSError:
+        return None
+
+
+def test_the_usage_limit_leaves_the_session_limited_and_notes_when_it_resets(hook):
+    later, much_later = int(time.time()) + 3600, int(time.time()) + 5 * 86400
+    seen_limits(hook, later, much_later)
+    hook("working", payload())
+    failed(hook)
+    assert hook.state(SID) == "limited"
+    assert noted(hook) == f"{later} {SESSION_HIT}\n"
+    failed(hook, message="You've hit your weekly limit · resets Oct 10, 10pm (Australia/Sydney)")
+    assert noted(hook).startswith(f"{much_later} You've hit your weekly limit")
+    failed(hook, message="You've hit your Fable limit")             # which window: not known
+    assert noted(hook) == "0 You've hit your Fable limit\n"
+    seen_limits(hook, int(time.time()) - 60, much_later)            # the status line is out of date
+    failed(hook)
+    assert noted(hook) == f"0 {SESSION_HIT}\n"
+    assert sorted(os.listdir(hook.dir)) == [".limit", ".statusline", SID]
+
+
+def test_a_prompt_while_the_limit_holds_stays_limited(hook):
+    seen_limits(hook, int(time.time()) + 3600, int(time.time()) + 86400)
+    failed(hook)
+    hook("working", payload(hook_event_name="UserPromptSubmit", prompt="go on"))
+    assert hook.state(SID) == "limited"
+    hook("waiting", payload(notification_type="idle_prompt"))
+    assert hook.state(SID) == "limited"
+    hook("working", payload(hook_event_name="PreToolUse"))        # it got through after all
+    assert hook.state(SID) == "working"
+
+
+def test_a_prompt_once_the_limit_has_reset_is_working(hook):
+    seen_limits(hook, int(time.time()) + 3600, int(time.time()) + 86400)
+    failed(hook)
+    (hook.dir / ".limit").write_text(f"{int(time.time()) - 5} {SESSION_HIT}\n")
+    hook("working", payload(hook_event_name="UserPromptSubmit"))
+    assert hook.state(SID) == "working"
+
+
+def test_a_finished_turn_or_claude_carrying_on_ends_the_limit(hook):
+    failed(hook)
+    hook("done", payload())
+    assert hook.state(SID) == "done" and noted(hook) is None
+    failed(hook)
+    hook("waiting", payload(notification_type="quota_auto_resume_fired"))
+    assert hook.state(SID) == "working" and noted(hook) is None
+    failed(hook)
+    hook("waiting", payload(notification_type="quota_auto_resume_stale"))   # "press enter to continue"
+    assert hook.state(SID) == "waiting" and noted(hook) is None
+
+
+def test_other_failures(hook):
+    for error, state in [("authentication_failed", "waiting"), ("billing_error", "waiting"),
+                         ("overloaded", "done"), ("server_error", "done"), ("", "done")]:
+        hook("working", payload())
+        failed(hook, error=error, message="API Error")
+        assert hook.state(SID) == state, error
+    assert noted(hook) is None
+
+
+def test_more_news_notifications_are_ignored(hook):
+    hook("working", payload())
+    for kind in ("quota_auto_resume_disabled", "push_notification", "model_refusal_fallback", "auth_storage_failure"):
+        hook("waiting", payload(notification_type=kind))
+        assert hook.state(SID) == "working", kind
 
 
 # MARK: The status line script

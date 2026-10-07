@@ -58,6 +58,22 @@ def test_status_counts_most_urgent_first(state, capsys):
     assert capsys.readouterr().out == "#[fg=#ffb329]!1 #[fg=#4accf2]▶1 #[fg=#45e087]✓2 #[fg=#99a6bd]·1#[default]\n"
 
 
+def test_limited_sessions_count_as_waiting_but_jump_skips_them(state, capsys, monkeypatch):
+    pid = os.getpid()
+    write(state, "a", f"limited {pid} a\n")
+    write(state, "b", f"waiting {pid} b\n")
+    write(state, ".limit", f"{int(time.time()) + 3600} You've hit your session limit\n")
+    cli.main(["status"])
+    assert capsys.readouterr().out == "!2\n"
+    assert [(s.id, s.state) for s in cli.live_sessions()] == [("b", "waiting"), ("a", "limited")]
+    monkeypatch.setattr(cli.system, "tmux_pane", lambda pid: system.TmuxPane("tmux", "/sock", "%1"))
+    assert cli.jump("%9", None, None) == 1
+    assert "next up is b (waiting)" in capsys.readouterr().err
+    write(state, ".limit", f"{int(time.time()) - 1} You've hit your session limit\n")    # it has reset
+    cli.main(["status"])
+    assert capsys.readouterr().out == "!1 ✓1\n"
+
+
 def test_status_with_nothing(state, capsys):
     cli.main(["status"])
     cli.main(["status", "--tmux"])
