@@ -97,7 +97,8 @@ Two pieces, connected by a folder:
    | Event | State written |
    |---|---|
    | `UserPromptSubmit` | `working` |
-   | `PreToolUse` | `working` (back to work after a permission prompt) |
+   | `PreToolUse` | `working` (a tool is about to run) |
+   | `PostToolUse` | `working` (back to work after a permission prompt) |
    | `Stop` | `done` |
    | `Notification` | `waiting` (a permission prompt, or idle input) |
    | `SessionEnd` | removes the file |
@@ -116,6 +117,7 @@ To add the hooks by hand, copy `hooks/ctally.sh` to `~/.claude/hooks/` and merge
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" done" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" waiting" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" end" }] }]
