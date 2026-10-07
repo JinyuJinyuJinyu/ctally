@@ -366,6 +366,9 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 .venv/bin/python tools/snapshot.py   # the README's screenshots, from demo data
 ```
 
+Every push runs the tests and pyflakes on GitHub (`.github/workflows/test.yml`), on Ubuntu with Python 3.9 and
+3.14 and on macOS with 3.14.
+
 Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR`, `CTALLY_SESSIONS_DIR`, `CTALLY_CONFIG_DIR` and
 `CTALLY_CLAUDE_JSON` to run it against other folders than `~/.claude/ctally.d`, `~/.claude/projects`,
 `~/.claude/sessions` and its own settings, and another file than `~/.claude.json`.
