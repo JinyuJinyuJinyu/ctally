@@ -28,7 +28,8 @@ fi
 
 echo "==> building"
 mkdir -p "$BUILD"
-swiftc -O "$ROOT/ctally.swift" -o "$BUILD/ctally"
+# swiftc targets the macOS it runs on unless told otherwise; hold it to LSMinimumSystemVersion.
+swiftc -O -target "$(uname -m)-apple-macos12" "$ROOT/ctally.swift" -o "$BUILD/ctally"
 if [ ! -f "$BUILD/CTally.icns" ]; then
   swiftc -O "$ROOT/make-icon.swift" -o "$BUILD/make-icon"
   "$BUILD/make-icon" "$BUILD/CTally.icns"
@@ -59,6 +60,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+# On Apple Silicon the linker signs the bare binary, under the name "ctally" and without the
+# bundle, which then fails verification. Sign the whole bundle instead, as its bundle id, so
+# macOS can tell it apart when asking whether CTally may control Terminal.
+codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
 # Nudge Launch Services so Finder picks up the new icon and bundle info.
 touch "$APP"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
