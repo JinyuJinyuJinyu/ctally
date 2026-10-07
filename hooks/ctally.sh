@@ -13,8 +13,10 @@ dir="$HOME/.claude/ctally.d"
 
 session="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -z "$session" ]; then
-  # Otherwise the session id is in the JSON Claude Code passes on stdin.
-  session=$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  # Otherwise the session id is in the JSON Claude Code passes on stdin. Take the first
+  # one: a tool's input, later in the same JSON, can carry a "session_id" of its own.
+  session=$(grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 \
+    | sed 's/.*"\([^"]*\)"$/\1/')
 fi
 case "$session" in
   "" | */* | .*) session=default ;;
@@ -32,6 +34,9 @@ if [ "$state" = waiting ]; then
 fi
 
 mkdir -p "$dir" 2>/dev/null
+# Write beside the file and rename it into place, so CTally never reads it half-written.
+# The dot keeps CTally from taking the temporary file for a session.
+tmp="$dir/.$session.$$"
 printf '%s %s %s\n' "$state" "${CLAUDE_PID:-$PPID}" "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")" \
-  > "$file" 2>/dev/null
+  2>/dev/null > "$tmp" && mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 exit 0
