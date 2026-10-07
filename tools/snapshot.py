@@ -53,7 +53,8 @@ def sessions_for(mode: str):
     return {"one": sessions[:1], "three": sessions[:3]}.get(mode, sessions)
 
 
-def render(mode: str, out: Path, background: str, opacity: float, ratio: float, usage: bool = True) -> None:
+def render(mode: str, out: Path, background: str, opacity: float, ratio: float, usage: bool = True,
+           down: bool = False) -> None:
     from PySide6.QtCore import QPoint, QPointF, Qt
     from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QRegion
     from PySide6.QtWidgets import QWidget
@@ -66,6 +67,7 @@ def render(mode: str, out: Path, background: str, opacity: float, ratio: float, 
         import time
         view.apply_usage(demo_usage(time.time()))
     view.folded = mode == "folded"
+    view.grows_down = down
     if hasattr(view, "settle"):
         view.settle()                       # no entry animations mid-flight
     size = view.preferred_size()
@@ -115,6 +117,7 @@ def main() -> int:
     parser.add_argument("--scale", type=float, default=2.0, help="device pixel ratio (2 for Retina)")
     parser.add_argument("--onscreen", action="store_true", help="use the real window system instead of offscreen")
     parser.add_argument("--no-usage", action="store_true", help="leave out the usage limits")
+    parser.add_argument("--down", action="store_true", help="the list opening downward, as high on the screen")
     args = parser.parse_args()
 
     # Set before Qt starts.
@@ -128,9 +131,10 @@ def main() -> int:
 
     if args.mode == "all":
         for mode in MODES:
-            render(mode, args.out / f"{mode}.png", args.background, args.opacity, args.scale, not args.no_usage)
+            render(mode, args.out / f"{mode}.png", args.background, args.opacity, args.scale, not args.no_usage,
+                   args.down)
     else:
-        render(args.mode, args.out, args.background, args.opacity, args.scale, not args.no_usage)
+        render(args.mode, args.out, args.background, args.opacity, args.scale, not args.no_usage, args.down)
     app.quit()
     return 0
 

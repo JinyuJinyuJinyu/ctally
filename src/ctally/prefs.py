@@ -27,7 +27,8 @@ def log_file() -> Path:
 
 class Prefs:
     """A small JSON file: on or off, opacity, folded, whether to show usage limits, and where
-    the indicator sits (its bottom-right corner, in screen coordinates)."""
+    the indicator sits: its right edge and the top or bottom edge it grows away from, in
+    screen coordinates ([right, y, "top"]; [right, bottom] from before it could grow down)."""
 
     DEFAULTS = {"enabled": True, "opacity": 0.8, "folded": False, "usage": True, "anchor": None}
 

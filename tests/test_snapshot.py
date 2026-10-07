@@ -43,3 +43,6 @@ def test_every_layout_renders(tmp_path):
     assert 200 <= usage["list"][0] <= 320
     assert usage["folded"][1] == plain["folded"][1]
     assert usage["folded"][0] > plain["folded"][0] + 80
+
+    # Opening downward, high on the screen, is the same list the other way up.
+    assert sizes(tmp_path / "down", "--down") == usage

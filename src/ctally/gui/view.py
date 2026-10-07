@@ -4,9 +4,10 @@ Up to three sessions get big badges: hexagons with a transport-control glyph (pl
 check, dot), side by side, each captioned with its session's name and directory once there
 is more than one, and tagged with its agent count while any run. Four or more become a
 list, one row per session: a small hexagon, the name over the directory, the state in words,
-and a line about its agents while any run. The list grows upward from its bottom-right
-corner with the oldest session at the bottom, so rows already on screen stay put when a new
-session starts; the chevron on its count bar folds it down to just the counts.
+and a line about its agents while any run. The list opens away from the screen edge it's
+nearer: upward from a count bar at its bottom, or, high on the screen, downward from a count
+bar at its top. The oldest session sits next to the bar, so rows already on screen stay put
+when a new session starts; the chevron on the bar folds the list away to just the counts.
 
 A press that moves drags the indicator; one that doesn't is a click, which asks for that
 session's terminal. The view moves its own window while dragging and says when it's
@@ -222,6 +223,7 @@ class TallyView(QWidget):
         self._entered: dict[str, float] = {}
         self._primed = False
         self._folded = False
+        self._grows_down = False
         self._hovered: int | None = None
         self._press: list | None = None    # [global start, window origin, dragging]
         self._region = QRegion()
@@ -253,6 +255,20 @@ class TallyView(QWidget):
     def folded(self, value: bool) -> None:
         if value != self._folded:
             self._folded = value
+            self._hovered = None
+            self._version += 1
+            self.update()
+
+    @property
+    def grows_down(self) -> bool:
+        """Whether the list opens downward, from a count bar at its top: the controller's
+        call, by where on the screen the indicator sits."""
+        return self._grows_down
+
+    @grows_down.setter
+    def grows_down(self, value: bool) -> None:
+        if value != self._grows_down:
+            self._grows_down = value
             self._hovered = None
             self._version += 1
             self.update()
@@ -362,7 +378,12 @@ class TallyView(QWidget):
                 self.update(QRect(int(x) - 2, 0, 20, h))
                 x += self._count_item_width(count)
             return
-        self.update(QRect(0, 0, TallyView.PADDING + TallyView.TEXT_X - 2, math.ceil(self._rows_bottom)))
+        column = TallyView.PADDING + TallyView.TEXT_X - 2
+        if self._grows_down:
+            edge = math.floor(self._rows_edge)
+            self.update(QRect(0, edge, column, h - edge))
+        else:
+            self.update(QRect(0, 0, column, math.ceil(self._rows_edge)))
         for index, row in enumerate(self._rows):
             if row.session.state is State.DONE and self._is_moving(row.session, TallyView.WASH_DURATION):
                 self.update(self._row_rect(index).adjusted(-4, 0, 4, 0).toAlignedRect())
@@ -462,18 +483,24 @@ class TallyView(QWidget):
 
     @property
     def _bar_rect(self) -> QRectF:
+        """The count bar, on the edge the window is pinned by, so it stays put while the rows
+        fold away from it."""
         p = TallyView.PADDING
-        return QRectF(p, self.height() - p - TallyView.HEADER_HEIGHT, self.width() - 2 * p, TallyView.HEADER_HEIGHT)
+        y = p if self._grows_down else self.height() - p - TallyView.HEADER_HEIGHT
+        return QRectF(p, y, self.width() - 2 * p, TallyView.HEADER_HEIGHT)
 
     @property
-    def _rows_bottom(self) -> float:
-        """The rows start above the count bar, which sits at the bottom so it stays put while
-        the rows fold away above it."""
-        return (self.height() - TallyView.PADDING - TallyView.HEADER_HEIGHT - TallyView.HEADER_GAP
-                - self._usage_height)
+    def _rows_edge(self) -> float:
+        """Where the rows start, on the bar's side: past the bar and the usage limits."""
+        beyond = TallyView.PADDING + TallyView.HEADER_HEIGHT + TallyView.HEADER_GAP + self._usage_height
+        return beyond if self._grows_down else self.height() - beyond
 
     def _row_rect(self, index: int) -> QRectF:
-        top = self._rows_bottom - self._row_offsets[index + 1]
+        """Row 0, the oldest session, next to the bar; each later one further out."""
+        if self._grows_down:
+            top = self._rows_edge + self._row_offsets[index]
+        else:
+            top = self._rows_edge - self._row_offsets[index + 1]
         return QRectF(TallyView.PADDING, top, self.width() - 2 * TallyView.PADDING,
                       self._row_offsets[index + 1] - self._row_offsets[index])
 
@@ -504,7 +531,8 @@ class TallyView(QWidget):
         if self.is_list and not self._folded and self._meters:
             height = len(self._meters) * TallyView.USAGE_LINE
             bar = self._bar_rect
-            return QRectF(bar.x(), bar.y() - TallyView.HEADER_GAP - height, bar.width(), height)
+            y = bar.bottom() + TallyView.HEADER_GAP if self._grows_down else bar.y() - TallyView.HEADER_GAP - height
+            return QRectF(bar.x(), y, bar.width(), height)
         if not self.is_list and self._compact:
             width = min(self._meter_width + 16, self.width() - 4)
             top = (self.chip if self._rows else TallyView.SINGLE).height
@@ -857,12 +885,12 @@ class TallyView(QWidget):
             return
 
         # Hairlines between the count bar, the usage limits and the rows.
-        painter.fillRect(QRectF(bar.x() + 4, self._rows_bottom + TallyView.HEADER_GAP / 2 - 0.5, bar.width() - 8, 1),
-                         white(1, 0.08))
+        half = TallyView.HEADER_GAP / 2 * (-1 if self._grows_down else 1)
+        painter.fillRect(QRectF(bar.x() + 4, self._rows_edge + half - 0.5, bar.width() - 8, 1), white(1, 0.08))
         usage = self._usage_rect()
         if usage is not None:
-            painter.fillRect(QRectF(bar.x() + 4, bar.y() - TallyView.HEADER_GAP / 2 - 0.5, bar.width() - 8, 1),
-                             white(1, 0.08))
+            beside_bar = bar.bottom() + TallyView.HEADER_GAP / 2 if self._grows_down else bar.y() - TallyView.HEADER_GAP / 2
+            painter.fillRect(QRectF(bar.x() + 4, beside_bar - 0.5, bar.width() - 8, 1), white(1, 0.08))
             if self._needs(usage):
                 self._draw_usage_lines(painter, usage)
         for index, row in enumerate(self._rows):
@@ -871,20 +899,23 @@ class TallyView(QWidget):
             if self._needs(rect.adjusted(-4, -6, 4, 6)):
                 self._draw_row(painter, row, rect, highlighted=index == self._hovered)
         if self._overflow:
-            y = self._rows_bottom - self._rows_height - TallyView.OVERFLOW_HEIGHT
+            # Beyond the last row.
+            y = (self._rows_edge + self._rows_height if self._grows_down
+                 else self._rows_edge - self._rows_height - TallyView.OVERFLOW_HEIGHT)
             left = TallyView.PADDING + TallyView.TEXT_X
             draw_text(painter, f"+{self._overflow} more",
                       QRectF(left, y, self.width() - TallyView.PADDING - left, TallyView.OVERFLOW_HEIGHT),
                       self.fonts.title, ACCENT[State.IDLE])
 
     def _draw_fold_button(self, painter: QPainter, rect: QRectF) -> None:
-        """The chevron that folds the list: up to unfold (the rows open upward), down to fold
-        them away."""
+        """The chevron that folds the list: pointing the way the rows will open, or, open, the
+        way they fold away."""
         painter.setPen(Qt.NoPen)
         painter.setBrush(white(1, 0.08))
         painter.drawEllipse(rect.adjusted(1, 1, -1, -1))
         c = rect.center()
-        rise = 2.5 if self._folded else -2.5
+        points_up = self._folded != self._grows_down
+        rise = 2.5 if points_up else -2.5
         pen = QPen(white(1, 0.75), 1.6)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)

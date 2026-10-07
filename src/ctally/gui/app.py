@@ -345,54 +345,75 @@ class Controller:
     # MARK: Placement
 
     def fit(self, *_) -> None:
-        """Size to what the view wants, keeping the bottom-right corner planted. Also does
-        the initial placement, so it compares the position and not just the size."""
+        """Size to what the view wants, keeping the pinned corner planted: the bottom-right,
+        or high on the screen the top-right. Also does the initial placement, so it compares
+        the position and not just the size."""
         # While I'm dragging it, the pointer places it; it settles once I let go.
         if self.view.is_dragging:
             return
         size = self.view.preferred_size()
-        right, bottom = self.anchor()
-        target = QRect(right - size.width(), bottom - size.height(), size.width(), size.height())
-        # A tall list slides down rather than run off the top of the screen, and a wide one
+        right, edge, top = self.anchor()
+        self.view.grows_down = top
+        y = edge if top else edge - size.height()
+        target = QRect(right - size.width(), y, size.width(), size.height())
+        # A tall list slides back rather than run off the screen's far edge, and a wide one
         # right rather than off the left edge; the saved corner stays where I put it, for
         # when the list shrinks again.
-        screen = QGuiApplication.screenAt(QPoint(right - 1, bottom - 1)) or QGuiApplication.primaryScreen()
+        corner = QPoint(right - 1, edge if top else edge - 1)
+        screen = QGuiApplication.screenAt(corner) or QGuiApplication.primaryScreen()
         if screen is not None:
             target.moveTo(*_clamped(target, screen.availableGeometry()))
         if self.view.geometry() != target:
             self.view.setGeometry(target)
 
-    def anchor(self) -> tuple[int, int]:
-        """The bottom-right corner is what's remembered, so it grows leftward and upward. A
-        corner saved on a monitor that is no longer attached must not come back off-screen;
-        a drop is settled inside the screen, so just inside the corner is enough."""
+    def anchor(self) -> tuple[int, int, bool]:
+        """What's remembered is the right edge, and the top edge or the bottom one: so it
+        grows leftward, and downward when it sits high on the screen or upward otherwise. As
+        (right, that edge's y, whether it's the top). Saved before CTally could grow downward,
+        it's just [right, bottom]. A corner saved on a monitor that is no longer attached must
+        not come back off-screen; a drop is settled inside the screen, so just inside the
+        corner is enough."""
         saved = self.prefs["anchor"]
-        if isinstance(saved, (list, tuple)) and len(saved) == 2:
+        if isinstance(saved, (list, tuple)) and len(saved) in (2, 3):
             try:
-                right, bottom = round(float(saved[0])), round(float(saved[1]))
+                right, edge = round(float(saved[0])), round(float(saved[1]))
             except (TypeError, ValueError):
-                right = bottom = None
-            if right is not None and any(s.availableGeometry().contains(QPoint(right - 1, bottom - 1))
-                                         for s in QGuiApplication.screens()):
-                return right, bottom
+                right = edge = None
+            top = len(saved) == 3 and saved[2] == "top"
+            areas = [s.availableGeometry() for s in QGuiApplication.screens()]
+            area = next((a for a in areas if right is not None and a.contains(QPoint(right - 1, edge if top else edge - 1))),
+                        None)
+            if area is not None:
+                height = self.view.preferred_size().height()
+                if len(saved) == 2 and edge - height / 2 < area.center().y():
+                    # Left high on the screen before it could grow downward: pin its top
+                    # edge where it is now, and from here on it opens downward.
+                    edge, top = edge - height, True
+                    self.prefs["anchor"] = [right, edge, "top"]
+                return right, edge, top
         screen = QGuiApplication.primaryScreen()
         if screen is None:
-            return 120 + INSET, 120 + INSET
+            return 120 + INSET, 120 + INSET, False
         area = screen.availableGeometry()
-        return area.x() + area.width() - INSET, area.y() + area.height() - INSET
+        return area.x() + area.width() - INSET, area.y() + area.height() - INSET, False
 
     def settle_after_drag(self) -> None:
         """Dropped partly off-screen or over the Dock, it is pulled back inside, and where it
-        lands is the corner it grows from from now on."""
+        lands is the corner it grows from from now on: the top-right one in the top half of
+        the screen, so the list opens downward there, else the bottom-right."""
         frame = self.view.geometry()
         screen = (QGuiApplication.screenAt(frame.center()) or self.view.screen()
                   or QGuiApplication.primaryScreen())
+        top = False
         if screen is not None:
-            x, y = _clamped(frame, screen.availableGeometry())
+            area = screen.availableGeometry()
+            x, y = _clamped(frame, area)
             if (x, y) != (frame.x(), frame.y()):
                 self.view.move(x, y)
                 frame.moveTo(x, y)
-        self.prefs["anchor"] = [frame.x() + frame.width(), frame.y() + frame.height()]
+            top = frame.center().y() < area.center().y()
+        right = frame.x() + frame.width()
+        self.prefs["anchor"] = [right, frame.y(), "top"] if top else [right, frame.y() + frame.height(), "bottom"]
         self.fit()
 
     def _screen_added(self, screen) -> None:

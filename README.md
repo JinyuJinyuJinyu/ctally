@@ -206,7 +206,7 @@ ctally setup --tmux
 
 | To | Do this |
 |---|---|
-| Move it | Drag it anywhere. It remembers the spot and grows up and left from its bottom-right corner. |
+| Move it | Drag it anywhere. It remembers the spot and grows left from there, and away from the nearer screen edge: up from the bottom half of the screen, down from the top half, where the list unfolds downward. |
 | Go to a session | Click its row (or its badge). |
 | Jump to the session that needs you | In tmux, press prefix + J (set up by `ctally setup --tmux`). Again for the next one. |
 | Fold or unfold the list | Click the chevron on the count bar, or right-click → Fold List. |
