@@ -1,19 +1,19 @@
-// claude-pet — a silent desktop pet that mirrors Claude Code's turn state.
+// CTally — a floating status light for Claude Code sessions: whose turn is it?
 //
-// Install: ./install.sh   (builds this file, installs ClaudePet.app and the hooks)
-// Build:   swiftc -O claude-pet.swift -o claude-pet
+// Install: ./install.sh   (builds this file, installs CTally.app and the hooks)
+// Build:   swiftc -O ctally.swift -o ctally
 //
-// Reads ~/.claude/claude-pet.d/<session-id>, one file per Claude Code session, each
-// holding "<word> <pid> <project name>" written by hooks/claude-pet.sh:
+// Reads ~/.claude/ctally.d/<session-id>, one file per Claude Code session, each
+// holding "<word> <pid> <project name>" written by hooks/ctally.sh:
 //   working | done | waiting | idle   (anything else, or an empty directory, means idle)
 //
-// Up to three sessions show as big pets; four or more as a compact list, one row per
+// Up to three sessions show as big badges; four or more as a compact list, one row per
 // session with its name (from /rename, or the title Claude gave it) over its directory.
 // The chevron on the list's count bar folds it down to just the counts.
-// Click a row (or a big pet) to bring that session's terminal to the front.
+// Click a row (or a badge) to bring that session's terminal to the front.
 //
 // Switch it off and on from the hexagon icon in the menu bar, the settings window, or the
-// pet's right-click menu; the settings window also sets its opacity. Off is remembered, and
+// right-click menu; the settings window also sets its opacity. Off is remembered, and
 // while off the app sits dormant: only the menu bar icon (dimmed) stays on screen, and no
 // timers run.
 //
@@ -24,14 +24,14 @@ import QuartzCore
 
 // MARK: - State
 
-enum PetState: String {
+enum SessionState: String {
     case working
     case waiting
     case done
     case idle
 
     /// Most urgent first: the order counts are listed in.
-    static let byUrgency: [PetState] = [.waiting, .working, .done, .idle]
+    static let byUrgency: [SessionState] = [.waiting, .working, .done, .idle]
 
     /// How loudly this state asks for me; decides who survives the row cap.
     var urgency: Int {
@@ -56,14 +56,15 @@ enum PetState: String {
 /// One session as the view needs to see it.
 struct SessionSnapshot: Equatable {
     let id: String
-    let state: PetState
+    let state: SessionState
     let label: String          // project folder name, from the hook
     var pid: pid_t = 0         // the claude process, from the hook
     var title: String? = nil   // session name, from the transcript
     var path: String? = nil    // directory the session started in, from the transcript
 }
 
-/// The pet's shape: a hexagon standing on a point, shared by the pet and its menu bar icon.
+/// CTally's shape: a hexagon standing on a point, shared by the badges, the list's marks and
+/// the menu bar icon.
 enum Hexagon {
     static func points(center: CGPoint, radius: CGFloat) -> [CGPoint] {
         (0..<6).map { i in
@@ -212,7 +213,7 @@ final class SessionInfoReader {
 final class StateReader {
 
     private struct Session {
-        let state: PetState
+        let state: SessionState
         let pid: pid_t
         let label: String
         let modified: Date
@@ -296,7 +297,7 @@ final class StateReader {
             .split(whereSeparator: { $0 == " " || $0 == "\t" })
         guard let word = fields.first else { return nil }
         // "<word> <pid> <project name>" — the name may itself contain spaces.
-        return Session(state: PetState(rawValue: String(word).lowercased()) ?? .idle,
+        return Session(state: SessionState(rawValue: String(word).lowercased()) ?? .idle,
                        pid: fields.count > 1 ? (pid_t(fields[1]) ?? 0) : 0,
                        label: fields.count > 2 ? fields.dropFirst(2).joined(separator: " ") : "",
                        modified: modified,
@@ -349,7 +350,7 @@ final class SessionFocuser {
         "end run",
     ]
 
-    private let queue = DispatchQueue(label: "claude-pet.focus")
+    private let queue = DispatchQueue(label: "ctally.focus")
 
     func focus(_ pid: pid_t) {
         guard pid > 0 else { return }
@@ -498,7 +499,7 @@ final class SessionFocuser {
 // MARK: - View
 
 /// The chevron that folds the list: the one spot where a click means something. Everywhere
-/// else a press drags the pet, so this view opts out of moving the window, and handles the
+/// else a press drags the indicator, so this view opts out of moving the window, and handles the
 /// press itself without ever taking focus.
 final class FoldButton: NSView {
     var onPress: () -> Void = {}
@@ -543,13 +544,13 @@ final class FoldButton: NSView {
     }
 }
 
-/// Up to three sessions get big pets: hexagon chips with a transport-control glyph (play,
+/// Up to three sessions get big badges: hexagons with a transport-control glyph (play,
 /// pause, check, dot), side by side, each captioned with its session's name and directory
 /// once there is more than one. Four or more become a list, one row per session: a small
 /// hexagon, the name over the directory, and the state in words. The list grows upward
 /// from its bottom-right corner with the oldest session at the bottom, so rows already on
 /// screen stay put when a new session starts.
-final class PetView: NSView {
+final class TallyView: NSView {
 
     private struct Row {
         let session: SessionSnapshot
@@ -557,7 +558,7 @@ final class PetView: NSView {
         let path: String           // directory, with ~ for home
     }
 
-    /// One big pet, or one of a few side by side with a caption under each.
+    /// One big badge, or one of a few side by side with a caption under each.
     private struct Chip {
         let width: CGFloat
         let height: CGFloat
@@ -594,7 +595,7 @@ final class PetView: NSView {
     private static let bounceDuration: CFTimeInterval = 1.5
     private static let washDuration: CFTimeInterval = 2.5
 
-    /// Folded, the list shrinks to its count bar; the big pets never fold.
+    /// Folded, the list shrinks to its count bar; the badges never fold.
     var folded = false {
         didSet {
             guard folded != oldValue else { return }
@@ -603,7 +604,7 @@ final class PetView: NSView {
         }
     }
     var onFold: (Bool) -> Void = { _ in }
-    /// A click on a row (or a big pet) asks for that session's terminal.
+    /// A click on a row (or a badge) asks for that session's terminal.
     var onSelect: (SessionSnapshot) -> Void = { _ in }
 
     private let epoch = CACurrentMediaTime()
@@ -617,15 +618,15 @@ final class PetView: NSView {
     }
     private var sessions: [SessionSnapshot] = []
     private var rows: [Row] = []
-    private var counts: [(state: PetState, count: Int)] = []
+    private var counts: [(state: SessionState, count: Int)] = []
     private var overflow = 0
-    private var listWidth = PetView.widthRange.lowerBound
-    private var barWidth = PetView.widthRange.lowerBound
+    private var listWidth = TallyView.widthRange.lowerBound
+    private var barWidth = TallyView.widthRange.lowerBound
     private var enteredAt: [String: CFTimeInterval] = [:]
     private var primed = false
 
-    var isList: Bool { sessions.count >= PetView.listFrom }
-    private var chip: Chip { sessions.count <= 1 ? PetView.single : PetView.several }
+    var isList: Bool { sessions.count >= TallyView.listFrom }
+    private var chip: Chip { sessions.count <= 1 ? TallyView.single : TallyView.several }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -645,10 +646,10 @@ final class PetView: NSView {
         guard isList else {
             return NSSize(width: CGFloat(max(1, rows.count)) * chip.width, height: chip.height)
         }
-        let bar = 2 * PetView.padding + PetView.headerHeight
+        let bar = 2 * TallyView.padding + TallyView.headerHeight
         if folded { return NSSize(width: barWidth, height: bar) }
-        let height = bar + PetView.headerGap + CGFloat(rows.count) * PetView.rowHeight
-            + (overflow > 0 ? PetView.overflowHeight : 0)
+        let height = bar + TallyView.headerGap + CGFloat(rows.count) * TallyView.rowHeight
+            + (overflow > 0 ? TallyView.overflowHeight : 0)
         return NSSize(width: max(listWidth, barWidth), height: height)
     }
 
@@ -659,7 +660,7 @@ final class PetView: NSView {
 
     // MARK: Clicks and drags
 
-    // A press that moves drags the pet; one that doesn't is a click. Telling them apart
+    // A press that moves drags the indicator; one that doesn't is a click. Telling them apart
     // means the view handles the press itself rather than letting the window move.
     override var mouseDownCanMoveWindow: Bool { false }
 
@@ -690,7 +691,7 @@ final class PetView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        // activeAlways: the pet's app is never the active one.
+        // activeAlways: this app is never the active one.
         addTrackingArea(NSTrackingArea(rect: .zero,
                                        options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                        owner: self, userInfo: nil))
@@ -704,7 +705,7 @@ final class PetView: NSView {
         hovered = nil
     }
 
-    /// The row or big pet under a point, if it stands for a session.
+    /// The row or badge under a point, if it stands for a session.
     private func item(at point: NSPoint) -> Int? {
         guard !rows.isEmpty, !(isList && folded) else { return nil }
         let index = (0..<rows.count).first { itemRect($0).contains(point) }
@@ -722,9 +723,9 @@ final class PetView: NSView {
     private func positionFoldButton() {
         foldButton.isHidden = !isList
         foldButton.folded = folded
-        let size = PetView.foldSize
-        foldButton.frame = NSRect(x: bounds.maxX - PetView.padding - size - 2,
-                                  y: PetView.padding + (PetView.headerHeight - size) / 2,
+        let size = TallyView.foldSize
+        foldButton.frame = NSRect(x: bounds.maxX - TallyView.padding - size - 2,
+                                  y: TallyView.padding + (TallyView.headerHeight - size) / 2,
                                   width: size, height: size)
     }
 
@@ -760,14 +761,14 @@ final class PetView: NSView {
         // Over the cap, the sessions that most want me survive; the rest become "+N more".
         var visible = sessions
         overflow = 0
-        if sessions.count > PetView.maxRows {
+        if sessions.count > TallyView.maxRows {
             let chosen = Set(sessions.enumerated()
                 .sorted {
                     $0.element.state.urgency != $1.element.state.urgency
                         ? $0.element.state.urgency > $1.element.state.urgency
                         : $0.offset < $1.offset
                 }
-                .prefix(PetView.maxRows - 1)
+                .prefix(TallyView.maxRows - 1)
                 .map { $0.offset })
             visible = sessions.enumerated().filter { chosen.contains($0.offset) }.map { $0.element }
             overflow = sessions.count - visible.count
@@ -783,19 +784,19 @@ final class PetView: NSView {
             ceil((text as NSString).size(withAttributes: [.font: font]).width)
         }
         let widest = rows.map {
-            max(measure($0.title, PetView.titleFont) + 8 + PetView.stateWidth,
-                measure($0.path, PetView.pathFont))
+            max(measure($0.title, TallyView.titleFont) + 8 + TallyView.stateWidth,
+                measure($0.path, TallyView.pathFont))
         }.max() ?? 0
-        let wanted = 2 * PetView.padding + PetView.textX + widest
-        listWidth = min(max(wanted, PetView.widthRange.lowerBound), PetView.widthRange.upperBound)
+        let wanted = 2 * TallyView.padding + TallyView.textX + widest
+        listWidth = min(max(wanted, TallyView.widthRange.lowerBound), TallyView.widthRange.upperBound)
 
         // The count bar covers every session, hidden or not, most urgent first.
-        counts = PetState.byUrgency.compactMap { state in
+        counts = SessionState.byUrgency.compactMap { state in
             let n = sessions.filter { $0.state == state }.count
             return n > 0 ? (state, n) : nil
         }
-        let items = counts.map { PetView.countItemWidth($0.count) }.reduce(0, +)
-        barWidth = ceil(2 * PetView.padding + 4 + items + PetView.foldSize + 8)
+        let items = counts.map { TallyView.countItemWidth($0.count) }.reduce(0, +)
+        barWidth = ceil(2 * TallyView.padding + 4 + items + TallyView.foldSize + 8)
     }
 
     /// A count in the bar: small mark, then the number, then a gap before the next.
@@ -807,15 +808,15 @@ final class PetView: NSView {
     var isAnimating: Bool {
         if rows.isEmpty { return true }                     // the idle placeholder breathes
         if isList && folded {
-            return sessions.contains { isMoving($0, settlesAfter: PetView.washDuration) }
+            return sessions.contains { isMoving($0, settlesAfter: TallyView.washDuration) }
         }
-        let settle = isList ? PetView.washDuration : PetView.bounceDuration
+        let settle = isList ? TallyView.washDuration : TallyView.bounceDuration
         return rows.contains { isMoving($0.session, settlesAfter: settle) }
     }
 
     /// Asks for a redraw of only what moves: text costs far more to draw than the marks,
     /// and it never moves. In the list that's the column of marks plus any row still
-    /// washing; folded, the whole (small) bar; under the big pets, everything above the
+    /// washing; folded, the whole (small) bar; under the badges, everything above the
     /// captions.
     func invalidateMotion() {
         guard isList else {
@@ -825,20 +826,20 @@ final class PetView: NSView {
         }
         if folded {
             // The bar's marks move and its numbers don't; all of it only while it washes.
-            guard landedAge >= PetView.washDuration else {
+            guard landedAge >= TallyView.washDuration else {
                 setNeedsDisplay(bounds)
                 return
             }
-            var x = PetView.padding + 4
+            var x = TallyView.padding + 4
             for item in counts {
                 setNeedsDisplay(NSRect(x: x - 2, y: 0, width: 20, height: bounds.height))
-                x += PetView.countItemWidth(item.count)
+                x += TallyView.countItemWidth(item.count)
             }
             return
         }
-        setNeedsDisplay(NSRect(x: 0, y: rowsBottom, width: PetView.padding + PetView.textX - 2,
+        setNeedsDisplay(NSRect(x: 0, y: rowsBottom, width: TallyView.padding + TallyView.textX - 2,
                                height: bounds.height - rowsBottom))
-        for (index, row) in rows.enumerated() where isMoving(row.session, settlesAfter: PetView.washDuration)
+        for (index, row) in rows.enumerated() where isMoving(row.session, settlesAfter: TallyView.washDuration)
             && row.session.state == .done {
             setNeedsDisplay(rowRect(index).insetBy(dx: -4, dy: 0))
         }
@@ -856,7 +857,7 @@ final class PetView: NSView {
             drawList()
         } else if rows.isEmpty {
             drawChip(Row(session: SessionSnapshot(id: "", state: .idle, label: ""), title: "", path: ""),
-                     in: bounds, chip: PetView.single)
+                     in: bounds, chip: TallyView.single)
         } else {
             let chip = self.chip
             for (index, row) in rows.enumerated() {
@@ -867,7 +868,7 @@ final class PetView: NSView {
         }
     }
 
-    // MARK: Big pets
+    // MARK: Badges
 
     private func drawChip(_ row: Row, in rect: NSRect, chip: Chip, highlighted: Bool = false) {
         if chip.captioned && needsToDraw(NSRect(x: rect.minX, y: 0, width: rect.width, height: 48)) {
@@ -914,7 +915,7 @@ final class PetView: NSView {
         ctx.restoreGraphicsState()
     }
 
-    /// Which session this pet is: its name over its directory, on a card of their own so
+    /// Which session this badge is: its name over its directory, on a card of their own so
     /// they stay legible on any wallpaper.
     private func drawCaption(_ row: Row, in rect: NSRect, highlighted: Bool) {
         let card = NSRect(x: rect.minX + 6, y: 8, width: rect.width - 12, height: 38)
@@ -924,10 +925,10 @@ final class PetView: NSView {
         let inner = card.insetBy(dx: 7, dy: 3)
         drawText(row.title,
                  in: NSRect(x: inner.minX, y: inner.midY, width: inner.width, height: inner.height / 2),
-                 font: PetView.captionTitleFont, color: NSColor(white: 0.95, alpha: 1), alignment: .center)
+                 font: TallyView.captionTitleFont, color: NSColor(white: 0.95, alpha: 1), alignment: .center)
         drawText(row.path,
                  in: NSRect(x: inner.minX, y: inner.minY, width: inner.width, height: inner.height / 2),
-                 font: PetView.captionPathFont, color: NSColor(white: 0.95, alpha: 0.6),
+                 font: TallyView.captionPathFont, color: NSColor(white: 0.95, alpha: 0.6),
                  alignment: .center, truncation: .byTruncatingMiddle)
     }
 
@@ -942,14 +943,14 @@ final class PetView: NSView {
         plate.lineWidth = 1
         plate.stroke()
 
-        let bar = NSRect(x: PetView.padding, y: PetView.padding,
-                         width: bounds.width - 2 * PetView.padding, height: PetView.headerHeight)
+        let bar = NSRect(x: TallyView.padding, y: TallyView.padding,
+                         width: bounds.width - 2 * TallyView.padding, height: TallyView.headerHeight)
         if needsToDraw(bar.insetBy(dx: 0, dy: -6)) { drawCountBar(in: bar) }
         guard !folded else { return }
 
         // A hairline between the count bar and the rows.
         NSColor(white: 1, alpha: 0.08).setFill()
-        NSRect(x: bar.minX + 4, y: rowsBottom - PetView.headerGap / 2 - 0.5, width: bar.width - 8, height: 1).fill()
+        NSRect(x: bar.minX + 4, y: rowsBottom - TallyView.headerGap / 2 - 0.5, width: bar.width - 8, height: 1).fill()
 
         for (index, row) in rows.enumerated() {
             let rect = rowRect(index)
@@ -957,23 +958,23 @@ final class PetView: NSView {
             if needsToDraw(rect.insetBy(dx: -4, dy: -6)) { draw(row, in: rect, highlighted: index == hovered) }
         }
         if overflow > 0 {
-            let y = rowsBottom + CGFloat(rows.count) * PetView.rowHeight
+            let y = rowsBottom + CGFloat(rows.count) * TallyView.rowHeight
             drawText("+\(overflow) more",
-                     in: NSRect(x: PetView.padding + PetView.textX, y: y,
-                                width: bounds.width - 2 * PetView.padding - PetView.textX,
-                                height: PetView.overflowHeight),
-                     font: PetView.titleFont, color: PetState.idle.accent, alignment: .left)
+                     in: NSRect(x: TallyView.padding + TallyView.textX, y: y,
+                                width: bounds.width - 2 * TallyView.padding - TallyView.textX,
+                                height: TallyView.overflowHeight),
+                     font: TallyView.titleFont, color: SessionState.idle.accent, alignment: .left)
         }
     }
 
     /// The rows start above the count bar.
     private var rowsBottom: CGFloat {
-        PetView.padding + PetView.headerHeight + PetView.headerGap
+        TallyView.padding + TallyView.headerHeight + TallyView.headerGap
     }
 
     private func rowRect(_ index: Int) -> NSRect {
-        NSRect(x: PetView.padding, y: rowsBottom + CGFloat(index) * PetView.rowHeight,
-               width: bounds.width - 2 * PetView.padding, height: PetView.rowHeight)
+        NSRect(x: TallyView.padding, y: rowsBottom + CGFloat(index) * TallyView.rowHeight,
+               width: bounds.width - 2 * TallyView.padding, height: TallyView.rowHeight)
     }
 
     /// How long ago the most recent turn landed.
@@ -989,9 +990,9 @@ final class PetView: NSView {
     /// unfolded, the rows move and the bar holds still.
     private func drawCountBar(in bar: NSRect) {
         let landed = landedAge
-        if folded && landed < PetView.washDuration {
-            let fade = CGFloat(1 - landed / PetView.washDuration)
-            PetState.done.accent.withAlphaComponent(0.30 * fade).setFill()
+        if folded && landed < TallyView.washDuration {
+            let fade = CGFloat(1 - landed / TallyView.washDuration)
+            SessionState.done.accent.withAlphaComponent(0.30 * fade).setFill()
             NSBezierPath(roundedRect: bar.insetBy(dx: -3, dy: 0), xRadius: 8, yRadius: 8).fill()
         }
 
@@ -1001,16 +1002,16 @@ final class PetView: NSView {
             drawSmallMark(state, at: CGPoint(x: x + 8, y: bar.midY + move.bob), glow: move.glow, radius: 8)
             let number = NSRect(x: x + 21, y: bar.minY, width: 40, height: bar.height)
             if needsToDraw(number) {
-                drawText("\(count)", in: number, font: PetView.countFont, color: state.accent, alignment: .left)
+                drawText("\(count)", in: number, font: TallyView.countFont, color: state.accent, alignment: .left)
             }
-            x += PetView.countItemWidth(count)
+            x += TallyView.countItemWidth(count)
         }
     }
 
     /// How a mark moves: a slow bob while working or waiting, one damped bounce when a
     /// turn lands and then dead still, a breath while idle. Heights are in points; the
     /// defaults suit the list's small marks.
-    private func motion(_ state: PetState, age: CFTimeInterval, working: CGFloat = 2,
+    private func motion(_ state: SessionState, age: CFTimeInterval, working: CGFloat = 2,
                         waiting: CGFloat = 1.5, bounce: CGFloat = 5) -> (bob: CGFloat, glow: CGFloat) {
         let clock = CACurrentMediaTime() - epoch
         switch state {
@@ -1019,7 +1020,7 @@ final class PetView: NSView {
         case .waiting:
             return (waiting * CGFloat(sin(2 * .pi * clock / 1.1)), 1)
         case .done:
-            guard age < PetView.bounceDuration else { return (0, 1) }
+            guard age < TallyView.bounceDuration else { return (0, 1) }
             return (bounce * CGFloat(exp(-3.2 * age) * abs(sin(2 * .pi * age / 0.7))), 1)
         case .idle:
             return (0, breath())
@@ -1038,15 +1039,15 @@ final class PetView: NSView {
 
         // The one memorable moment: a finished turn washes its row green and its mark
         // bounces once, then both settle and stay.
-        if state == .done && age < PetView.washDuration {
-            let fade = CGFloat(1 - age / PetView.washDuration)
+        if state == .done && age < TallyView.washDuration {
+            let fade = CGFloat(1 - age / TallyView.washDuration)
             state.accent.withAlphaComponent(0.30 * fade).setFill()
             NSBezierPath(roundedRect: rect.insetBy(dx: -3, dy: 1), xRadius: 7, yRadius: 7).fill()
         }
         let move = motion(state, age: age)
-        drawSmallMark(state, at: CGPoint(x: rect.minX + PetView.markX, y: rect.midY + move.bob), glow: move.glow)
+        drawSmallMark(state, at: CGPoint(x: rect.minX + TallyView.markX, y: rect.midY + move.bob), glow: move.glow)
 
-        let textLeft = rect.minX + PetView.textX
+        let textLeft = rect.minX + TallyView.textX
         guard needsToDraw(NSRect(x: textLeft, y: rect.minY, width: rect.maxX - textLeft, height: rect.height))
         else { return }
 
@@ -1057,21 +1058,21 @@ final class PetView: NSView {
             : NSRect(x: textLeft, y: rect.midY, width: rect.maxX - textLeft, height: rect.height / 2 - 2)
         let lower = NSRect(x: textLeft, y: rect.minY + 2, width: rect.maxX - textLeft, height: rect.height / 2 - 2)
         drawText(row.title,
-                 in: NSRect(x: upper.minX, y: upper.minY, width: upper.width - PetView.stateWidth - 6,
+                 in: NSRect(x: upper.minX, y: upper.minY, width: upper.width - TallyView.stateWidth - 6,
                             height: upper.height),
-                 font: PetView.titleFont, color: NSColor(white: 0.95, alpha: 1), alignment: .left)
+                 font: TallyView.titleFont, color: NSColor(white: 0.95, alpha: 1), alignment: .left)
         drawText(state.rawValue,
-                 in: NSRect(x: upper.maxX - PetView.stateWidth, y: upper.minY, width: PetView.stateWidth,
+                 in: NSRect(x: upper.maxX - TallyView.stateWidth, y: upper.minY, width: TallyView.stateWidth,
                             height: upper.height),
-                 font: PetView.stateFont, color: state.accent, alignment: .right)
-        drawText(row.path, in: lower, font: PetView.pathFont, color: NSColor(white: 0.95, alpha: 0.6),
+                 font: TallyView.stateFont, color: state.accent, alignment: .right)
+        drawText(row.path, in: lower, font: TallyView.pathFont, color: NSColor(white: 0.95, alpha: 0.6),
                  alignment: .left, truncation: .byTruncatingMiddle)
     }
 
     /// A small tinted hexagon with the state's glyph: a solid outline rather than the big
-    /// pet's segmented ring, which turns to noise at this size.
-    private func drawSmallMark(_ state: PetState, at c: CGPoint, glow: CGFloat,
-                               radius: CGFloat = PetView.markRadius) {
+    /// badge's segmented ring, which turns to noise at this size.
+    private func drawSmallMark(_ state: SessionState, at c: CGPoint, glow: CGFloat,
+                               radius: CGFloat = TallyView.markRadius) {
         guard let ctx = NSGraphicsContext.current else { return }
         ctx.saveGraphicsState()
         ctx.cgContext.setAlpha(glow)
@@ -1097,7 +1098,7 @@ final class PetView: NSView {
         0.32 + 0.58 * CGFloat(0.5 + 0.5 * sin(2 * .pi * (CACurrentMediaTime() - epoch) / 4.0))
     }
 
-    private func drawGlyph(_ state: PetState, at c: CGPoint, scale s: CGFloat) {
+    private func drawGlyph(_ state: SessionState, at c: CGPoint, scale s: CGFloat) {
         switch state {
         case .working:
             // Play: running.
@@ -1159,8 +1160,8 @@ final class PetView: NSView {
 
 // MARK: - Window
 
-/// An accessory pet must never take key or main status away from the terminal.
-final class PetPanel: NSPanel {
+/// An accessory panel must never take key or main status away from the terminal.
+final class TallyPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
@@ -1178,8 +1179,8 @@ final class SettingsWindow: NSWindow {
     }
 }
 
-/// The pet's one ordinary window: an on/off switch and what the pet is showing. Opens from
-/// the menu bar icon, the pet's right-click menu, or by opening the app again.
+/// CTally's one ordinary window: an on/off switch and what it is showing. Opens from the
+/// menu bar icon, the right-click menu, or by opening the app again.
 final class SettingsController: NSObject, NSWindowDelegate {
     private static let width: CGFloat = 400
     static let opacityRange = 0.3...1.0
@@ -1199,7 +1200,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     override init() {
         super.init()
-        window.title = "Claude Pet"
+        window.title = "CTally"
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         // Open on the Space I'm looking at, even beside a full-screen terminal.
@@ -1223,7 +1224,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         let state: NSControl.StateValue = enabled ? .on : .off
         if toggle.state != state { toggle.state = state }
         icon.alphaValue = enabled ? 1 : 0.35
-        let text = enabled ? SettingsController.describe(sessions) : "Off · the pet is hidden"
+        let text = enabled ? SettingsController.describe(sessions) : "Off · hidden"
         if status.stringValue != text { status.stringValue = text }
     }
 
@@ -1233,7 +1234,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        // Hand the keyboard back to whatever I was using; the pet itself ignores hiding.
+        // Hand the keyboard back to whatever I was using; the indicator ignores hiding.
         NSApp.hide(nil)
     }
 
@@ -1241,15 +1242,15 @@ final class SettingsController: NSObject, NSWindowDelegate {
         onToggle(sender.state == .on)
     }
 
-    /// Continuous, so the pet fades live under the slider.
+    /// Continuous, so the indicator fades live under the slider.
     @objc private func opacityChanged(_ sender: NSSlider) {
         update(opacity: sender.doubleValue)
         onOpacity(sender.doubleValue)
     }
 
-    /// What the pet is showing, in words: "On · 1 working, 2 done".
+    /// What the indicator is showing, in words: "On · 1 working, 2 done".
     private static func describe(_ sessions: [SessionSnapshot]) -> String {
-        let counts = PetState.byUrgency.compactMap { state -> String? in
+        let counts = SessionState.byUrgency.compactMap { state -> String? in
             let n = sessions.filter { $0.state == state }.count
             return n > 0 ? "\(n) \(state.rawValue)" : nil
         }
@@ -1260,7 +1261,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         icon.image = NSApp.applicationIconImage
         icon.imageScaling = .scaleProportionallyUpOrDown
 
-        let title = NSTextField(labelWithString: "Show pet")
+        let title = NSTextField(labelWithString: "Show CTally")
         title.font = .systemFont(ofSize: 13, weight: .semibold)
         status.font = .systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
@@ -1274,7 +1275,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
         toggle.target = self
         toggle.action = #selector(toggled(_:))
-        toggle.setAccessibilityLabel("Show pet")
+        toggle.setAccessibilityLabel("Show CTally")
 
         let opacityTitle = NSTextField(labelWithString: "Opacity")
         opacity.target = self
@@ -1296,7 +1297,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         rule.boxType = .separator
 
         // The text and slider take the slack, pinning the switch, percentage and Quit to the
-        // right edge. The opacity line is indented to sit under "Show pet".
+        // right edge. The opacity line is indented to sit under "Show CTally".
         let row = NSStackView(views: [icon, labels, toggle])
         let fade = NSStackView(views: [opacityTitle, opacity, opacityValue])
         let footer = NSStackView(views: [hint, quit])
@@ -1333,19 +1334,19 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
 // MARK: - Controller
 
-final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private static let inset: CGFloat = 24
-    private static let anchorKey = "PetWindowAnchor"
-    private static let enabledKey = "PetEnabled"
-    private static let opacityKey = "PetOpacity"
-    private static let foldedKey = "PetListFolded"
+    private static let anchorKey = "WindowAnchor"
+    private static let enabledKey = "Enabled"
+    private static let opacityKey = "Opacity"
+    private static let foldedKey = "ListFolded"
 
     private let focuser = SessionFocuser()
     private let reader = StateReader(
-        directory: URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".claude/claude-pet.d")),
+        directory: URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".claude/ctally.d")),
         transcripts: URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent(".claude/projects")))
-    private var panel: PetPanel!
-    private var view: PetView!
+    private var panel: TallyPanel!
+    private var view: TallyView!
     private var statusItem: NSStatusItem!
     private var showItem: NSMenuItem!
     private var foldItem: NSMenuItem!
@@ -1354,23 +1355,23 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var timers: [Timer] = []
     private var restoring = false
 
-    /// Off is remembered, so a pet I switched off stays off through restarts and logins.
+    /// Off is remembered, so once switched off it stays off through restarts and logins.
     private var isEnabled: Bool {
-        UserDefaults.standard.bool(forKey: PetController.enabledKey)
+        UserDefaults.standard.bool(forKey: AppController.enabledKey)
     }
 
     /// See-through by default, so the list doesn't blot out what's behind it.
     private var opacity: Double {
         let range = SettingsController.opacityRange
-        return min(max(UserDefaults.standard.double(forKey: PetController.opacityKey),
+        return min(max(UserDefaults.standard.double(forKey: AppController.opacityKey),
                        range.lowerBound), range.upperBound)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        UserDefaults.standard.register(defaults: [PetController.enabledKey: true,
-                                                  PetController.opacityKey: 0.8])
+        UserDefaults.standard.register(defaults: [AppController.enabledKey: true,
+                                                  AppController.opacityKey: 0.8])
 
-        panel = PetPanel(contentRect: NSRect(x: 0, y: 0, width: 120, height: 120),
+        panel = TallyPanel(contentRect: NSRect(x: 0, y: 0, width: 120, height: 120),
                          styleMask: [.borderless, .nonactivatingPanel],
                          backing: .buffered,
                          defer: false)
@@ -1382,14 +1383,14 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         panel.isMovableByWindowBackground = false   // the view drags it, to tell drags from clicks
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        // Closing the settings window hides the app to hand focus back; the pet stays put.
+        // Closing the settings window hides the app to hand focus back; the indicator stays put.
         panel.canHide = false
         panel.alphaValue = CGFloat(opacity)
         panel.delegate = self
 
-        view = PetView(frame: NSRect(x: 0, y: 0, width: 120, height: 120))
+        view = TallyView(frame: NSRect(x: 0, y: 0, width: 120, height: 120))
         view.menu = makeMenu()
-        view.folded = UserDefaults.standard.bool(forKey: PetController.foldedKey)
+        view.folded = UserDefaults.standard.bool(forKey: AppController.foldedKey)
         view.onFold = { [weak self] in self?.setFolded($0) }
         view.onSelect = { [weak self] in self?.focuser.focus($0.pid) }
         panel.contentView = view
@@ -1398,7 +1399,7 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         refreshControls()
 
         if isEnabled {
-            showPet()
+            showTally()
         } else if !launchedAsLoginItem {
             // Opened by hand while off: show the way back on rather than nothing at all.
             showSettings()
@@ -1421,17 +1422,17 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func setEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: PetController.enabledKey)
-        if enabled { showPet() } else { hidePet() }
+        UserDefaults.standard.set(enabled, forKey: AppController.enabledKey)
+        if enabled { showTally() } else { hideTally() }
         refreshControls()
     }
 
     private func setOpacity(_ value: Double) {
-        UserDefaults.standard.set(value, forKey: PetController.opacityKey)
+        UserDefaults.standard.set(value, forKey: AppController.opacityKey)
         panel.alphaValue = CGFloat(opacity)
     }
 
-    private func showPet() {
+    private func showTally() {
         poll()
         // Not makeKeyAndOrderFront: an accessory app has no business holding key status.
         panel.orderFrontRegardless()
@@ -1439,7 +1440,7 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// Off means dormant: nothing on screen and no timers waking the CPU.
-    private func hidePet() {
+    private func hideTally() {
         stopTimers()
         panel.orderOut(nil)
     }
@@ -1471,11 +1472,11 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         settings?.update(enabled: enabled, sessions: sessions)
     }
 
-    /// The pet's right-click menu.
+    /// The indicator's right-click menu.
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let hide = menu.addItem(withTitle: "Hide Pet", action: #selector(hideFromMenu), keyEquivalent: "")
+        let hide = menu.addItem(withTitle: "Hide CTally", action: #selector(hideFromMenu), keyEquivalent: "")
         hide.target = self
         hide.toolTip = "Bring it back from the hexagon icon in the menu bar."
         foldItem = menu.addItem(withTitle: "Fold List", action: #selector(foldFromMenu), keyEquivalent: "")
@@ -1495,7 +1496,7 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Remembered, so the list comes back the way I left it.
     private func setFolded(_ folded: Bool) {
-        UserDefaults.standard.set(folded, forKey: PetController.foldedKey)
+        UserDefaults.standard.set(folded, forKey: AppController.foldedKey)
         view.folded = folded
         fit()
     }
@@ -1504,26 +1505,26 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         setFolded(!view.folded)
     }
 
-    /// The menu bar icon stays put while the pet is off, dimmed, so the pet is always one
+    /// The menu bar icon stays put while the indicator is off, dimmed, so it is always one
     /// click from coming back.
     private func makeStatusItem() -> NSStatusItem {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = PetController.menuBarIcon()
-        item.button?.toolTip = "Claude Pet"
+        item.button?.image = AppController.menuBarIcon()
+        item.button?.toolTip = "CTally"
 
         let menu = NSMenu()
         menu.autoenablesItems = false
-        showItem = menu.addItem(withTitle: "Show Pet", action: #selector(toggleFromMenuBar), keyEquivalent: "")
+        showItem = menu.addItem(withTitle: "Show CTally", action: #selector(toggleFromMenuBar), keyEquivalent: "")
         showItem.target = self
         menu.addItem(withTitle: "Settings…", action: #selector(settingsFromMenu), keyEquivalent: "").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit Claude Pet", action: #selector(NSApplication.terminate(_:)),
+        menu.addItem(withTitle: "Quit CTally", action: #selector(NSApplication.terminate(_:)),
                      keyEquivalent: "").target = NSApp
         item.menu = menu
         return item
     }
 
-    /// The pet's hexagon and play mark as a template image, so the menu bar tints it for
+    /// The hexagon and play mark as a template image, so the menu bar tints it for
     /// light and dark.
     private static func menuBarIcon() -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
@@ -1544,7 +1545,7 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "Claude Pet"
+        image.accessibilityDescription = "CTally"
         return image
     }
 
@@ -1617,12 +1618,12 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func saveAnchor() {
         let frame = panel.frame
         UserDefaults.standard.set([Double(frame.maxX), Double(frame.minY)],
-                                  forKey: PetController.anchorKey)
+                                  forKey: AppController.anchorKey)
     }
 
-    /// The bottom-right corner is what's remembered, so the pet grows leftward and upward.
+    /// The bottom-right corner is what's remembered, so it grows leftward and upward.
     private func restoredAnchor() -> CGPoint {
-        if let saved = UserDefaults.standard.array(forKey: PetController.anchorKey) as? [Double],
+        if let saved = UserDefaults.standard.array(forKey: AppController.anchorKey) as? [Double],
            saved.count == 2 {
             let anchor = CGPoint(x: saved[0], y: saved[1])
             if isOnScreen(anchor) { return anchor }
@@ -1630,7 +1631,7 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return defaultAnchor()
     }
 
-    /// A pet saved on a monitor that is no longer attached must not come back off-screen.
+    /// A position saved on a monitor that is no longer attached must not come back off-screen.
     private func isOnScreen(_ anchor: CGPoint) -> Bool {
         NSScreen.screens.contains {
             $0.visibleFrame.contains(CGPoint(x: anchor.x - 60, y: anchor.y + 60))
@@ -1641,7 +1642,7 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let frame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame else {
             return CGPoint(x: 120, y: 0)
         }
-        let inset = PetController.inset
+        let inset = AppController.inset
         return CGPoint(x: frame.maxX - inset, y: frame.minY + inset)
     }
 }
@@ -1650,7 +1651,7 @@ final class PetController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 // Single-file swiftc builds allow top-level code, so no @main is needed.
 
 let app = NSApplication.shared
-let controller = PetController()
+let controller = AppController()
 app.delegate = controller
 // Must be set before run(), or the app claims a Dock icon.
 app.setActivationPolicy(.accessory)

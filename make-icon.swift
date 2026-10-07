@@ -1,4 +1,4 @@
-// Generates ClaudePet.icns from the same hexagon geometry the pet draws.
+// Generates CTally.icns from the same hexagon geometry CTally draws.
 // Usage: swiftc -O make-icon.swift -o make-icon && ./make-icon <output.icns>
 
 import Cocoa
@@ -67,7 +67,7 @@ func render(_ pixels: Int) -> Data {
 }
 
 let out = CommandLine.arguments[1]
-let work = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("ClaudePet.iconset")
+let work = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("CTally.iconset")
 try? FileManager.default.removeItem(at: work)
 try! FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
 

@@ -1,15 +1,15 @@
 #!/bin/sh
-# Claude Code hook for Claude Pet: records this session's state where the pet looks.
+# Claude Code hook for CTally: records this session's state where CTally looks.
 #
-#   claude-pet.sh working | done | waiting | end
+#   ctally.sh working | done | waiting | end
 #
-# Writes ~/.claude/claude-pet.d/<session id> as "<state> <claude pid> <project folder>";
+# Writes ~/.claude/ctally.d/<session id> as "<state> <claude pid> <project folder>";
 # "end" removes it. A "waiting" never overwrites "done": Claude Code also sends its idle
 # notification after a turn has finished, and the turn being finished is what matters.
 # Silent, and always exits 0, so it can never get in Claude Code's way.
 
 state="$1"
-dir="$HOME/.claude/claude-pet.d"
+dir="$HOME/.claude/ctally.d"
 
 session="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -z "$session" ]; then

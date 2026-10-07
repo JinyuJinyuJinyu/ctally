@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Add Claude Pet's hooks to Claude Code's settings, or take them out again.
+"""Add CTally's hooks to Claude Code's settings, or take them out again.
 
     configure-hooks.py install   [path/to/settings.json]
     configure-hooks.py uninstall [path/to/settings.json]
 
 The settings file defaults to ~/.claude/settings.json. It is merged, never overwritten:
 other hooks and settings are left as they are, and a timestamped backup is written before
-any change. Earlier Claude Pet hooks, including the inline commands from before
-hooks/claude-pet.sh existed, are replaced rather than duplicated, so running it twice is
-harmless.
+any change. Earlier CTally hooks, and those from when it was called Claude Pet, are
+replaced rather than duplicated, so running it twice is harmless.
 """
 import json
 import os
@@ -17,7 +16,7 @@ import sys
 import tempfile
 import time
 
-HOOK = '"$HOME/.claude/hooks/claude-pet.sh"'
+HOOK = '"$HOME/.claude/hooks/ctally.sh"'
 
 # Each event, and the state it reports. No "matcher": these events take none.
 EVENTS = {
@@ -29,12 +28,17 @@ EVENTS = {
 }
 
 
+# "claude-pet" catches the hooks from before the rename, inline or scripted.
+MARKERS = ("ctally", "claude-pet")
+
+
 def is_ours(group):
-    return any("claude-pet" in hook.get("command", "") for hook in group.get("hooks", []))
+    return any(marker in hook.get("command", "")
+               for hook in group.get("hooks", []) for marker in MARKERS)
 
 
 def configure(settings, install):
-    """Settings with every Claude Pet hook removed, then (if installing) added back."""
+    """Settings with every CTally hook removed, then (if installing) added back."""
     settings = json.loads(json.dumps(settings))  # work on a copy
     hooks = settings.get("hooks", {})
     for event in list(hooks):

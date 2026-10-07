@@ -1,6 +1,6 @@
 # Build output (install.sh builds into build/)
 build/
-/claude-pet
+/ctally
 /make-icon
 *.icns
 

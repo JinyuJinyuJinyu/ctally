@@ -1,15 +1,16 @@
 #!/bin/bash
-# Build Claude Pet and install it: ~/Applications/ClaudePet.app, plus the Claude Code hooks
-# that feed it. Safe to re-run: it replaces the app and keeps your preferences.
+# Build CTally and install it: ~/Applications/CTally.app, plus the Claude Code hooks that
+# feed it. Safe to re-run: it replaces the app and keeps your preferences.
 #
-#   ./install.sh              build, install, hook into Claude Code, start the pet
+#   ./install.sh              build, install, hook into Claude Code, start CTally
 #   ./install.sh --no-hooks   leave ~/.claude/settings.json alone
-#   ./install.sh --no-launch  install without starting the pet
+#   ./install.sh --no-launch  install without starting CTally
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$ROOT/build"
-APP="$HOME/Applications/ClaudePet.app"
+APP="$HOME/Applications/CTally.app"
+BUNDLE_ID="io.github.jinyujinyujinyu.ctally"
 hooks=1
 launch=1
 for arg in "$@"; do
@@ -27,34 +28,34 @@ fi
 
 echo "==> building"
 mkdir -p "$BUILD"
-swiftc -O "$ROOT/claude-pet.swift" -o "$BUILD/claude-pet"
-if [ ! -f "$BUILD/ClaudePet.icns" ]; then
+swiftc -O "$ROOT/ctally.swift" -o "$BUILD/ctally"
+if [ ! -f "$BUILD/CTally.icns" ]; then
   swiftc -O "$ROOT/make-icon.swift" -o "$BUILD/make-icon"
-  "$BUILD/make-icon" "$BUILD/ClaudePet.icns"
+  "$BUILD/make-icon" "$BUILD/CTally.icns"
 fi
 
 echo "==> installing $APP"
-if pkill -f "$APP/Contents/MacOS/claude-pet" 2>/dev/null; then sleep 1; fi
+if pkill -f "$APP/Contents/MacOS/ctally" 2>/dev/null; then sleep 1; fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BUILD/claude-pet" "$APP/Contents/MacOS/claude-pet"
-cp "$BUILD/ClaudePet.icns" "$APP/Contents/Resources/ClaudePet.icns"
+cp "$BUILD/ctally" "$APP/Contents/MacOS/ctally"
+cp "$BUILD/CTally.icns" "$APP/Contents/Resources/CTally.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key><string>ClaudePet</string>
-	<key>CFBundleDisplayName</key><string>Claude Pet</string>
-	<key>CFBundleIdentifier</key><string>local.claudepet</string>
-	<key>CFBundleExecutable</key><string>claude-pet</string>
-	<key>CFBundleIconFile</key><string>ClaudePet</string>
+	<key>CFBundleName</key><string>CTally</string>
+	<key>CFBundleDisplayName</key><string>CTally</string>
+	<key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+	<key>CFBundleExecutable</key><string>ctally</string>
+	<key>CFBundleIconFile</key><string>CTally</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>1.0</string>
 	<key>CFBundleVersion</key><string>1</string>
 	<key>LSMinimumSystemVersion</key><string>12.0</string>
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
-	<key>NSAppleEventsUsageDescription</key><string>Clicking a session in Claude Pet brings its Terminal tab to the front.</string>
+	<key>NSAppleEventsUsageDescription</key><string>Clicking a session in CTally brings its Terminal tab to the front.</string>
 </dict>
 </plist>
 PLIST
@@ -63,11 +64,14 @@ touch "$APP"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
   -f "$APP" >/dev/null 2>&1 || true
 
+# Coming from Claude Pet, this project's earlier name? Carry everything over.
+"$ROOT/scripts/migrate-from-claude-pet.sh" "$BUNDLE_ID" "$APP"
+
 if [ "$hooks" = 1 ]; then
   echo "==> hooking into Claude Code"
   mkdir -p "$HOME/.claude/hooks"
-  cp "$ROOT/hooks/claude-pet.sh" "$HOME/.claude/hooks/claude-pet.sh"
-  chmod +x "$HOME/.claude/hooks/claude-pet.sh"
+  cp "$ROOT/hooks/ctally.sh" "$HOME/.claude/hooks/ctally.sh"
+  chmod +x "$HOME/.claude/hooks/ctally.sh"
   /usr/bin/python3 "$ROOT/scripts/configure-hooks.py" install
   echo "    Restart any Claude Code sessions already running so they pick up the hooks."
 fi
@@ -76,10 +80,10 @@ if [ "$launch" = 1 ]; then
   echo "==> starting"
   open "$APP"
   sleep 1
-  if pgrep -f "$APP/Contents/MacOS/claude-pet" >/dev/null; then
-    echo "Claude Pet is running. Look for the hexagon in the menu bar."
+  if pgrep -f "$APP/Contents/MacOS/ctally" >/dev/null; then
+    echo "CTally is running. Look for the hexagon in the menu bar."
   else
-    echo "Claude Pet did not start." >&2
+    echo "CTally did not start." >&2
     exit 1
   fi
 fi
