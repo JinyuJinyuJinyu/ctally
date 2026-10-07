@@ -26,8 +26,8 @@ from .settings import OPACITY_RANGE, SettingsWindow, app_icon, hexagon
 from .view import TallyView
 
 INSET = 24          # the default corner's distance from the screen's edges
-POLL_MS = 200       # the hooks' files, five times a second
-FRAME_MS = 1000 // 24
+POLL_MS = 500       # the hooks' files, twice a second
+FRAME_MS = 1000 // 12   # the marks bob slowly: 12 frames a second keeps them smooth, at half the CPU
 
 
 def run() -> int:
@@ -243,10 +243,16 @@ class Controller:
         self.fit()
         if self.settings is not None and self.settings.isVisible():
             self.settings.update_state(self.enabled, self.sessions)
+        # Only a poll sets anything moving: a session that changes state replays its entry.
+        if self.view.is_animating and not self.frame_timer.isActive():
+            self.frame_timer.start()
 
     def frame(self) -> None:
-        if self.view.is_animating:
-            self.view.invalidate_motion()
+        """Redraws what moves; once nothing does, draws it at rest and stops, so a still
+        indicator costs no frames at all."""
+        self.view.invalidate_motion()
+        if not self.view.is_animating:
+            self.frame_timer.stop()
 
     def show_settings(self) -> None:
         if self.settings is None:
