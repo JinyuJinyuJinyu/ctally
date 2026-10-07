@@ -174,3 +174,62 @@ def test_jump_switches_a_real_client(state, private_tmux, capsys):
     assert visited == ["wait", "done-old", "done-new", "wait"]
     messages = private_tmux("show-messages")
     assert "CTally: done-old · done" in messages
+
+
+# MARK: Usage limits
+
+def usage_files(home, five=71, week=49, fable=None):
+    """~/.claude.json with the session and the week, and a Fable week if given."""
+    import json
+    limits = [{"kind": "session", "group": "session", "percent": five, "resets_at": "2099-01-01T08:30:00Z"},
+              {"kind": "weekly_all", "group": "weekly", "percent": week, "resets_at": "2099-01-03T22:00:00Z"}]
+    if fable is not None:
+        limits.append({"kind": "weekly_scoped", "group": "weekly", "percent": fable,
+                       "resets_at": "2099-01-03T22:00:00Z", "scope": {"model": {"display_name": "Fable"}}})
+    (home / ".claude.json").write_text(json.dumps({"cachedUsageUtilization": {
+        "fetchedAtMs": time.time() * 1000 - 120_000, "utilization": {"limits": limits}}}))
+
+
+def test_status_for_tmux_adds_the_session_and_week(state, capsys, own_usage_and_prefs):
+    write(state, "a", f"working {os.getpid()} p\n")
+    usage_files(own_usage_and_prefs, five=80, week=49, fable=3)
+    cli.main(["status", "--tmux"])
+    assert capsys.readouterr().out == ("#[fg=#4accf2]▶1 #[fg=#ffb329]5h 80% #[fg=#99a6bd]7d 49%#[default]\n")
+    cli.main(["status"])
+    assert capsys.readouterr().out == "▶1\n"                   # the plain counts stay just counts
+
+
+def test_status_for_tmux_with_usage_switched_off(state, capsys, own_usage_and_prefs):
+    from ctally.prefs import Prefs
+    usage_files(own_usage_and_prefs, five=95)
+    cli.main(["status", "--tmux"])
+    assert capsys.readouterr().out == "#[fg=#ff6661]5h 95% #[fg=#99a6bd]7d 49%#[default]\n"
+    Prefs()["usage"] = False
+    cli.main(["status", "--tmux"])
+    assert capsys.readouterr().out == "\n"
+
+
+def test_usage_lists_every_limit(state, capsys, own_usage_and_prefs):
+    usage_files(own_usage_and_prefs, five=71, week=49, fable=0)
+    assert cli.main(["usage"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split("  ")[0] for line in lines[:3]] == [
+        "Current session", "Current week (all models)", "Current week (Fable)"]
+    assert "███████░░░  71%  resets " in lines[0] and "░░░░░░░░░░   0%" in lines[2]
+    assert lines[3] == "Updated 2 min ago"
+
+
+def test_usage_as_json(state, capsys, own_usage_and_prefs):
+    import json
+    usage_files(own_usage_and_prefs, five=92)
+    assert cli.main(["usage", "--json"]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["stale"] is False
+    assert [(l["title"], l["percent"], l["level"]) for l in found["limits"]] == [
+        ("Current session", 92, "critical"), ("Current week (all models)", 49, "ok")]
+    assert found["limits"][0]["resets_at"] == 4070939400
+
+
+def test_usage_with_nothing_known(state, capsys):
+    assert cli.main(["usage"]) == 1
+    assert "no usage limits known yet" in capsys.readouterr().err

@@ -26,10 +26,10 @@ def log_file() -> Path:
 
 
 class Prefs:
-    """A small JSON file: on or off, opacity, folded, and where the indicator sits (its
-    bottom-right corner, in screen coordinates)."""
+    """A small JSON file: on or off, opacity, folded, whether to show usage limits, and where
+    the indicator sits (its bottom-right corner, in screen coordinates)."""
 
-    DEFAULTS = {"enabled": True, "opacity": 0.8, "folded": False, "anchor": None}
+    DEFAULTS = {"enabled": True, "opacity": 0.8, "folded": False, "usage": True, "anchor": None}
 
     def __init__(self, path: Path | None = None):
         self.path = path or config_dir() / "prefs.json"

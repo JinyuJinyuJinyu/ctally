@@ -11,6 +11,10 @@ session starts; the chevron on its count bar folds it down to just the counts.
 A press that moves drags the indicator; one that doesn't is a click, which asks for that
 session's terminal. The view moves its own window while dragging and says when it's
 dropped; everything else about the window is the controller's business.
+
+Your plan's usage limits ride along when known: every one of them, a bar each, between the
+list's rows and its count bar; the session and the week as two small meters in the folded bar
+and on a card under the badges. Hovering any of them gives the details.
 """
 from __future__ import annotations
 
@@ -19,12 +23,13 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QPainter,
                            QPainterPath, QPen, QPixmap, QRegion)
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QToolTip, QWidget
 
 from ..sessions import BY_URGENCY, Session, State
+from ..usage import Usage, describe, percent_text, when
 
 ACCENT = {
     State.WORKING: QColor.fromRgbF(0.29, 0.80, 0.95),   # cyan
@@ -32,6 +37,8 @@ ACCENT = {
     State.DONE: QColor.fromRgbF(0.27, 0.88, 0.53),      # green
     State.IDLE: QColor.fromRgbF(0.60, 0.65, 0.74),      # slate
 }
+# A usage bar's fill: calm, then amber getting close, then red nearly out.
+LEVEL = (QColor.fromRgbF(0.80, 0.84, 0.93), ACCENT[State.WAITING], QColor.fromRgbF(1.00, 0.40, 0.38))
 
 
 def white(level: float, alpha: float) -> QColor:
@@ -115,6 +122,10 @@ class Fonts:
         self.count = font(11.5, QFont.Weight.DemiBold)
         self.agent = font(10, QFont.Weight.Medium)
         self.tag = font(10, QFont.Weight.DemiBold)
+        self.usage = font(10, QFont.Weight.Medium)
+        self.usage_when = font(9.5)
+        self.meter = font(9, QFont.Weight.DemiBold)
+        self.meter_tag = font(8.5, QFont.Weight.Medium)
 
 
 def measure(text: str, font: QFont) -> float:
@@ -136,6 +147,16 @@ class Row(NamedTuple):
     path: str           # directory, with ~ for home
     tmux: str           # "report:0.2", or empty outside tmux
     agents: str         # "4 agents · Verify", or empty with none running
+
+
+class Meter(NamedTuple):
+    """One usage limit, as drawn."""
+    label: str          # "Session", "Week · Fable"
+    tag: str            # "5h", for the small meters
+    share: float        # used, 0–1
+    percent: str        # "71%"
+    when: str           # "in 1h 12m", "Sat 10 pm"
+    level: int          # 0 fine, 1 getting close, 2 nearly out
 
 
 class Chip(NamedTuple):
@@ -175,6 +196,14 @@ class TallyView(QWidget):
     STATE_WIDTH = 46        # right-hand column for the state word
     WIDTH_RANGE = (200, 320)
 
+    # Usage limits.
+    USAGE_LINE = 18         # one limit in the list
+    USAGE_TRACK = 60        # the least a bar there shrinks to
+    METER_LINE = 12         # one of the two small meters
+    METER_TRACK = 44
+    PLATE_HEIGHT = 30       # the small meters' card under the badges
+    PLATE_MARGIN = 8        # under that card
+
     BOUNCE_DURATION = 1.5
     WASH_DURATION = 2.5
 
@@ -204,6 +233,15 @@ class TallyView(QWidget):
         self._version = 0                       # bumped by anything that changes the still parts
         self._still_only = False                # while drawing the layer: leave out what moves
         self._sprites: dict[tuple, QPixmap] = {}
+        self._usage: Usage | None = None
+        self._meters: tuple[Meter, ...] = ()        # every limit, for the list
+        self._compact: tuple[Meter, ...] = ()       # the session and the week, for small places
+        self._usage_dim = False                     # numbers over an hour old
+        self._usage_width = 0.0                     # what the list needs to show every limit
+        self._meter_width = 0.0                     # the small meters, side by side with a gap
+        # The indicator is never the active window, and Qt otherwise shows tooltips only for
+        # the active one.
+        self.setAttribute(Qt.WA_AlwaysShowToolTips)
 
     # MARK: The interface
 
@@ -250,6 +288,29 @@ class TallyView(QWidget):
         self._recompute()
         self.update()
 
+    def apply_usage(self, usage: Usage | None, now: float | None = None) -> None:
+        """The plan's usage limits, or None to show none. Redraws only when what's shown
+        changes, which the countdowns do once a minute."""
+        now = time.time() if now is None else now
+        self._usage = usage
+        meters: tuple[Meter, ...] = ()
+        compact: tuple[Meter, ...] = ()
+        dim = False
+        if usage is not None:
+            current = usage.at(now)
+            drawn = {limit: Meter(limit.short, limit.tag or limit.short, min(max(limit.percent / 100, 0.0), 1.0),
+                                  percent_text(limit), when(limit.resets_at, now) or limit.detail, limit.level)
+                     for limit in current.limits}
+            meters = tuple(drawn.values())
+            compact = tuple(drawn[limit] for limit in current.compact)
+            dim = usage.is_stale(now)
+        if (meters, compact, dim) == (self._meters, self._compact, self._usage_dim):
+            return
+        self._meters, self._compact, self._usage_dim = meters, compact, dim
+        self._version += 1
+        self._recompute()
+        self.update()
+
     def settle(self) -> None:
         """Skips every entry animation, as if all of it had happened long ago."""
         self._entered = {k: self._epoch - 60 for k in self._entered}
@@ -259,11 +320,16 @@ class TallyView(QWidget):
     def preferred_size(self) -> QSize:
         if not self.is_list:
             chip = self.chip
-            return QSize(math.ceil(max(1, len(self._rows)) * chip.width), math.ceil(chip.height))
+            width = max(1, len(self._rows)) * chip.width
+            if not self._compact:
+                return QSize(math.ceil(width), math.ceil(chip.height))
+            plate = TallyView.PLATE_HEIGHT + TallyView.PLATE_MARGIN
+            return QSize(math.ceil(max(width, self._meter_width + 16)), math.ceil(chip.height + plate))
         bar = 2 * TallyView.PADDING + TallyView.HEADER_HEIGHT
         if self._folded:
-            return QSize(math.ceil(self._bar_width), bar)
-        height = bar + TallyView.HEADER_GAP + self._rows_height + (TallyView.OVERFLOW_HEIGHT if self._overflow else 0)
+            return QSize(math.ceil(self._bar_width + (self._meter_width + 14 if self._compact else 0)), bar)
+        height = (bar + TallyView.HEADER_GAP + self._usage_height + self._rows_height
+                  + (TallyView.OVERFLOW_HEIGHT if self._overflow else 0))
         return QSize(math.ceil(max(self._list_width, self._bar_width)), math.ceil(height))
 
     @property
@@ -283,7 +349,8 @@ class TallyView(QWidget):
         captions."""
         w, h = self.width(), self.height()
         if not self.is_list:
-            self.update(QRect(0, 0, w, h - (48 if self.chip.captioned else 0)))
+            chip = self.chip
+            self.update(QRect(0, 0, w, math.ceil(chip.height) - (48 if chip.captioned else 0)))
             return
         if self._folded:
             # The bar's marks move and its numbers don't; all of it only while it washes.
@@ -348,7 +415,9 @@ class TallyView(QWidget):
                       for r in self._rows), default=0)
         wanted = 2 * TallyView.PADDING + TallyView.TEXT_X + widest
         low, high = TallyView.WIDTH_RANGE
-        self._list_width = min(max(wanted, low), high)
+        self._usage_width = self._usage_line_width() if self._meters else 0
+        self._list_width = min(max(wanted, self._usage_width, low), high)
+        self._meter_width = self._small_meter_width() if self._compact else 0
 
         # The count bar covers every session, hidden or not, most urgent first.
         self._counts = [(state, n) for state in BY_URGENCY
@@ -359,6 +428,33 @@ class TallyView(QWidget):
     def _count_item_width(self, count: int) -> float:
         """A count in the bar: small mark, then the number, then a gap before the next."""
         return 2 * 8 + 5 + measure(str(count), self.fonts.count) + 12
+
+    def _usage_columns(self) -> tuple[float, float, float]:
+        """The list's usage lines: widths of the label, percentage and reset columns."""
+        f = self.fonts
+        return (min(max(measure(m.label, f.usage) for m in self._meters), 110),
+                max(measure("100%", f.tag), max(measure(m.percent, f.tag) for m in self._meters)),
+                min(max(measure(m.when, f.usage_when) for m in self._meters), 110))
+
+    def _usage_line_width(self) -> float:
+        label, percent, reset = self._usage_columns()
+        return 2 * TallyView.PADDING + 4 + label + 10 + TallyView.USAGE_TRACK + 8 + percent + 10 + reset + 4
+
+    def _meter_columns(self) -> tuple[float, float]:
+        f = self.fonts
+        return (max(measure(m.tag, f.meter_tag) for m in self._compact),
+                max(measure("100%", f.meter), max(measure(m.percent, f.meter) for m in self._compact)))
+
+    def _small_meter_width(self) -> float:
+        tag, percent = self._meter_columns()
+        return tag + 5 + TallyView.METER_TRACK + 5 + percent
+
+    @property
+    def _usage_height(self) -> float:
+        """The list's usage block and the gap above it; nothing folded, or with none known."""
+        if not self._meters or self._folded:
+            return 0.0
+        return len(self._meters) * TallyView.USAGE_LINE + TallyView.HEADER_GAP
 
     @property
     def _rows_height(self) -> float:
@@ -373,7 +469,8 @@ class TallyView(QWidget):
     def _rows_bottom(self) -> float:
         """The rows start above the count bar, which sits at the bottom so it stays put while
         the rows fold away above it."""
-        return self.height() - TallyView.PADDING - TallyView.HEADER_HEIGHT - TallyView.HEADER_GAP
+        return (self.height() - TallyView.PADDING - TallyView.HEADER_HEIGHT - TallyView.HEADER_GAP
+                - self._usage_height)
 
     def _row_rect(self, index: int) -> QRectF:
         top = self._rows_bottom - self._row_offsets[index + 1]
@@ -385,10 +482,34 @@ class TallyView(QWidget):
         bar = self._bar_rect
         return QRectF(self.width() - TallyView.PADDING - size - 2, bar.y() + (bar.height() - size) / 2, size, size)
 
+    @property
+    def _badges_left(self) -> float:
+        """The badges sit centred over the usage card when it's the wider."""
+        chip = self.chip if self._rows else TallyView.SINGLE
+        return max(0.0, (self.width() - max(1, len(self._rows)) * chip.width) / 2)
+
     def _item_rect(self, index: int) -> QRectF:
         if self.is_list:
             return self._row_rect(index)
-        return QRectF(index * self.chip.width, 0, self.chip.width, self.height())
+        chip = self.chip
+        return QRectF(self._badges_left + index * chip.width, 0, chip.width, chip.height)
+
+    def _usage_rect(self) -> QRectF | None:
+        """Where the usage limits are drawn: the list's block, the folded bar's meters, or
+        the card under the badges."""
+        if self.is_list and self._folded and self._compact:
+            fold = self._fold_rect()
+            bar = self._bar_rect
+            return QRectF(fold.x() - 10 - self._meter_width, bar.y(), self._meter_width, bar.height())
+        if self.is_list and not self._folded and self._meters:
+            height = len(self._meters) * TallyView.USAGE_LINE
+            bar = self._bar_rect
+            return QRectF(bar.x(), bar.y() - TallyView.HEADER_GAP - height, bar.width(), height)
+        if not self.is_list and self._compact:
+            width = min(self._meter_width + 16, self.width() - 4)
+            top = (self.chip if self._rows else TallyView.SINGLE).height
+            return QRectF((self.width() - width) / 2, top, width, TallyView.PLATE_HEIGHT)
+        return None
 
     def _item_at(self, point: QPointF) -> int | None:
         """The row or badge under a point, if it stands for a session."""
@@ -454,6 +575,20 @@ class TallyView(QWidget):
     def leaveEvent(self, event) -> None:
         self._set_hovered(None)
 
+    def event(self, event) -> bool:
+        """Hovering over the usage limits spells them out: every limit, its reset, and how old
+        the numbers are."""
+        if event.type() == QEvent.ToolTip:
+            area = self._usage_rect()
+            if self._usage is not None and area is not None and area.contains(QPointF(event.pos())):
+                QToolTip.showText(event.globalPos(), "\n".join(describe(self._usage, time.time())), self,
+                                  area.toAlignedRect())
+            else:
+                QToolTip.hideText()
+                event.ignore()
+            return True
+        return super().event(event)
+
     # MARK: Motion
 
     def _age(self, session: Session) -> float:
@@ -511,13 +646,18 @@ class TallyView(QWidget):
     def _draw_all(self, painter: QPainter) -> None:
         if self.is_list:
             self._draw_list(painter)
-        elif not self._rows:
-            self._draw_chip(painter, self._placeholder(), QRectF(self.rect()), TallyView.SINGLE)
+            return
+        if not self._rows:
+            single = TallyView.SINGLE
+            self._draw_chip(painter, self._placeholder(),
+                            QRectF(self._badges_left, 0, single.width, single.height), single)
         else:
             chip = self.chip
             for index, row in enumerate(self._rows):
-                self._draw_chip(painter, row, QRectF(index * chip.width, 0, chip.width, self.height()),
-                                chip, highlighted=index == self._hovered)
+                self._draw_chip(painter, row, self._item_rect(index), chip, highlighted=index == self._hovered)
+        plate = self._usage_rect()
+        if plate is not None and self._needs(plate):
+            self._draw_usage_plate(painter, plate)
 
     @staticmethod
     def _placeholder() -> Row:
@@ -549,8 +689,9 @@ class TallyView(QWidget):
         """The marks: the badges whole, the list's column of marks, or a folded bar's."""
         if not self.is_list:
             chip = self.chip if self._rows else TallyView.SINGLE
+            left = self._badges_left
             for index, row in enumerate(self._rows or [self._placeholder()]):
-                rect = QRectF(index * chip.width, 0, chip.width, self.height())
+                rect = QRectF(left + index * chip.width, 0, chip.width, chip.height)
                 if self._needs(rect):
                     self._draw_badge(painter, row, rect, chip, highlighted=index == self._hovered)
             return
@@ -715,9 +856,15 @@ class TallyView(QWidget):
         if self._folded:
             return
 
-        # A hairline between the count bar and the rows.
+        # Hairlines between the count bar, the usage limits and the rows.
         painter.fillRect(QRectF(bar.x() + 4, self._rows_bottom + TallyView.HEADER_GAP / 2 - 0.5, bar.width() - 8, 1),
                          white(1, 0.08))
+        usage = self._usage_rect()
+        if usage is not None:
+            painter.fillRect(QRectF(bar.x() + 4, bar.y() - TallyView.HEADER_GAP / 2 - 0.5, bar.width() - 8, 1),
+                             white(1, 0.08))
+            if self._needs(usage):
+                self._draw_usage_lines(painter, usage)
         for index, row in enumerate(self._rows):
             rect = self._row_rect(index)
             # Bounces reach a little beyond the row.
@@ -768,6 +915,10 @@ class TallyView(QWidget):
             if self._needs(number):
                 draw_text(painter, str(count), number, self.fonts.count, ACCENT[state])
             x += self._count_item_width(count)
+        meters = self._usage_rect() if self._folded else None
+        if meters is not None and self._needs(meters):
+            painter.fillRect(QRectF(meters.x() - 8, bar.y() + 5, 1, bar.height() - 10), white(1, 0.10))
+            self._draw_small_meters(painter, meters)
 
     def _draw_row(self, painter: QPainter, row: Row, rect: QRectF, highlighted: bool) -> None:
         state = row.session.state
@@ -843,6 +994,66 @@ class TallyView(QWidget):
             painter.setBrush(faded(accent, 0.9))
             painter.drawRoundedRect(filled, 2, 2)
         return right - track.x()
+
+    # Usage limits
+
+    def _draw_usage_lines(self, painter: QPainter, rect: QRectF) -> None:
+        """Every limit, a line each: its name, a bar, the share used, and when it resets."""
+        f = self.fonts
+        label_width, percent_width, reset_width = self._usage_columns()
+        painter.save()
+        if self._usage_dim:
+            painter.setOpacity(0.5)
+        for index, meter in enumerate(self._meters):
+            line = QRectF(rect.x() + 4, rect.y() + index * TallyView.USAGE_LINE, rect.width() - 8, TallyView.USAGE_LINE)
+            draw_text(painter, meter.label, QRectF(line.x(), line.y(), label_width, line.height()),
+                      f.usage, white(0.95, 0.75))
+            reset = QRectF(line.right() - reset_width, line.y(), reset_width, line.height())
+            draw_text(painter, meter.when, reset, f.usage_when, white(0.95, 0.5), Qt.AlignRight)
+            percent = QRectF(reset.x() - 10 - percent_width, line.y(), percent_width, line.height())
+            draw_text(painter, meter.percent, percent, f.tag,
+                      LEVEL[meter.level] if meter.level else white(0.95, 0.9), Qt.AlignRight)
+            left = line.x() + label_width + 10
+            self._draw_track(painter, QRectF(left, line.center().y() - 2, percent.x() - 8 - left, 4), meter)
+        painter.restore()
+
+    def _draw_small_meters(self, painter: QPainter, rect: QRectF) -> None:
+        """The session and the week, one over the other: "5h ▬▬▭ 71%"."""
+        f = self.fonts
+        tag_width, percent_width = self._meter_columns()
+        track_width = max(16.0, rect.width() - tag_width - 5 - 5 - percent_width)
+        top = rect.center().y() - len(self._compact) * TallyView.METER_LINE / 2
+        painter.save()
+        if self._usage_dim:
+            painter.setOpacity(0.5)
+        for index, meter in enumerate(self._compact):
+            line = QRectF(rect.x(), top + index * TallyView.METER_LINE, rect.width(), TallyView.METER_LINE)
+            draw_text(painter, meter.tag, QRectF(line.x(), line.y(), tag_width, line.height()),
+                      f.meter_tag, white(0.95, 0.6))
+            track = QRectF(line.x() + tag_width + 5, line.center().y() - 1.5, track_width, 3)
+            self._draw_track(painter, track, meter)
+            draw_text(painter, meter.percent, QRectF(track.right() + 5, line.y(), percent_width, line.height()),
+                      f.meter, LEVEL[meter.level] if meter.level else white(0.95, 0.85), Qt.AlignRight)
+        painter.restore()
+
+    def _draw_usage_plate(self, painter: QPainter, rect: QRectF) -> None:
+        """Under the badges, the small meters on a card of their own, like the captions."""
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(white(0.04, 0.55))
+        painter.drawRoundedRect(rect, 8, 8)
+        self._draw_small_meters(painter, rect.adjusted(8, 0, -8, 0))
+
+    @staticmethod
+    def _draw_track(painter: QPainter, track: QRectF, meter: Meter) -> None:
+        radius = track.height() / 2
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(white(1, 0.12))
+        painter.drawRoundedRect(track, radius, radius)
+        if meter.share > 0:
+            filled = QRectF(track)
+            filled.setWidth(max(track.height(), track.width() * meter.share))
+            painter.setBrush(faded(LEVEL[meter.level], 0.9))
+            painter.drawRoundedRect(filled, radius, radius)
 
     def _draw_small_mark(self, painter: QPainter, state: State, c: QPointF, glow: float,
                          radius: float = MARK_RADIUS) -> None:

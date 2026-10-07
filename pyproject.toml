@@ -36,4 +36,4 @@ version = { attr = "ctally.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-ctally = ["hooks/ctally.sh"]
+ctally = ["hooks/*.sh"]

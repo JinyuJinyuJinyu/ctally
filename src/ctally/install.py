@@ -34,7 +34,7 @@ def command() -> str:
     sys.exit("Run this as the `ctally` command (pipx install puts it on your PATH).")
 
 
-def setup(tmux: bool, hooks: bool, autostart: bool, launch: bool) -> int:
+def setup(tmux: bool, hooks: bool, autostart: bool, launch: bool, statusline: bool = True) -> int:
     ctally = command()
     if system.MAC and OLD_APP.exists():
         print("==> replacing the old CTally.app")
@@ -44,11 +44,14 @@ def setup(tmux: bool, hooks: bool, autostart: bool, launch: bool) -> int:
         print("==> hooking into Claude Code")
         claude_hooks.install_script()
         try:
-            say(claude_hooks.update(install=True))
+            say(claude_hooks.update(install=True, statusline=statusline))
         except claude_hooks.SettingsError as error:
             print(error, file=sys.stderr)
             return 1
         print("    Restart any Claude Code sessions already running so they pick up the hooks.")
+        if statusline:
+            print("    The status line passes your plan's usage limits to CTally and shows nothing itself;"
+                  " a status line you had keeps showing.")
 
     if tmux:
         print("==> setting up tmux")
@@ -64,11 +67,29 @@ def setup(tmux: bool, hooks: bool, autostart: bool, launch: bool) -> int:
         say(install_autostart(ctally, start_now=launch))
     elif launch:
         start(ctally)
-    if launch:
-        print("CTally is running." + (" Look for the hexagon in the menu bar." if system.MAC else ""))
-    if system.LINUX and launch and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+    if launch and system.LINUX and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         print("    No desktop session here: CTally starts at your next login, or run `ctally run` there.")
+    elif launch and running_soon():
+        print("CTally is running." + (" Look for the hexagon in the menu bar." if system.MAC else ""))
+    elif launch:
+        print(f"CTally didn't start. Run `ctally run` to see why (its log: {prefs.log_file()}).", file=sys.stderr)
+        return 1
     return 0
+
+
+def running_soon(seconds: float = 90) -> bool:
+    """Whether the indicator answers once started. The first start after installing can take
+    a while on macOS, which checks Qt's freshly installed libraries before it lets them load."""
+    start = time.monotonic()
+    noted = False
+    while time.monotonic() - start < seconds:
+        if prefs.tell_running("ping"):
+            return True
+        if not noted and time.monotonic() - start > 4:
+            print("    Waiting for CTally to start (the first start after installing takes longest)…")
+            noted = True
+        time.sleep(0.25)
+    return False
 
 
 def uninstall() -> int:
@@ -123,9 +144,17 @@ def install_autostart(ctally: str, start_now: bool) -> str:
         with open(LAUNCH_AGENT, "wb") as f:
             plistlib.dump(agent, f)
         domain = f"gui/{os.getuid()}"
-        launchctl("bootout", f"{domain}/{prefs.APP_ID}")
+        service = f"{domain}/{prefs.APP_ID}"
+        if launchctl("bootout", service):
+            # bootout returns before the old one is gone, and loading it again before then fails.
+            deadline = time.monotonic() + 5
+            while launchctl("print", service) and time.monotonic() < deadline:
+                time.sleep(0.1)
         if start_now:
-            launchctl("bootstrap", domain, str(LAUNCH_AGENT))
+            for _ in range(5):
+                if launchctl("bootstrap", domain, str(LAUNCH_AGENT)):
+                    break
+                time.sleep(0.5)
         return f"Starts at login: {LAUNCH_AGENT}"
 
     AUTOSTART.parent.mkdir(parents=True, exist_ok=True)

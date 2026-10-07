@@ -76,6 +76,45 @@ class Hook:
         return sorted(os.listdir(folder)) if folder.is_dir() else None
 
 
+def _real_files() -> dict:
+    home = Path.home()
+    watched = [home / ".claude" / "settings.json", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf"]
+    hooks = home / ".claude" / "hooks"
+    if hooks.is_dir():
+        watched += sorted(hooks.iterdir())
+    found = {}
+    for path in watched:
+        try:
+            info = path.stat()
+            found[str(path)] = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            pass
+    return found
+
+
+@pytest.fixture(scope="session", autouse=True)
+def real_setup_untouched():
+    """A test that writes to the real Claude Code or tmux setup fails the run, loudly."""
+    before = _real_files()
+    yield
+    after = _real_files()
+    changed = sorted(set(before) ^ set(after) | {p for p in before.keys() & after.keys() if before[p] != after[p]})
+    assert not changed, f"the tests changed real files: {changed}"
+
+
+@pytest.fixture(autouse=True)
+def own_usage_and_prefs(tmp_path_factory, monkeypatch):
+    """Usage limits and preferences come from each test's own files, never the real
+    ~/.claude.json, status line or CTally settings."""
+    from ctally import usage
+    home = tmp_path_factory.mktemp("usage")
+    monkeypatch.setattr(usage, "CLAUDE_JSON", home / ".claude.json")
+    monkeypatch.setattr(usage, "STATUS_LINE", home / ".statusline")
+    monkeypatch.setenv("CTALLY_CLAUDE_JSON", str(home / ".claude.json"))
+    monkeypatch.setenv("CTALLY_CONFIG_DIR", str(home / "config"))
+    return home
+
+
 @pytest.fixture
 def hook(tmp_path):
     return Hook(tmp_path, os.getpid())

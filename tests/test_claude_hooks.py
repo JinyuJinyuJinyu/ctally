@@ -8,7 +8,7 @@ import stat
 import pytest
 
 from ctally import claude_hooks
-from ctally.claude_hooks import EVENTS, HOOK, SettingsError, configure, update
+from ctally.claude_hooks import EVENTS, HOOK, STATUS, SettingsError, configure, update
 
 
 def ours(settings: dict) -> dict[str, list[str]]:
@@ -145,21 +145,65 @@ def test_empty_file_counts_as_empty_settings(tmp_path):
     assert ours(json.loads(path.read_text())).keys() == EVENTS.keys()
 
 
-def test_install_script_writes_an_executable_copy(tmp_path, monkeypatch):
+def test_install_script_writes_executable_copies(tmp_path, monkeypatch):
     script = tmp_path / "hooks" / "ctally.sh"
     monkeypatch.setattr(claude_hooks, "SCRIPT", script)
     claude_hooks.install_script()
-    source = (claude_hooks.resources.files("ctally") / "hooks" / "ctally.sh").read_bytes()
-    assert script.read_bytes() == source
-    assert os.access(script, os.X_OK)
+    for name in ("ctally.sh", "ctally-statusline.sh"):
+        source = (claude_hooks.resources.files("ctally") / "hooks" / name).read_bytes()
+        assert (script.parent / name).read_bytes() == source
+        assert os.access(script.parent / name, os.X_OK)
     assert not list(script.parent.glob(".*"))                  # no temporary file left
+
+
+# MARK: The status line
+
+def test_status_line_added_when_there_is_none():
+    settings = configure({"model": "opus"}, install=True)
+    assert settings["statusLine"] == {"type": "command", "command": STATUS}
+    assert configure(settings, install=True) == settings
+    assert "statusLine" not in configure(settings, install=False)
+
+
+def test_a_status_line_you_had_is_wrapped_and_put_back():
+    theirs = {"type": "command", "command": "bash -c 'echo \"$(whoami)\" | cut -c1-3' # it's mine",
+              "padding": 0, "refreshInterval": 5}
+    settings = configure({"statusLine": theirs}, install=True)
+    wrapped = settings["statusLine"]
+    assert wrapped["command"].startswith(STATUS + " ")
+    assert {k: v for k, v in wrapped.items() if k != "command"} == {"type": "command", "padding": 0,
+                                                                    "refreshInterval": 5}
+    assert configure(settings, install=True) == settings                # not wrapped twice
+    assert configure(settings, install=False)["statusLine"] == theirs
+
+
+def test_status_line_can_be_left_out():
+    settings = configure({}, install=True, statusline=False)
+    assert "statusLine" not in settings and ours(settings).keys() == EVENTS.keys()
+    # Choosing to leave it out later takes out one installed before.
+    theirs = {"type": "command", "command": "~/bin/line.sh"}
+    wrapped = configure({"statusLine": theirs}, install=True)
+    assert configure(wrapped, install=True, statusline=False)["statusLine"] == theirs
+
+
+def test_someone_elses_status_line_is_left_alone_on_uninstall():
+    theirs = {"type": "command", "command": "~/bin/line.sh"}
+    assert configure({"statusLine": theirs}, install=False) == {"statusLine": theirs}
+
+
+def test_update_says_what_it_did(tmp_path):
+    path = tmp_path / "settings.json"
+    assert "hooks and status line installed" in update(install=True, path=path)
+    assert "hooks and status line already installed" in update(install=True, path=path)
+    assert "hooks and status line removed" in update(install=False, path=path)
+    assert "statusLine" not in json.loads(path.read_text())
 
 
 def test_remove_scripts_keeps_a_shared_folder(tmp_path, monkeypatch):
     folder = tmp_path / "hooks"
     folder.mkdir()
     monkeypatch.setattr(claude_hooks, "SCRIPT", folder / "ctally.sh")
-    for name in ("ctally.sh", "claude-pet.sh", "someone-elses.sh"):
+    for name in ("ctally.sh", "ctally-statusline.sh", "claude-pet.sh", "someone-elses.sh"):
         (folder / name).write_text("#!/bin/sh\n")
     claude_hooks.remove_scripts()
     assert sorted(os.listdir(folder)) == ["someone-elses.sh"]

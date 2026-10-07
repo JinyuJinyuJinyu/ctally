@@ -4,21 +4,23 @@ state files CTally's hooks write.
 
 Switch it off and on from the tray icon, the settings window, or the indicator's right-click
 menu. Off is remembered, and while off the app sits dormant: only the tray icon stays, and no
-timers run.
+timers run. The tray icon's menu also lists your plan's usage limits, whenever they're known.
 """
 from __future__ import annotations
 
 import os
 import signal
 import sys
+import time
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import focus, prefs, system
 from ..sessions import StateReader
+from ..usage import UsageReader, describe
 from . import mac
 from .settings import OPACITY_RANGE, SettingsWindow, app_icon, hexagon
 from .view import TallyView
@@ -114,6 +116,7 @@ class Controller:
         self.server = server
         self.prefs = prefs.Prefs()
         self.reader = StateReader()
+        self.usage = UsageReader()
         self.sessions: list = []
         self.settings: SettingsWindow | None = None
 
@@ -186,6 +189,17 @@ class Controller:
             self.hide_tally()
         self.refresh_controls()
 
+    @property
+    def show_usage(self) -> bool:
+        return bool(self.prefs["usage"])
+
+    def set_show_usage(self, shown: bool) -> None:
+        self.prefs["usage"] = bool(shown)
+        if self.settings is not None:
+            self.settings.update_usage(self.show_usage)
+        if self.enabled:
+            self.poll()
+
     def set_opacity(self, value: float) -> None:
         self.prefs["opacity"] = round(min(max(float(value), OPACITY_RANGE[0]), OPACITY_RANGE[1]), 2)
         self.view.setWindowOpacity(self.opacity)
@@ -225,6 +239,7 @@ class Controller:
     def poll(self) -> None:
         self.sessions = self.reader.poll()
         self.view.apply(self.sessions)
+        self.view.apply_usage(self.usage.poll() if self.show_usage else None)
         self.fit()
         if self.settings is not None and self.settings.isVisible():
             self.settings.update_state(self.enabled, self.sessions)
@@ -238,6 +253,7 @@ class Controller:
             window = SettingsWindow()
             window.toggled.connect(self.set_enabled)
             window.opacity_changed.connect(self.set_opacity)
+            window.usage_toggled.connect(self.set_show_usage)
             window.quit_requested.connect(self.app.quit)
             window.closed.connect(self._settings_closed)
             window.winId()                  # a native window to set the Space behaviour on
@@ -248,6 +264,7 @@ class Controller:
             self.settings = window
         self.settings.update_state(self.enabled, self.sessions)
         self.settings.update_opacity(self.opacity)
+        self.settings.update_usage(self.show_usage)
         if system.MAC:
             mac.activate()
         self.settings.show()
@@ -268,6 +285,8 @@ class Controller:
         tray = QSystemTrayIcon(tray_icon(dimmed=not self.enabled))
         tray.setToolTip("CTally")
         self.tray_menu = QMenu()
+        self.usage_actions: list[QAction] = []
+        self.tray_menu.aboutToShow.connect(self._list_usage)
         self.show_action = self.tray_menu.addAction("Show CTally")
         self.show_action.setCheckable(True)
         self.show_action.triggered.connect(lambda: self.set_enabled(not self.enabled))
@@ -278,6 +297,25 @@ class Controller:
         tray.activated.connect(self._tray_activated)
         tray.show()
         return tray
+
+    def _list_usage(self) -> None:
+        """At the top of the tray menu, each usage limit in words, fresh each time it opens."""
+        for action in self.usage_actions:
+            self.tray_menu.removeAction(action)
+            action.deleteLater()
+        self.usage_actions = []
+        usage = self.usage.poll()
+        if usage is None:
+            return
+        first = self.tray_menu.actions()[0]
+        for line in describe(usage, time.time()):
+            action = QAction(line, self.tray_menu)
+            action.setEnabled(False)
+            self.usage_actions.append(action)
+        rule = QAction(self.tray_menu)
+        rule.setSeparator(True)
+        self.usage_actions.append(rule)
+        self.tray_menu.insertActions(first, self.usage_actions)
 
     def _tray_activated(self, reason) -> None:
         # macOS opens the menu on a click by itself; on Linux a plain click brings up settings.
@@ -297,6 +335,8 @@ class Controller:
         if self.view.is_list:
             fold = menu.addAction("Unfold List" if self.view.folded else "Fold List")
             fold.triggered.connect(lambda: self.set_folded(not self.view.folded))
+        limits = menu.addAction("Hide Usage Limits" if self.show_usage else "Show Usage Limits")
+        limits.triggered.connect(lambda: self.set_show_usage(not self.show_usage))
         menu.addAction("Settings…").triggered.connect(self.show_settings)
         menu.addSeparator()
         menu.addAction("Quit CTally").triggered.connect(self.app.quit)
@@ -372,7 +412,8 @@ class Controller:
 
     def _answer(self, connection) -> None:
         """`ctally run` while running opens the settings; `ctally setup` and `uninstall` ask
-        the old instance to quit. The reply says it's done."""
+        the old instance to quit, and `setup` checks the new one answers. The reply says it's
+        done."""
         if not connection.canReadLine():
             return
         word = bytes(connection.readLine()).decode(errors="replace").strip()

@@ -1,4 +1,5 @@
-"""The settings window: CTally on or off, and how see-through it is."""
+"""The settings window: CTally on or off, how see-through it is, and whether it shows your
+plan's usage limits."""
 from __future__ import annotations
 
 import math
@@ -93,10 +94,12 @@ class Switch(QAbstractButton):
 
 
 class SettingsWindow(QWidget):
-    """Switch, opacity, quit. Closing it with Esc or Cmd/Ctrl-W, like any small panel."""
+    """Switch, opacity, usage limits, quit. Closing it with Esc or Cmd/Ctrl-W, like any small
+    panel."""
 
     toggled = Signal(bool)
     opacity_changed = Signal(float)
+    usage_toggled = Signal(bool)
     quit_requested = Signal()
     closed = Signal()
 
@@ -138,6 +141,18 @@ class SettingsWindow(QWidget):
         self.opacity_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.opacity_value.setFixedWidth(38)
 
+        usage_title = QLabel("Usage limits")
+        usage_hint = QLabel("Session and weekly limits, as in /usage")
+        secondary(usage_hint)
+        usage_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        usage_labels = QVBoxLayout()
+        usage_labels.setSpacing(2)
+        usage_labels.addWidget(usage_title)
+        usage_labels.addWidget(usage_hint)
+        self.usage_switch = Switch()
+        self.usage_switch.setAccessibleName("Usage limits")
+        self.usage_switch.toggled.connect(self.usage_toggled)
+
         where = "menu bar" if system.MAC else "top bar"
         hint = QLabel(f"Off stays off, even after a restart. The hexagon icon in the {where} switches it too.")
         hint.setWordWrap(True)
@@ -163,6 +178,11 @@ class SettingsWindow(QWidget):
         fade.addWidget(opacity_title)
         fade.addWidget(self.slider, 1)
         fade.addWidget(self.opacity_value)
+        limits = QHBoxLayout()
+        limits.setSpacing(12)
+        limits.setContentsMargins(52, 0, 0, 0)
+        limits.addLayout(usage_labels, 1)
+        limits.addWidget(self.usage_switch, 0, Qt.AlignVCenter)
         footer = QHBoxLayout()
         footer.setSpacing(12)
         footer.addWidget(hint, 1)
@@ -173,6 +193,7 @@ class SettingsWindow(QWidget):
         stack.setSpacing(14)
         stack.addLayout(row)
         stack.addLayout(fade)
+        stack.addLayout(limits)
         stack.addWidget(rule)
         stack.addLayout(footer)
 
@@ -205,6 +226,13 @@ class SettingsWindow(QWidget):
             self.slider.setValue(percent)
             self.slider.blockSignals(False)
         self.opacity_value.setText(f"{percent}%")
+
+    def update_usage(self, shown: bool) -> None:
+        if self.usage_switch.isChecked() != shown:
+            self.usage_switch.blockSignals(True)
+            self.usage_switch.setChecked(shown)
+            self.usage_switch.blockSignals(False)
+            self.usage_switch.update()
 
     def _slid(self, percent: int) -> None:
         self.opacity_value.setText(f"{percent}%")

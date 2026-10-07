@@ -1,15 +1,18 @@
 """ctally: CTally from the shell and from tmux.
 
   ctally run                    start the indicator (setup arranges this at login)
-  ctally setup [--tmux]         install the Claude Code hooks, start CTally at login, and start it
-                                now; --tmux also binds prefix + J and puts the counts in tmux's
-                                status line
+  ctally setup [--tmux]         install the Claude Code hooks and status line, start CTally at
+                                login, and start it now; --tmux also binds prefix + J and puts
+                                the counts in tmux's status line
   ctally uninstall              undo all of that (then: pipx uninstall ctally)
 
   ctally status [--tmux]        counts of live sessions by state, most urgent first: "!1 ▶2 ✓5 ·1"
                                 (waiting, working, done, idle); --tmux adds status-line colours
+                                and your plan's session and weekly usage: "5h 71% 7d 49%"
   ctally list                   one line per live session: state, tmux pane, subagents running,
                                 project, id
+  ctally usage [--json]         your plan's usage limits, as Claude Code's /usage shows them:
+                                the session, the week, each model's week, and when each resets
   ctally jump [pane client socket]
                                 switch a tmux client to the session that needs you: waiting first,
                                 then finished, longest-waiting first. Run it again to move on to
@@ -19,16 +22,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import time
 from typing import NamedTuple
 
 from . import __version__, system
+from . import usage as limits
 from .sessions import STATE_DIR
 
 GLYPH = {"waiting": "!", "working": "▶", "done": "✓", "idle": "·"}
 COLOUR = {"waiting": "#ffb329", "working": "#4accf2", "done": "#45e087", "idle": "#99a6bd"}
 RANK = {"waiting": 0, "done": 1, "working": 2, "idle": 3}
+LEVEL_COLOUR = ("#99a6bd", "#ffb329", "#ff6661")    # usage: fine, getting close, nearly out
 
 
 class Live(NamedTuple):
@@ -81,8 +88,45 @@ def status(tmux: bool) -> None:
         if counts.get(state):
             item = f"{GLYPH[state]}{counts[state]}"
             items.append(f"#[fg={COLOUR[state]}]{item}" if tmux else item)
+    if tmux:
+        items += usage_items()
     out = " ".join(items)
     print(out + "#[default]" if tmux and out else out)
+
+
+def usage_items() -> list[str]:
+    """The session and the week for the status line, coloured as they fill up; none if
+    they're switched off in the settings or not known."""
+    from .prefs import Prefs
+    found = limits.read() if Prefs()["usage"] else None
+    if found is None:
+        return []
+    return [f"#[fg={LEVEL_COLOUR[limit.level]}]{limit.tag or limit.short} {limits.percent_text(limit)}"
+            for limit in found.at(time.time()).compact]
+
+
+def usage(as_json: bool) -> int:
+    found = limits.read()
+    if found is None:
+        print("ctally: no usage limits known yet. Claude Code saves them once a session on a Pro, Max or "
+              "Team plan has run.", file=sys.stderr)
+        return 1
+    now = time.time()
+    current = found.at(now)
+    if as_json:
+        print(json.dumps({"updated": found.fetched_at, "stale": found.is_stale(now), "limits": [
+            {"title": limit.title, "percent": limit.percent, "resets_at": limit.resets_at,
+             "level": ("ok", "warning", "critical")[limit.level], **({"detail": limit.detail} if limit.detail else {})}
+            for limit in current.limits]}, indent=1))
+        return 0
+    width = max(len(limit.title) for limit in current.limits)
+    for limit in current.limits:
+        filled = min(10, max(0, round(limit.percent / 10)))
+        bar = "█" * filled + "░" * (10 - filled)
+        after = limit.detail or limits.resets(limit.resets_at, now)
+        print(f"{limit.title:<{width}}  {bar} {limits.percent_text(limit):>4}  {after}".rstrip())
+    print(limits.describe(found, now)[-1])
+    return 0
 
 
 def list_sessions() -> None:
@@ -146,12 +190,16 @@ def main(argv: list[str] | None = None) -> int:
     setup = commands.add_parser("setup", help="install hooks, start at login, start now")
     setup.add_argument("--tmux", action="store_true", help="also bind prefix + J and add tmux status-line counts")
     setup.add_argument("--no-hooks", action="store_true", help="leave ~/.claude/settings.json alone")
+    setup.add_argument("--no-statusline", action="store_true",
+                       help="no status line: usage limits then refresh only when Claude Code fetches them")
     setup.add_argument("--no-autostart", action="store_true", help="don't start CTally at login")
     setup.add_argument("--no-launch", action="store_true", help="don't start CTally now")
     commands.add_parser("uninstall", help="remove hooks, tmux setup, autostart and state")
     status_ = commands.add_parser("status", help="counts by state")
     status_.add_argument("--tmux", action="store_true", help="with tmux status-line colours")
     commands.add_parser("list", help="one line per live session")
+    usage_ = commands.add_parser("usage", help="your plan's usage limits")
+    usage_.add_argument("--json", action="store_true", help="as JSON, with reset times in Unix time")
     jump_ = commands.add_parser("jump", help="switch tmux to the session that needs you")
     jump_.add_argument("pane", nargs="?")
     jump_.add_argument("client", nargs="?")
@@ -163,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         return run()
     if args.command == "setup":
         from . import install
-        return install.setup(tmux=args.tmux, hooks=not args.no_hooks,
+        return install.setup(tmux=args.tmux, hooks=not args.no_hooks, statusline=not args.no_statusline,
                              autostart=not args.no_autostart, launch=not args.no_launch)
     if args.command == "uninstall":
         from . import install
@@ -174,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "list":
         list_sessions()
         return 0
+    if args.command == "usage":
+        return usage(args.json)
     if args.command == "jump":
         return jump(args.pane, args.client, args.socket)
     parser.print_help()

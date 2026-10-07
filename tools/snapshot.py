@@ -7,8 +7,8 @@ the drawing by eye. Runs without a window server (Qt's offscreen platform) unles
     python tools/snapshot.py one out.png --scale 1 --background "#808080"
 
 Modes: one (a single badge), three (three badges), list (six sessions), folded (the list
-folded to its counts), all (each of those, into a folder). The demo data is made up: no
-real sessions, names or paths.
+folded to its counts), all (each of those, into a folder). Each shows made-up usage limits
+too, unless --no-usage. The demo data is made up: no real sessions, names, paths or usage.
 """
 from __future__ import annotations
 
@@ -36,12 +36,24 @@ def demo_sessions():
     ]
 
 
+def demo_usage(now: float):
+    from ctally.usage import Limit, Usage
+
+    hour = 3600
+    week = (now // hour + 3 * 24 + 5) * hour            # a few days off, on the hour
+    return Usage((
+        Limit(("session",), "Current session", "Session", "5h", 64, now + 1.8 * hour),
+        Limit(("week",), "Current week (all models)", "Week", "7d", 41, week),
+        Limit(("week", "fable"), "Current week (Fable)", "Week · Fable", "", 12, week),
+    ), now - 40)
+
+
 def sessions_for(mode: str):
     sessions = demo_sessions()
     return {"one": sessions[:1], "three": sessions[:3]}.get(mode, sessions)
 
 
-def render(mode: str, out: Path, background: str, opacity: float, ratio: float) -> None:
+def render(mode: str, out: Path, background: str, opacity: float, ratio: float, usage: bool = True) -> None:
     from PySide6.QtCore import QPoint, QPointF, Qt
     from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QRegion
     from PySide6.QtWidgets import QWidget
@@ -50,6 +62,9 @@ def render(mode: str, out: Path, background: str, opacity: float, ratio: float) 
 
     view = TallyView()
     view.apply(sessions_for(mode))
+    if usage:
+        import time
+        view.apply_usage(demo_usage(time.time()))
     view.folded = mode == "folded"
     if hasattr(view, "settle"):
         view.settle()                       # no entry animations mid-flight
@@ -99,6 +114,7 @@ def main() -> int:
     parser.add_argument("--opacity", type=float, default=1.0, help="the indicator's opacity (the app's default is 0.8)")
     parser.add_argument("--scale", type=float, default=2.0, help="device pixel ratio (2 for Retina)")
     parser.add_argument("--onscreen", action="store_true", help="use the real window system instead of offscreen")
+    parser.add_argument("--no-usage", action="store_true", help="leave out the usage limits")
     args = parser.parse_args()
 
     # Set before Qt starts.
@@ -112,9 +128,9 @@ def main() -> int:
 
     if args.mode == "all":
         for mode in MODES:
-            render(mode, args.out / f"{mode}.png", args.background, args.opacity, args.scale)
+            render(mode, args.out / f"{mode}.png", args.background, args.opacity, args.scale, not args.no_usage)
     else:
-        render(args.mode, args.out, args.background, args.opacity, args.scale)
+        render(args.mode, args.out, args.background, args.opacity, args.scale, not args.no_usage)
     app.quit()
     return 0
 

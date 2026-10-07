@@ -11,7 +11,7 @@ ctally setup --tmux
 The name comes from the *tally light*, the lamp on a broadcast camera that shows it's live, and from tallying
 up your sessions.
 
-![CTally with one session, three sessions, a list of six with subagents at work, and the list folded](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/overview.png)
+![CTally with one session, three sessions, a list of six with subagents at work and the usage limits, and the list folded](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/overview.png)
 
 Every session gets a hexagon whose glyph and color say what it's doing:
 
@@ -31,6 +31,8 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **Sees subagents and workflows**: while a session's agents run, its row says how many and what they're up
   to (`4 agents · Verify`), with a progress bar for a workflow, and its badge carries the count.
   [More below.](#subagents-and-workflows)
+- **Your plan's usage limits**: the session, the week, and each model's week, as bars with when each
+  resets, kept fresh after every reply. [More below.](#usage-limits)
 - **Built for tmux**: every row shows its pane, a click switches to it, **prefix + J** jumps to the session
   that needs you, and the counts can sit in tmux's status line. [More below.](#built-for-tmux)
 - **Click a row to bring that session's terminal forward**: the exact tmux pane, and on macOS the exact
@@ -39,7 +41,8 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **When a turn finishes**, its row washes green and its mark bounces once; then everything holds still.
 - **Menu bar (or top bar) icon** to show or hide CTally. Off stays off across restarts, and the app sits idle
   with no timers.
-- **Settings window** with an on/off switch and an opacity slider (80% by default).
+- **Settings window** with an on/off switch, an opacity slider (80% by default), and a switch for the usage
+  limits.
 - **Silent**: no sounds, no notifications, no Dock icon.
 - **One Python package**, installed with pipx: the same Qt app on macOS and Linux, and a `ctally` command for
   the terminal and tmux.
@@ -63,6 +66,39 @@ When a session hands work to subagents, or runs a whole workflow of them, CTally
 `ctally list` shows the count too. This needs the subagent hooks that `ctally setup` adds; if you set up
 CTally before they existed, run `ctally setup` again and restart your sessions.
 
+## Usage limits
+
+CTally shows your plan's usage limits the way Claude Code's `/usage` does: the current session (the
+five-hour window), the week across all models, any per-model weekly limit (Fable, say), and usage credits if
+you've switched them on.
+
+- **The list** gives every limit a line between the sessions and the count bar: a bar, the share used, and
+  when it resets (`in 1h 48m`, `Sat 10 pm`).
+- **The folded bar and the badges** carry two small meters, the session (`5h`) and the week (`7d`).
+- **Hover over any of them** for the details, and how fresh they are. The menu bar (top bar) icon's menu
+  lists them too.
+- **Colours**: a bar turns amber at 75% and red at 90%. Numbers more than an hour old are dimmed.
+- **tmux's status line** gets `5h 71% 7d 49%` after the counts, coloured the same way, and `ctally usage`
+  prints the lot:
+
+```console
+$ ctally usage
+Current session            ███████░░░  71%  resets 7:30 pm (in 2h 25m)
+Current week (all models)  █████░░░░░  49%  resets Sat Oct 10, 10 pm
+Current week (Fable)       ░░░░░░░░░░   0%  resets Sat Oct 10, 10 pm
+Updated just now
+```
+
+Where the numbers come from: Claude Code passes the session and week limits to its status line after every
+reply, so `ctally setup` adds a status line that hands them to CTally and shows nothing itself (a status
+line you already had keeps showing; CTally's runs it). Everything else comes from the copy of the `/usage`
+numbers Claude Code keeps in `~/.claude.json`, which it refreshes only now and then. Limits apply to Pro,
+Max and Team plans; with an API key there are none to show.
+
+Turn the limits off with the switch in Settings, or right-click → Hide Usage Limits. That hides them from tmux
+too. `ctally setup --no-statusline` leaves the status line out; the limits then refresh only when Claude Code
+refreshes its copy.
+
 ## Built for tmux
 
 Running a dozen Claude Code sessions across tmux sessions and split panes is exactly what CTally is for.
@@ -76,7 +112,7 @@ started inside it.
 - **prefix + J jumps to the session that needs you**, without touching the mouse: waiting sessions first,
   then finished ones, longest-waiting first. Press it again for the next one.
 - **The counts sit in tmux's status line** (`!1 ▶2 ✓5`: waiting, working, done), and they change the moment a
-  session does.
+  session does. Your plan's session and week usage follow them (`5h 71% 7d 49%`).
 
 Turn on the key and the status line with:
 
@@ -102,6 +138,7 @@ done     webapp:0.1       -         webapp                   9a1e…
 working  api:0.0          4 agents  api                      c27d…
 $ ctally status
 !1 ▶1 ✓1
+$ ctally usage         # your plan's usage limits
 $ ctally jump          # inside tmux: go to the session that needs you
 ```
 
@@ -121,8 +158,9 @@ ctally setup            # or: ctally setup --tmux
 pipx puts CTally in an environment of its own, with Qt (PySide6, about 100–400 MB depending on the platform),
 and the `ctally` command in `~/.local/bin`. Then `ctally setup` does four things:
 
-1. Copies the hook script to `~/.claude/hooks/ctally.sh`.
-2. Adds the hooks to `~/.claude/settings.json`. It merges with your existing settings and backs the file up first.
+1. Copies the hook and status line scripts to `~/.claude/hooks/` (`ctally.sh`, `ctally-statusline.sh`).
+2. Adds the hooks and the status line to `~/.claude/settings.json`. It merges with your existing settings and
+   backs the file up first. A status line you already had is kept, and still shows.
 3. Starts CTally at login: a LaunchAgent on macOS, an autostart entry (`~/.config/autostart`) on Linux.
 4. Starts CTally now.
 
@@ -132,6 +170,7 @@ Restart any Claude Code sessions that were already running so they pick up the h
 |---|---|
 | `--tmux` | also set up tmux: the prefix + J jump key and status-line counts ([details](#built-for-tmux)) |
 | `--no-hooks` | leave `~/.claude/settings.json` alone (add the hooks yourself; see below) |
+| `--no-statusline` | no status line: the [usage limits](#usage-limits) refresh only when Claude Code refreshes them |
 | `--no-autostart` | don't start CTally at login |
 | `--no-launch` | set up without starting CTally now |
 
@@ -173,6 +212,7 @@ ctally setup --tmux
 | Fold or unfold the list | Click the chevron on the count bar, or right-click → Fold List. |
 | Hide or show it | Use the hexagon in the menu bar (top bar on Ubuntu), or right-click → Hide CTally. |
 | Change opacity | Menu bar → Settings…, or right-click → Settings… |
+| See your usage limits | Hover over them. Hide them with right-click → Hide Usage Limits, or in Settings. |
 | Start or stop it | `ctally run` starts it; Quit in its menu stops it. |
 | Name a session | Run `/rename my-name` in Claude Code. CTally picks the name up within seconds. |
 
@@ -184,6 +224,7 @@ control Terminal. Allow it so CTally can bring the right tab forward. You can ch
 
 ```
 Claude Code ──hooks──▶ ~/.claude/ctally.d/<session id> ──read 5×/s──▶ ctally run
+            ──status line──▶ ~/.claude/ctally.d/.statusline ─┘
 ```
 
 Two pieces, connected by a folder:
@@ -205,15 +246,22 @@ Two pieces, connected by a folder:
    does the idle notification count while the session's agents are still out.
    Inside tmux, a change of state also redraws tmux's status lines, so the counts there update at once.
 
+   **The status line.** `ctally-statusline.sh` saves what Claude Code hands its status line, the latest from
+   any session, to `~/.claude/ctally.d/.statusline` whenever it includes the usage limits. It prints nothing,
+   or runs the status line you had before and prints what that prints.
+
 2. **The app.** It polls the folder five times a second, checking modification times first so unchanged files
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
-   is running: a finished one stays so you can still see it. Leftover files are cleaned up after a day.
+   is running: a finished one stays so you can still see it. Leftover files are cleaned up after a day. The
+   usage limits it checks every two seconds, the same way.
 
-To add the hooks by hand, copy `src/ctally/hooks/ctally.sh` to `~/.claude/hooks/` and merge this into
-`~/.claude/settings.json`:
+To add the hooks by hand, copy `src/ctally/hooks/ctally.sh` and `ctally-statusline.sh` to `~/.claude/hooks/`
+and merge this into `~/.claude/settings.json` (to keep a status line you have, put its command after
+CTally's as one quoted argument: `"\"$HOME/.claude/hooks/ctally-statusline.sh\" 'your command'"`):
 
 ```json
 {
+  "statusLine": { "type": "command", "command": "\"$HOME/.claude/hooks/ctally-statusline.sh\"" },
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
@@ -239,6 +287,9 @@ While agents run it also reads, beside the transcript, a running workflow's prog
 and how many agents are done) and a lone subagent's one-line task description. It never reads your
 conversations otherwise.
 
+For the usage limits it reads what its status line saved, and from `~/.claude.json` only the cached `/usage`
+numbers and your account's id, to check they're yours. It never touches your credentials.
+
 ### Terminal support
 
 On macOS, clicking a session works best in **Terminal.app**, with or without tmux: CTally finds the exact tab, or the
@@ -253,8 +304,9 @@ ctally uninstall
 pipx uninstall ctally
 ```
 
-The first removes the hooks in `~/.claude/settings.json` and the block in your tmux config (both after a
-backup), the hook script, starting at login, the state files and the preferences. Your other Claude Code and
+The first removes the hooks and status line in `~/.claude/settings.json` (putting back a status line you had)
+and the block in your tmux config, both after a backup, then the scripts, starting at login, the state files
+and the preferences. Your other Claude Code and
 tmux settings are left as they are. The second removes the command and its Qt.
 
 ## Troubleshooting
@@ -268,6 +320,8 @@ tmux settings are left as they are. The second removes the command and its Qt.
 - **CTally is gone.** Use the hexagon icon in the menu bar → Show CTally. If the icon is gone too, it isn't
   running: run `ctally run`. Its log is `~/Library/Logs/ctally.log` on macOS and
   `~/.local/state/ctally/ctally.log` on Linux.
+- **No usage limits.** They need a Pro, Max or Team plan, and a reply in some session since CTally's setup
+  (restart sessions that were running then). `ctally usage` shows what CTally has.
 - **Ubuntu: "Could not load the Qt platform plugin xcb".** Install the library it names, usually
   `sudo apt install libxcb-cursor0`.
 
@@ -280,8 +334,9 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 .venv/bin/python tools/snapshot.py   # the README's screenshots, from demo data
 ```
 
-Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR` and `CTALLY_CONFIG_DIR` to run it against other folders than
-`~/.claude/ctally.d`, `~/.claude/projects` and its own settings.
+Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR`, `CTALLY_CONFIG_DIR` and `CTALLY_CLAUDE_JSON` to run it against
+other folders than `~/.claude/ctally.d`, `~/.claude/projects` and its own settings, and another file than
+`~/.claude.json`.
 
 ## Releasing
 

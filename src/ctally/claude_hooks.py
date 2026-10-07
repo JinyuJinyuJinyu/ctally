@@ -1,14 +1,19 @@
-"""Add CTally's hooks to Claude Code's settings, or take them out again.
+"""Add CTally's hooks and status line to Claude Code's settings, or take them out again.
 
 The settings file (~/.claude/settings.json) is merged, never overwritten: other hooks and
 settings are left as they are, and a timestamped backup is written before any change.
 Earlier CTally hooks, and those from when it was called Claude Pet, are replaced rather
 than duplicated, so running it twice is harmless.
+
+The status line is how CTally hears your plan's usage limits as they change. It prints
+nothing; a status line you already had is kept, run by CTally's with the same input so it
+still shows, and put back as it was when CTally's is taken out.
 """
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import tempfile
 import time
@@ -18,6 +23,7 @@ from pathlib import Path
 SETTINGS = Path.home() / ".claude" / "settings.json"
 SCRIPT = Path.home() / ".claude" / "hooks" / "ctally.sh"
 HOOK = '"$HOME/.claude/hooks/ctally.sh"'
+STATUS = '"$HOME/.claude/hooks/ctally-statusline.sh"'    # beside it
 
 # Each event, and the state it reports. No "matcher": these events take none.
 EVENTS = {
@@ -43,9 +49,13 @@ def is_ours(hook: dict) -> bool:
     return any(marker in hook.get("command", "") for marker in MARKERS)
 
 
-def configure(settings: dict, install: bool) -> dict:
-    """Settings with every CTally hook removed, then (if installing) added back."""
+def configure(settings: dict, install: bool, statusline: bool = True) -> dict:
+    """Settings with every CTally hook removed, then (if installing) added back; the same for
+    the status line, unless it's left out."""
     settings = json.loads(json.dumps(settings))  # work on a copy
+    _unwrap_status_line(settings)
+    if install and statusline:
+        _wrap_status_line(settings)
     hooks = settings.get("hooks", {})
     for event in list(hooks):
         kept = []
@@ -71,8 +81,35 @@ def configure(settings: dict, install: bool) -> dict:
     return settings
 
 
-def update(install: bool, path: Path = SETTINGS) -> str:
-    """Installs or removes the hooks in a settings file; returns what happened."""
+def _unwrap_status_line(settings: dict) -> None:
+    """Takes CTally's status line out, putting back the one it ran, if any."""
+    line = settings.get("statusLine")
+    command = line.get("command") if isinstance(line, dict) else None
+    if not isinstance(command, str) or "ctally-statusline" not in command:
+        return
+    rest = command.split("ctally-statusline.sh", 1)[1].lstrip('"').strip()
+    try:
+        before = shlex.split(rest)
+    except ValueError:
+        before = []
+    if before:
+        settings["statusLine"] = {**line, "command": before[0]}
+    else:
+        del settings["statusLine"]
+
+
+def _wrap_status_line(settings: dict) -> None:
+    line = settings.get("statusLine")
+    command = line.get("command") if isinstance(line, dict) else None
+    if isinstance(command, str) and command.strip():
+        settings["statusLine"] = {**line, "command": f"{STATUS} {shlex.quote(command)}"}
+    else:
+        settings["statusLine"] = {"type": "command", "command": STATUS}
+
+
+def update(install: bool, path: Path = SETTINGS, statusline: bool = True) -> str:
+    """Installs or removes the hooks and status line in a settings file; returns what
+    happened."""
     settings = {}
     # Only a file that is really not there counts as empty. One that merely can't be seen (no
     # permission, or a sandbox hiding it) would otherwise be replaced by just our hooks.
@@ -91,9 +128,10 @@ def update(install: bool, path: Path = SETTINGS) -> str:
         if not isinstance(settings, dict):
             raise SettingsError(f"{path} does not hold a JSON object; left it alone.")
 
-    updated = configure(settings, install)
+    updated = configure(settings, install, statusline)
+    what = "hooks and status line" if statusline else "hooks"
     if updated == settings and exists:
-        return f"Claude Code hooks already {'installed' if install else 'removed'} in {path}"
+        return f"Claude Code {what} already {'installed' if install else 'removed'} in {path}"
 
     notes = []
     if exists:
@@ -109,7 +147,7 @@ def update(install: bool, path: Path = SETTINGS) -> str:
     if target.exists():
         shutil.copymode(target, temp)
     os.replace(temp, target)
-    notes.append(f"Claude Code hooks {'installed in' if install else 'removed from'} {path}")
+    notes.append(f"Claude Code {what} {'installed in' if install else 'removed from'} {path}")
     return "\n".join(notes)
 
 
@@ -125,17 +163,18 @@ def backup(path: Path) -> Path:
 
 
 def install_script() -> None:
-    """Puts the hook script where the hooks call it."""
+    """Puts the hook and status line scripts where the settings call them."""
     SCRIPT.parent.mkdir(parents=True, exist_ok=True)
-    source = resources.files("ctally").joinpath("hooks/ctally.sh").read_bytes()
-    temp = SCRIPT.with_name(".ctally.sh.new")
-    temp.write_bytes(source)
-    temp.chmod(0o755)
-    os.replace(temp, SCRIPT)
+    for target in (SCRIPT, SCRIPT.with_name("ctally-statusline.sh")):
+        source = resources.files("ctally").joinpath(f"hooks/{target.name}").read_bytes()
+        temp = target.with_name(f".{target.name}.new")
+        temp.write_bytes(source)
+        temp.chmod(0o755)
+        os.replace(temp, target)
 
 
 def remove_scripts() -> None:
-    for name in ("ctally.sh", "claude-pet.sh"):
+    for name in ("ctally.sh", "ctally-statusline.sh", "claude-pet.sh"):
         (SCRIPT.parent / name).unlink(missing_ok=True)
     try:
         SCRIPT.parent.rmdir()               # only if nothing else lives there

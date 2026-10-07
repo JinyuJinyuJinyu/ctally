@@ -5,7 +5,7 @@ import json
 import os
 import threading
 
-from conftest import DATA
+from conftest import DATA, HOOK
 
 from ctally.claude_hooks import EVENTS
 
@@ -230,3 +230,47 @@ def test_replay_of_a_real_session(hook):
     assert [state for _, state, _ in trace[settled:]] == ["done", "working", "done", None]
     assert hook.agents(sid) is None
     assert json.loads((DATA / "hooks.log").read_text().splitlines()[0].split("\t", 2)[2])["session_id"] == sid
+
+
+# MARK: The status line script
+
+STATUS_LINE_SCRIPT = HOOK.with_name("ctally-statusline.sh")
+
+
+def status_line(home, payload, *args):
+    import subprocess
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    env = {**{k: v for k, v in os.environ.items() if k != "CTALLY_STATE_DIR"}, "HOME": str(home)}
+    return subprocess.run(["sh", str(STATUS_LINE_SCRIPT), *args], input=text, text=True,
+                          capture_output=True, env=env, timeout=10)
+
+
+LIMITS = {"session_id": "s1", "rate_limits": {"five_hour": {"used_percentage": 79, "resets_at": 1791361800}}}
+
+
+def test_status_line_saves_the_limits_and_prints_nothing(tmp_path):
+    done = status_line(tmp_path, LIMITS)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    saved = tmp_path / ".claude" / "ctally.d" / ".statusline"
+    assert json.loads(saved.read_text()) == LIMITS
+    assert sorted(os.listdir(saved.parent)) == [".statusline"]          # no temporary file left
+
+
+def test_status_line_without_limits_keeps_the_last_ones(tmp_path):
+    status_line(tmp_path, LIMITS)
+    status_line(tmp_path, {"session_id": "s2", "model": {"id": "x"}})   # before the first reply
+    saved = tmp_path / ".claude" / "ctally.d" / ".statusline"
+    assert json.loads(saved.read_text()) == LIMITS
+
+
+def test_status_line_runs_the_one_you_had(tmp_path):
+    theirs = "read line; printf 'mine: %s' \"$(printf '%s' \"$line\" | cut -c1-14)\"; exit 3"
+    done = status_line(tmp_path, LIMITS, theirs)
+    assert (done.returncode, done.stdout) == (3, 'mine: {"session_id":')
+    assert (tmp_path / ".claude" / "ctally.d" / ".statusline").exists()
+
+
+def test_status_line_writes_nothing_where_it_cant(tmp_path):
+    (tmp_path / ".claude").write_text("a file where the folder should be")
+    done = status_line(tmp_path, LIMITS, "echo still here")
+    assert (done.returncode, done.stdout, done.stderr) == (0, "still here\n", "")
