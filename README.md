@@ -138,8 +138,8 @@ It never reads your conversations otherwise.
 ### Terminal support
 
 Clicking a session works best in **Terminal.app**, with or without **tmux**: CTally finds the exact tab, or the
-exact tmux pane and the tab attached to it. For other terminals (iTerm2, VS Code, …) it brings the app forward
-but can't pick the tab.
+exact tmux pane and the tab attached to it. For other terminals (iTerm2, VS Code, …) and for sessions in the
+Claude desktop app, it brings the app forward but can't pick the tab.
 
 ## Uninstall
 
