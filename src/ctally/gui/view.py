@@ -173,7 +173,7 @@ class Chip(NamedTuple):
 class TallyView(QWidget):
 
     fold_requested = Signal(bool)       # the chevron was clicked: the folded state wanted
-    selected = Signal(object)           # a row or badge was clicked: its Session
+    selected = Signal(object, object)   # a row or badge was clicked: its Session, and when (focus.focus)
     drag_finished = Signal()            # dropped after a drag
     menu_requested = Signal(QPoint)     # a right-click, in global coordinates
 
@@ -594,7 +594,7 @@ class TallyView(QWidget):
             return
         index = self._item_at(point)
         if index is not None:
-            self.selected.emit(self._rows[index].session)
+            self.selected.emit(self._rows[index].session, event.timestamp())
 
     def contextMenuEvent(self, event) -> None:
         self._press = None

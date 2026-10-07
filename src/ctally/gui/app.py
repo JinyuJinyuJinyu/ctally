@@ -133,7 +133,7 @@ class Controller:
         self.view.folded = bool(self.prefs["folded"])
         self.view.setWindowOpacity(self.opacity)
         self.view.fold_requested.connect(self.set_folded)
-        self.view.selected.connect(lambda session: focus.focus(session.pid))
+        self.view.selected.connect(lambda session, when: focus.focus(session.pid, when))
         self.view.drag_finished.connect(self.settle_after_drag)
         self.view.menu_requested.connect(self.show_menu)
 

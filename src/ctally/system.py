@@ -1,6 +1,6 @@
 """What CTally needs to know about other processes, on macOS and Linux: whether they're
-alive, their terminal, their parent, the environment they started with (which says where
-in tmux they run), and a way to run a tool and read its answer."""
+alive, their terminal, their parent, the program they run, the environment they started with
+(which says where in tmux they run), and a way to run a tool and read its answer."""
 from __future__ import annotations
 
 import ctypes
@@ -61,6 +61,16 @@ def parent(pid: int) -> int | None:
             return None
     answer = (run(["ps", "-o", "ppid=", "-p", str(pid)]) or "").strip()
     return int(answer) if answer.isdigit() else None
+
+
+def program(pid: int) -> str | None:
+    """The name of the program a process runs, "gnome-terminal-server". Linux only."""
+    try:
+        path = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return None
+    # A program replaced on disk while it runs (by an upgrade, say) shows as "<path> (deleted)".
+    return os.path.basename(path.removesuffix(" (deleted)"))
 
 
 def environment(pid: int) -> dict[str, str] | None:

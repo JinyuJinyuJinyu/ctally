@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import sys
+
+import pytest
 
 from conftest import dead_pid, sleeper, wait_for
 
@@ -36,6 +39,12 @@ def test_environment_of_a_dead_process():
 
 def test_parent():
     assert system.parent(os.getpid()) == os.getppid()
+
+
+@pytest.mark.skipif(not system.LINUX, reason="reads /proc")
+def test_program():
+    assert system.program(os.getpid()) == os.path.basename(os.path.realpath(sys.executable))
+    assert system.program(dead_pid()) is None
 
 
 def test_tmux_pane_outside_tmux():

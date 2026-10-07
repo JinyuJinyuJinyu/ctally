@@ -39,7 +39,7 @@ SCRIPT = textwrap.dedent('''
 
     def click(view, point):
         chosen = []
-        view.selected.connect(chosen.append)
+        view.selected.connect(lambda session, when: chosen.append(session))
         for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
             view.event(QMouseEvent(kind, QPointF(point), QPointF(view.mapToGlobal(point)),
                                    Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
