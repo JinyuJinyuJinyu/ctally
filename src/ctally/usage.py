@@ -9,8 +9,8 @@ Two places, both written by Claude Code, both only read here: no network, no cre
   own cache rather than a documented interface, so this expects to find nothing, or something
   new, and copes.
 - CTally's status line saves what Claude Code hands every status line after each reply: the
-  session and the week, nothing else (~/.claude/ctally.d/.statusline). Where it's newer, it
-  wins for those two.
+  session and the week, nothing else (~/.claude/ctally.d/.statusline), never older than what
+  it saved before. Where it's newer, it wins for those two.
 
 Neither moves when a request is refused for the limit, so the hook's note of a limit hit
 (~/.claude/ctally.d/.limit) marks that one used up until it resets.

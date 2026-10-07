@@ -395,6 +395,45 @@ def test_status_line_writes_nothing_where_it_cant(tmp_path):
     assert (done.returncode, done.stdout, done.stderr) == (0, "still here\n", "")
 
 
+def usage_line(session: tuple, week: tuple, name: str = "s1") -> dict:
+    """What one session hands its status line: (used, resets at) for the session and the week."""
+    return {"session_id": name, "rate_limits": {
+        "five_hour": {"used_percentage": session[0], "resets_at": session[1]},
+        "seven_day": {"used_percentage": week[0], "resets_at": week[1]}}}
+
+
+def saved_usage(home) -> tuple:
+    limits = json.loads((home / ".claude" / "ctally.d" / ".statusline").read_text())["rate_limits"]
+    return limits["five_hour"]["used_percentage"], limits["seven_day"]["used_percentage"]
+
+
+def test_status_line_never_steps_back_within_a_window(tmp_path):
+    hour, week = int(time.time()) + 3 * 3600, int(time.time()) + 4 * 86400
+    status_line(tmp_path, usage_line((60, hour), (8, week), "busy"))
+    status_line(tmp_path, usage_line((34, hour), (5, week), "idle"))       # an idle session redraws, hours old
+    assert saved_usage(tmp_path) == (60, 8)
+    status_line(tmp_path, usage_line((60, hour + 30), (7, week), "idle"))  # same session use, older week
+    assert saved_usage(tmp_path) == (60, 8)
+    status_line(tmp_path, usage_line((64.5, hour), (8, week), "busy"))
+    assert saved_usage(tmp_path) == (64.5, 8)
+    status_line(tmp_path, usage_line((64.5, hour), (9, week), "busy"))     # the week moved, the session not
+    assert saved_usage(tmp_path) == (64.5, 9)
+
+
+def test_status_line_takes_a_new_window(tmp_path):
+    hour, week = int(time.time()) + 3 * 3600, int(time.time()) + 4 * 86400
+    status_line(tmp_path, usage_line((92, hour), (52, week)))
+    status_line(tmp_path, usage_line((2, hour + 7200), (0, week)))         # reset early: a later window
+    assert saved_usage(tmp_path) == (2, 0)
+
+
+def test_status_line_takes_anything_once_the_saved_window_is_over(tmp_path):
+    over, week = int(time.time()) - 60, int(time.time()) + 4 * 86400
+    status_line(tmp_path, usage_line((80, over), (50, week)))
+    status_line(tmp_path, usage_line((10, over - 3600), (40, week)))
+    assert saved_usage(tmp_path) == (10, 40)
+
+
 def test_status_line_ends_a_limit_reset_early(tmp_path):
     state = tmp_path / ".claude" / "ctally.d"
     state.mkdir(parents=True)

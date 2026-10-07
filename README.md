@@ -267,8 +267,11 @@ Two pieces, connected by a folder:
    Inside tmux, a change of state also redraws tmux's status lines, so the counts there update at once.
 
    **The status line.** `ctally-statusline.sh` saves what Claude Code hands its status line, the latest from
-   any session, to `~/.claude/ctally.d/.statusline` whenever it includes the usage limits. It prints nothing,
-   or runs the status line you had before and prints what that prints.
+   any session, to `~/.claude/ctally.d/.statusline` whenever it includes the usage limits. Each session hands
+   over the numbers from its own last reply, and an idle one redraws its line now and then with numbers hours
+   old, so a reading is kept only if it isn't older than the saved one: usage only grows within a window, and
+   a later reset time is a later window. It prints nothing, or runs the status line you had before and prints
+   what that prints.
 
 2. **The app.** It polls the folder twice a second, checking modification times first so unchanged files
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
