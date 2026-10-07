@@ -231,8 +231,9 @@ control Terminal. Allow it so CTally can bring the right tab forward. You can ch
 ## How it works
 
 ```
-Claude Code ──hooks──▶ ~/.claude/ctally.d/<session id> ──read 5×/s──▶ ctally run
-            ──status line──▶ ~/.claude/ctally.d/.statusline ─┘
+Claude Code ──hooks──▶ ~/.claude/ctally.d/<session id> ──read 2×/s──▶ ctally run
+            ──status line──▶ ~/.claude/ctally.d/.statusline ─┤
+            ──its own list──▶ ~/.claude/sessions/<pid>.json ─┘
 ```
 
 Two pieces, connected by a folder:
@@ -267,10 +268,16 @@ Two pieces, connected by a folder:
    any session, to `~/.claude/ctally.d/.statusline` whenever it includes the usage limits. It prints nothing,
    or runs the status line you had before and prints what that prints.
 
-2. **The app.** It polls the folder five times a second, checking modification times first so unchanged files
+2. **The app.** It polls the folder twice a second, checking modification times first so unchanged files
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
    is running: a finished one stays so you can still see it. Leftover files are cleaned up after a day. The
    usage limits it checks every two seconds, the same way.
+
+   The hooks hear of a session only once it does something, so the app also reads Claude Code's own list of
+   its running sessions, `~/.claude/sessions/`. A session the hooks haven't heard from yet, idle since setup or
+   never sent a prompt, shows from there: idle, or working or waiting as Claude Code has it. Once its hooks
+   run, they say. Only interactive sessions are listed: not background jobs, nor the spare processes Claude
+   Code starts ahead of need. Sessions are listed oldest first, by when they started.
 
 To add the hooks by hand, copy `src/ctally/hooks/ctally.sh` and `ctally-statusline.sh` to `~/.claude/hooks/`
 and merge this into `~/.claude/settings.json` (to keep a status line you have, put its command after
@@ -309,6 +316,9 @@ conversations otherwise.
 
 For the usage limits it reads what its status line saved, and from `~/.claude.json` only the cached `/usage`
 numbers and your account's id, to check they're yours. It never touches your credentials.
+
+To list sessions the hooks haven't heard from, it reads Claude Code's list of running sessions in
+`~/.claude/sessions/`: each one's id, process, folder, status and start time.
 
 ### Terminal support
 
@@ -354,9 +364,9 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 .venv/bin/python tools/snapshot.py   # the README's screenshots, from demo data
 ```
 
-Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR`, `CTALLY_CONFIG_DIR` and `CTALLY_CLAUDE_JSON` to run it against
-other folders than `~/.claude/ctally.d`, `~/.claude/projects` and its own settings, and another file than
-`~/.claude.json`.
+Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR`, `CTALLY_SESSIONS_DIR`, `CTALLY_CONFIG_DIR` and
+`CTALLY_CLAUDE_JSON` to run it against other folders than `~/.claude/ctally.d`, `~/.claude/projects`,
+`~/.claude/sessions` and its own settings, and another file than `~/.claude.json`.
 
 ## Releasing
 

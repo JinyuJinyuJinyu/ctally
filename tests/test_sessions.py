@@ -10,6 +10,7 @@ import pytest
 
 from conftest import dead_pid, sleeper, wait_for
 
+from ctally import system
 from ctally.sessions import AgentWatcher, Agents, Names, State, StateReader, TmuxLocator, cut_short, stop_in
 
 LIVE = os.getpid()
@@ -187,6 +188,121 @@ def test_session_snapshot_carries_name_and_path(dirs):
     write(state, "s", f"working {LIVE} api\n")
     [session] = StateReader(state, projects).poll()
     assert (session.title, session.path) == ("T", "/w/api")
+
+
+# MARK: Claude Code's list of running sessions
+
+@pytest.fixture
+def registry(tmp_path):
+    folder = tmp_path / "sessions"
+    folder.mkdir()
+    return folder
+
+
+@pytest.fixture
+def processes():
+    """Live processes to stand in for claude: a process is one session at a time."""
+    children = []
+
+    def make() -> int:
+        child = sleeper()
+        children.append(child)
+        return child.pid
+
+    yield make
+    for child in children:
+        child.kill()
+
+
+def listed(folder, pid: int, sid: str, cwd: str = "/work/api", status: str = "idle", started: float = 1000,
+           updated: float | None = None, **extra) -> None:
+    """A session as Claude Code lists it, in ~/.claude/sessions/<pid>.json; times in seconds."""
+    record = {"pid": pid, "sessionId": sid, "cwd": cwd, "startedAt": started * 1000,
+              "procStart": system.started(pid), "version": "2.1.292", "kind": "interactive",
+              "entrypoint": "cli", "status": status, "updatedAt": (updated or started) * 1000, **extra}
+    (folder / f"{pid}.json").write_text(json.dumps(record))
+
+
+def test_sessions_the_hooks_have_not_heard_from_come_from_the_list(dirs, registry, processes):
+    state, projects = dirs
+    idle, busy, asking = processes(), processes(), processes()
+    listed(registry, idle, "idle", started=100)
+    listed(registry, busy, "busy", cwd="/work/web/", status="busy", started=200)
+    listed(registry, asking, "asking", status="waiting", started=300)
+    write(state, "hooked", f"done {LIVE} docs\n")
+    sessions = StateReader(state, projects, registry).poll()
+    # Oldest first: those listed by when they started, then the one only the hooks know.
+    assert [(s.id, s.state, s.label, s.pid, s.path) for s in sessions] == [
+        ("idle", State.IDLE, "api", idle, "/work/api"),
+        ("busy", State.WORKING, "web", busy, "/work/web/"),
+        ("asking", State.WAITING, "api", asking, "/work/api"),
+        ("hooked", State.DONE, "docs", LIVE, None)]
+
+
+def test_the_hooks_say_what_a_listed_session_is_doing(dirs, registry):
+    state, projects = dirs
+    listed(registry, LIVE, "a", status="busy")
+    write(state, "a", f"waiting {LIVE} p\n")
+    [session] = StateReader(state, projects, registry).poll()
+    assert (session.id, session.state, session.label) == ("a", State.WAITING, "p")
+
+
+def test_a_listed_session_follows_its_status(dirs, registry):
+    state, projects = dirs
+    reader = StateReader(state, projects, registry)
+    listed(registry, LIVE, "a")
+    assert [s.state for s in reader.poll()] == [State.IDLE]
+    listed(registry, LIVE, "a", status="busy", updated=2000)
+    os.utime(registry / f"{LIVE}.json", (time.time() + 5, time.time() + 5))     # however coarse the clock
+    assert [s.state for s in reader.poll()] == [State.WORKING]
+    (registry / f"{LIVE}.json").unlink()                                        # the session has ended
+    assert reader.poll() == []
+
+
+def test_only_live_interactive_sessions_are_listed(dirs, registry, processes):
+    state, projects = dirs
+    listed(registry, processes(), "job", kind="bg")
+    listed(registry, processes(), "spare", spare=True)
+    listed(registry, dead_pid(), "gone")
+    listed(registry, processes(), "../escape")
+    listed(registry, processes(), ".hidden")
+    (registry / "junk.json").write_text("{not json")
+    (registry / "list.json").write_text("[]")
+    listed(registry, processes(), "fine")
+    assert [s.id for s in StateReader(state, projects, registry).poll()] == ["fine"]
+
+
+@pytest.mark.skipif(not system.LINUX, reason="Claude Code notes /proc's start time on Linux")
+def test_a_pid_passed_on_to_another_process_is_not_that_session(dirs, registry):
+    state, projects = dirs
+    listed(registry, LIVE, "old", procStart="12345")       # an earlier process, given this pid
+    assert StateReader(state, projects, registry).poll() == []
+
+
+def test_a_session_the_process_has_left_is_gone(dirs, registry):
+    """/clear and /resume move a process on to another session id: of the hook's file and
+    Claude Code's list, the one written last says which it's on."""
+    state, projects = dirs
+    now = time.time()
+    write(state, "before", f"done {LIVE} p\n", mtime=now - 60)
+    listed(registry, LIVE, "after", started=now - 3600, updated=now - 10)
+    assert [(s.id, s.state) for s in StateReader(state, projects, registry).poll()] == [("after", State.IDLE)]
+
+
+def test_a_hook_newer_than_the_list_says_which_session(dirs, registry):
+    state, projects = dirs
+    now = time.time()
+    listed(registry, LIVE, "before", started=now - 3600, updated=now - 60)
+    write(state, "after", f"working {LIVE} p\n", mtime=now - 10)
+    assert [(s.id, s.state) for s in StateReader(state, projects, registry).poll()] == [("after", State.WORKING)]
+
+
+def test_a_listed_session_is_named_from_its_transcript(dirs, registry):
+    state, projects = dirs
+    transcript(projects, "a", [{"type": "user", "cwd": "/w/api"}, {"type": "ai-title", "aiTitle": "Fix the tests"}])
+    listed(registry, LIVE, "a", cwd="/w/api/src")
+    [session] = StateReader(state, projects, registry).poll()
+    assert (session.title, session.path, session.label) == ("Fix the tests", "/w/api", "api")
 
 
 # MARK: Subagents

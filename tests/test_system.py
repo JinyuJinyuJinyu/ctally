@@ -42,6 +42,18 @@ def test_parent():
 
 
 @pytest.mark.skipif(not system.LINUX, reason="reads /proc")
+def test_started():
+    child = sleeper()
+    try:
+        began = system.started(child.pid)
+        assert began and began.isdigit() and system.started(child.pid) == began
+        assert int(began) >= int(system.started(os.getpid()))     # after this test's own process
+    finally:
+        child.kill()
+    assert system.started(dead_pid()) is None
+
+
+@pytest.mark.skipif(not system.LINUX, reason="reads /proc")
 def test_program():
     assert system.program(os.getpid()) == os.path.basename(os.path.realpath(sys.executable))
     assert system.program(dead_pid()) is None

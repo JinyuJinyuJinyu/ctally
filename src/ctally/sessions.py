@@ -8,6 +8,10 @@ A turn I stop by hand (Esc), and agents I kill, get no hook at all, so the trans
 what show those. Each session's name
 and directory come from its transcript in ~/.claude/projects/, where it sits in tmux from
 its process's environment, and what a workflow is up to from its journal.
+
+The hooks hear of a session only once it does something. Claude Code's own list of its running
+sessions, ~/.claude/sessions/, shows the rest: those idle since CTally was set up, or never
+sent a prompt.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from . import system
 
 STATE_DIR = Path(os.environ.get("CTALLY_STATE_DIR") or Path.home() / ".claude" / "ctally.d")
 PROJECTS_DIR = Path(os.environ.get("CTALLY_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
+REGISTRY_DIR = Path(os.environ.get("CTALLY_SESSIONS_DIR") or Path.home() / ".claude" / "sessions")
 
 
 class State(Enum):
@@ -81,10 +86,10 @@ class Session:
     """One session as the indicator needs to see it."""
     id: str
     state: State
-    label: str                      # project folder name, from the hook
-    pid: int = 0                    # the claude process, from the hook
+    label: str                      # project folder name, from the hook or Claude Code's list
+    pid: int = 0                    # the claude process, from the same
     title: str | None = None        # session name, from the transcript
-    path: str | None = None         # directory the session started in, from the transcript
+    path: str | None = None         # directory the session started in, from the transcript (or the list)
     tmux: str | None = None         # where it sits in tmux, "report:0.2", if it runs there
     agents: Agents | None = None    # its subagents, while any run
     limited: bool = False           # waiting on the plan's usage limit, not on me
@@ -526,6 +531,100 @@ class AgentWatcher:
         return journal
 
 
+# MARK: Claude Code's list of running sessions
+
+class Running(NamedTuple):
+    """A session Claude Code lists as running."""
+    id: str
+    pid: int
+    cwd: str
+    state: State            # Claude Code's own word for it: busy, waiting on me, or idle
+    started: float          # when the process started, Unix time
+    updated: float          # when Claude Code last wrote it down: a new state, or a new session id
+
+
+def _seconds(milliseconds) -> float:
+    return milliseconds / 1000 if isinstance(milliseconds, (int, float)) else 0.0
+
+
+class Registry:
+    """Claude Code's list of its running sessions: a file per process, ~/.claude/sessions/
+    <pid>.json, with the session's id, folder and status, rewritten as they change (/clear and
+    /resume move the process on to a new session id). It lists sessions the hooks haven't heard
+    from: idle since CTally was set up, or never sent a prompt.
+
+    Only interactive sessions count, not background jobs, nor the spare processes Claude Code
+    starts ahead of need. A file left by a process that has gone, or whose pid has passed to
+    another process since, is passed over: Claude Code notes when the process started."""
+
+    # Its "shell" is idle, with a shell command of its own running.
+    STATES = {"busy": State.WORKING, "waiting": State.WAITING}
+
+    def __init__(self, directory: Path | None = None):
+        self.dir = directory if directory is not None else REGISTRY_DIR
+        self.cache: dict[str, tuple] = {}       # file name -> (modified, size, read)
+
+    def poll(self) -> list[Running]:
+        """Cheap to call every poll: only a file that has changed is read again."""
+        try:
+            names = [n for n in os.listdir(self.dir) if n.endswith(".json")]
+        except OSError:
+            names = []
+        cache, running = {}, []
+        for name in names:
+            path = self.dir / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            known = self.cache.get(name)
+            read = known[2] if known and known[:2] == (stat.st_mtime, stat.st_size) else self._read(path)
+            cache[name] = (stat.st_mtime, stat.st_size, read)
+            if read is not None and Registry._alive(*read):
+                running.append(read[0])
+        self.cache = cache
+        return running
+
+    @staticmethod
+    def _read(path: Path) -> tuple[Running, str | None] | None:
+        """The session, and when its process started as Claude Code saw it."""
+        try:
+            record = json.loads(path.read_bytes())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or record.get("kind", "interactive") != "interactive" or record.get("spare"):
+            return None
+        sid, pid, cwd = record.get("sessionId"), record.get("pid"), record.get("cwd")
+        # The id names files, as the hook's does.
+        if not isinstance(sid, str) or not sid or "/" in sid or sid.startswith(".") or not isinstance(pid, int) or pid <= 0:
+            return None
+        started = _seconds(record.get("startedAt"))
+        running = Running(sid, pid, cwd if isinstance(cwd, str) else "",
+                          Registry.STATES.get(record.get("status"), State.IDLE),
+                          started, _seconds(record.get("updatedAt")) or started)
+        began = record.get("procStart")
+        return running, (str(began) if began is not None else None)
+
+    @staticmethod
+    def _alive(running: Running, began: str | None) -> bool:
+        if not system.is_alive(running.pid):
+            return False
+        now = system.started(running.pid)
+        return began is None or now is None or now == began
+
+
+def reconcile(running: list[Running], heard: dict[str, tuple[int, float]]) -> tuple[list[Running], set[str]]:
+    """Claude Code's list beside the hooks' files, given each live session's pid and when its
+    file was last written. Returns the listed sessions the hooks haven't heard from, and the
+    hooks' sessions whose process has since moved on to another (/clear, /resume): a process is
+    one session at a time, and of its file and its place in the list, the newer says which."""
+    listed = {r.pid: r for r in running}
+    left = {sid for sid, (pid, modified) in heard.items()
+            if pid in listed and listed[pid].id != sid and listed[pid].updated > modified}
+    pids = {pid for sid, (pid, _) in heard.items() if sid not in left}
+    return [r for r in running if r.id not in heard and r.pid not in pids], left
+
+
 # MARK: The state directory
 
 class LimitHit(NamedTuple):
@@ -572,7 +671,8 @@ def read_limit(directory: Path = STATE_DIR) -> LimitHit | None:
 
 
 class StateReader:
-    """Watches one state file per session, and the folder of running agents beside it."""
+    """Watches one state file per session, and the folder of running agents beside it; and
+    Claude Code's list of running sessions, for those the hooks haven't heard from."""
 
     STALE_AFTER = 24 * 60 * 60
 
@@ -589,23 +689,28 @@ class StateReader:
         def alive(self) -> bool:
             return system.is_alive(self.pid)
 
-    def __init__(self, directory: Path = STATE_DIR, projects: Path = PROJECTS_DIR):
+    def __init__(self, directory: Path = STATE_DIR, projects: Path = PROJECTS_DIR, registry: Path | None = None):
         self.dir = directory
         self.names = Names(projects)
         self.locator = TmuxLocator()
         self.watcher = AgentWatcher(directory / ".agents")
+        self.registry = Registry(registry)
         self.cache: dict[str, StateReader.Entry] = {}
+        self.unheard: dict[str, Running] = {}   # sessions only Claude Code's list knows of
         self.first_seen: dict[str, float] = {}
         self.last_prune = 0.0
         self.limit: LimitHit | None = None
 
     def poll(self) -> list[Session]:
+        running = self.registry.poll()
+        started = {r.id: r.started for r in running if r.started}
         try:
             names = {n for n in os.listdir(self.dir) if not n.startswith(".")}
         except OSError:
             names = set()
         # One timestamp for the whole sweep: sessions found together tie, and the tie-break
-        # on name keeps their order stable instead of set-iteration order.
+        # on name keeps their order stable instead of set-iteration order. A session Claude
+        # Code lists goes by when it started instead, so rows come up oldest first.
         sweep = time.time()
         for name in names:
             path = self.dir / name
@@ -622,27 +727,36 @@ class StateReader:
                 self.cache.pop(name, None)
             else:
                 self.cache[name] = entry
-            self.first_seen.setdefault(name, sweep)
+            self.first_seen.setdefault(name, started.get(name, sweep))
         self.cache = {k: v for k, v in self.cache.items() if k in names}
-        self.first_seen = {k: v for k, v in self.first_seen.items() if k in names}
+
+        heard = {n: (e.pid, e.modified) for n, e in self.cache.items() if e.alive}
+        unheard, left = reconcile(running, heard)
+        self.unheard = {r.id: r for r in unheard}
+        for r in unheard:
+            self.first_seen.setdefault(r.id, r.started or sweep)
+        self.first_seen = {k: v for k, v in self.first_seen.items() if k in names or k in self.unheard}
 
         self._prune()
         self.limit = read_limit(self.dir)
-        keep = set(self.cache)
+        keep = set(self.cache) | set(self.unheard)
         self.names.forget(keep)
         self.locator.forget(keep)
         self.watcher.forget(keep)
 
         # Oldest session first, so rows never shuffle under me.
-        ordered = sorted(self.cache, key=lambda n: (self.first_seen.get(n, 0), n))
-        live = [n for n in ordered if self.cache[n].alive]
+        def age(name: str) -> tuple:
+            return self.first_seen.get(name, 0), name
+        live = [n for n in self.cache if self.cache[n].alive and n not in left] + list(self.unheard)
         if live:
-            return [self._snapshot(n) for n in live]
+            return [self._snapshot(n) for n in sorted(live, key=age)]
         # Nothing is running. A finished turn still deserves to be on screen when I come
         # back; a dead session's "working" means only that it was killed.
-        return [self._snapshot(n) for n in ordered if self.cache[n].state is State.DONE]
+        return [self._snapshot(n) for n in sorted(self.cache, key=age) if self.cache[n].state is State.DONE]
 
     def _snapshot(self, name: str) -> Session:
+        if name not in self.cache:
+            return self._listed(self.unheard[name])
         entry = self.cache[name]
         state, limited = entry.state, entry.limited
         busy = state in (State.WORKING, State.WAITING) and not limited
@@ -656,6 +770,16 @@ class StateReader:
                        tmux=self.locator.location(name, entry.pid),
                        agents=self.watcher.activity(name, self.names.transcript(name)),
                        limited=limited)
+
+    def _listed(self, running: Running) -> Session:
+        """A session only Claude Code's list knows of, in the state it gives, named after the
+        folder it started in, or else the one it's in."""
+        title, path = self.names.info(running.id, busy=running.state is State.WORKING)
+        path = path or running.cwd or None
+        return Session(id=running.id, state=running.state, label=os.path.basename((path or "").rstrip("/")),
+                       pid=running.pid, title=title, path=path,
+                       tmux=self.locator.location(running.id, running.pid),
+                       agents=self.watcher.activity(running.id, self.names.transcript(running.id)))
 
     @staticmethod
     def _read(path: Path, modified: float, size: int) -> StateReader.Entry | None:

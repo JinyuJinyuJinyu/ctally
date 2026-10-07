@@ -1,6 +1,7 @@
 """What CTally needs to know about other processes, on macOS and Linux: whether they're
-alive, their terminal, their parent, the program they run, the environment they started with
-(which says where in tmux they run), and a way to run a tool and read its answer."""
+alive, when they started, their terminal, their parent, the program they run, the environment
+they started with (which says where in tmux they run), and a way to run a tool and read its
+answer."""
 from __future__ import annotations
 
 import ctypes
@@ -61,6 +62,19 @@ def parent(pid: int) -> int | None:
             return None
     answer = (run(["ps", "-o", "ppid=", "-p", str(pid)]) or "").strip()
     return int(answer) if answer.isdigit() else None
+
+
+def started(pid: int) -> str | None:
+    """When a process started, in clock ticks since boot ("87411823"), as /proc/<pid>/stat has
+    it: with the pid, it tells a process from a later one given the same number. Linux only."""
+    if not LINUX:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            # pid (comm) state ppid ...: the 22nd field, counting comm as one.
+            return f.read().rsplit(b")", 1)[1].split()[19].decode()
+    except (OSError, IndexError):
+        return None
 
 
 def program(pid: int) -> str | None:

@@ -30,7 +30,7 @@ from typing import NamedTuple
 
 from . import __version__, system
 from . import usage as limits
-from .sessions import PROJECTS_DIR, STATE_DIR, AgentWatcher, Names, read_limit, stopped_by_hand
+from .sessions import PROJECTS_DIR, STATE_DIR, AgentWatcher, Names, Registry, read_limit, reconcile, stopped_by_hand
 
 GLYPH = {"waiting": "!", "working": "▶", "done": "✓", "idle": "·"}
 COLOUR = {"waiting": "#ffb329", "working": "#4accf2", "done": "#45e087", "idle": "#99a6bd"}
@@ -50,8 +50,10 @@ class Live(NamedTuple):
 
 def live_sessions() -> list[Live]:
     """Each live session, most urgent first and, within a state, longest-waiting first.
-    Sessions whose claude process is gone are skipped."""
+    Sessions whose claude process is gone are skipped; those the hooks haven't heard from
+    come from Claude Code's list of running sessions."""
     found = []
+    running = Registry().poll()
     try:
         names = [n for n in os.listdir(STATE_DIR) if not n.startswith(".")]
     except OSError:
@@ -78,6 +80,11 @@ def live_sessions() -> list[Live]:
             if stopped_by_hand(transcripts, watcher, name, modified):
                 state = "done"
         found.append(Live(RANK[state], modified, state, pid, name, " ".join(fields[2:]) or "?"))
+    unheard, left = reconcile(running, {s.id: (s.pid, s.modified) for s in found})
+    found = [s for s in found if s.id not in left]
+    for r in unheard:
+        found.append(Live(RANK[r.state.value], r.updated, r.state.value, r.pid, r.id,
+                          os.path.basename(r.cwd.rstrip("/")) or "?"))
     return sorted(found)
 
 

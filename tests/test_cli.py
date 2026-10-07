@@ -59,6 +59,23 @@ def test_status_counts_most_urgent_first(state, capsys):
     assert capsys.readouterr().out == "#[fg=#ffb329]!1 #[fg=#4accf2]▶1 #[fg=#45e087]✓2 #[fg=#99a6bd]·1#[default]\n"
 
 
+def test_sessions_the_hooks_have_not_heard_from_count_too(state, own_usage_and_prefs, outside_tmux, capsys):
+    registry = own_usage_and_prefs / "sessions"         # what Claude Code lists as running
+    registry.mkdir()
+    for sid, status in (("x", "idle"), ("y", "busy")):
+        pid = outside_tmux()
+        (registry / f"{pid}.json").write_text(json.dumps({
+            "pid": pid, "sessionId": sid, "cwd": "/work/api", "kind": "interactive", "status": status,
+            "procStart": system.started(pid), "startedAt": 1000, "updatedAt": 1000}))
+    write(state, "a", f"waiting {os.getpid()} p\n")
+    assert cli.main(["status"]) == 0
+    assert capsys.readouterr().out == "!1 ▶1 ·1\n"
+    cli.main(["list"])
+    lines = [line.split() for line in capsys.readouterr().out.splitlines()]
+    assert [(line[0], line[-2], line[-1]) for line in lines] == [("waiting", "p", "a"), ("working", "api", "y"),
+                                                                 ("idle", "api", "x")]
+
+
 def test_a_turn_stopped_with_esc_counts_as_done(state, capsys, monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     monkeypatch.setattr(cli, "PROJECTS_DIR", projects)
