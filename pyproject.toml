@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctally"
+dynamic = ["version"]
+description = "A floating status light for your Claude Code sessions: whose turn is it?"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "JinyuJinyuJinyu" }]
+requires-python = ">=3.9"
+dependencies = [
+    "PySide6-Essentials>=6.5",
+    "pyobjc-framework-Cocoa>=9; sys_platform == 'darwin'",
+]
+classifiers = [
+    "Environment :: MacOS X",
+    "Environment :: X11 Applications :: Qt",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/JinyuJinyuJinyu/ctally"
+
+[project.scripts]
+ctally = "ctally.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "ctally.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ctally = ["hooks/ctally.sh"]

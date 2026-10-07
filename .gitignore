@@ -1,8 +1,10 @@
-# Build output (install.sh builds into build/)
+# Python
+__pycache__/
+*.egg-info/
+.venv/
 build/
-/ctally
-/make-icon
-*.icns
+dist/
+.pytest_cache/
 
 # Backups and macOS litter
 *.bak*

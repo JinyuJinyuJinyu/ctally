@@ -1,7 +1,12 @@
 # CTally
 
-A floating status light for your Claude Code sessions on macOS: **whose turn is it?**
+A floating status light for your Claude Code sessions on **macOS and Ubuntu**: **whose turn is it?**
 Glance over instead of tabbing back to the terminal.
+
+```sh
+pipx install git+https://github.com/JinyuJinyuJinyu/ctally.git
+ctally setup --tmux
+```
 
 The name comes from the *tally light*, the lamp on a broadcast camera that shows it's live, and from tallying
 up your sessions.
@@ -19,7 +24,8 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 
 ## Features
 
-- **Floats above everything**, on every Space and beside full-screen apps, without ever taking keyboard focus.
+- **Floats above everything** without ever taking keyboard focus; on macOS on every Space and beside
+  full-screen apps too.
 - **One to three sessions show as big badges**; four or more become a compact list with each session's
   name and directory, up to 16 rows. Session names come from `/rename`, or else the title Claude gave the session.
 - **Sees subagents and workflows**: while a session's agents run, its row says how many and what they're up
@@ -27,13 +33,16 @@ Every session gets a hexagon whose glyph and color say what it's doing:
   [More below.](#subagents-and-workflows)
 - **Built for tmux**: every row shows its pane, a click switches to it, **prefix + J** jumps to the session
   that needs you, and the counts can sit in tmux's status line. [More below.](#built-for-tmux)
-- **Click a row to bring that session's terminal forward**: the exact Terminal tab, or the exact tmux pane.
+- **Click a row to bring that session's terminal forward**: the exact tmux pane, and on macOS the exact
+  Terminal tab.
 - **Fold the list** down to a bar of counts with the chevron.
 - **When a turn finishes**, its row washes green and its mark bounces once; then everything holds still.
-- **Menu bar icon** to show or hide CTally. Off stays off across restarts, and the app sits idle with no timers.
+- **Menu bar (or top bar) icon** to show or hide CTally. Off stays off across restarts, and the app sits idle
+  with no timers.
 - **Settings window** with an on/off switch and an opacity slider (80% by default).
 - **Silent**: no sounds, no notifications, no Dock icon.
-- **One Swift file**: no Xcode project and no dependencies.
+- **One Python package**, installed with pipx: the same Qt app on macOS and Linux, and a `ctally` command for
+  the terminal and tmux.
 
 ![The settings window](docs/settings.png)
 
@@ -51,8 +60,8 @@ When a session hands work to subagents, or runs a whole workflow of them, CTally
   keeps it cyan until they return and Claude has taken in their results, and prefix + J leaves it alone till
   then.
 
-`ctally list` shows the count too. This needs the subagent hooks that `./install.sh` adds; if you set up
-CTally before they existed, run `./install.sh` again and restart your sessions.
+`ctally list` shows the count too. This needs the subagent hooks that `ctally setup` adds; if you set up
+CTally before they existed, run `ctally setup` again and restart your sessions.
 
 ## Built for tmux
 
@@ -72,11 +81,11 @@ started inside it.
 Turn on the key and the status line with:
 
 ```sh
-./install.sh --tmux
+ctally setup --tmux
 ```
 
 This adds a marked block to `~/.tmux.conf` and applies it to your running tmux at once. The file is backed
-up first, and `./uninstall.sh` takes the block out again. To set it up by hand instead:
+up first, and `ctally uninstall` takes the block out again. To set it up by hand instead:
 
 ```tmux
 bind-key J run-shell -b "'$HOME/.local/bin/ctally' jump '#{pane_id}' '#{client_name}' '#{socket_path}'"
@@ -98,41 +107,61 @@ $ ctally jump          # inside tmux: go to the session that needs you
 
 ## Requirements
 
-- macOS 12 or later (developed on macOS 13)
-- Xcode Command Line Tools, for `swiftc`: `xcode-select --install`
+- macOS 12 or later, or Ubuntu 22.04 or later (other Linux desktops should work too; see [Ubuntu](#ubuntu))
+- Python 3.9 or later and [pipx](https://pipx.pypa.io)
 - Claude Code
 
 ## Install
 
 ```sh
-git clone https://github.com/JinyuJinyuJinyu/ctally.git
-cd ctally
-./install.sh
+pipx install git+https://github.com/JinyuJinyuJinyu/ctally.git
+ctally setup            # or: ctally setup --tmux
 ```
 
-`install.sh` does five things:
+pipx puts CTally in an environment of its own, with Qt (PySide6, about 100–400 MB depending on the platform),
+and the `ctally` command in `~/.local/bin`. Then `ctally setup` does four things:
 
-1. Builds `ctally.swift` into `~/Applications/CTally.app`.
-2. Copies the hook script to `~/.claude/hooks/ctally.sh`.
-3. Adds the hooks to `~/.claude/settings.json`. It merges with your existing settings and backs the file up first.
-4. Installs the `ctally` command to `~/.local/bin`.
-5. Starts CTally.
+1. Copies the hook script to `~/.claude/hooks/ctally.sh`.
+2. Adds the hooks to `~/.claude/settings.json`. It merges with your existing settings and backs the file up first.
+3. Starts CTally at login: a LaunchAgent on macOS, an autostart entry (`~/.config/autostart`) on Linux.
+4. Starts CTally now.
 
 Restart any Claude Code sessions that were already running so they pick up the hooks.
-
-Run it again after pulling changes. It replaces the app and keeps your preferences. Options:
 
 | Option | Effect |
 |---|---|
 | `--tmux` | also set up tmux: the prefix + J jump key and status-line counts ([details](#built-for-tmux)) |
 | `--no-hooks` | leave `~/.claude/settings.json` alone (add the hooks yourself; see below) |
-| `--no-launch` | install without starting CTally |
+| `--no-autostart` | don't start CTally at login |
+| `--no-launch` | set up without starting CTally now |
 
-To start CTally at login, add `~/Applications/CTally.app` under **System Settings → General → Login Items**.
+To upgrade: `pipx upgrade ctally` (or `pipx install --force git+…` for the latest commit), then `ctally setup`
+again. It restarts CTally and keeps your preferences.
 
-**Upgrading from Claude Pet** (this project's earlier name)? Just run `./install.sh`. It moves everything over:
-your position, opacity and fold setting, your login item, and your hooks. Sessions still running with the old
-hooks keep reporting until you restart them.
+**Upgrading from the Swift version** (CTally.app, installed with `./install.sh`): remove the old `ctally`
+script first, since pipx won't replace a file it didn't put there: `rm ~/.local/bin/ctally`. Then install as
+above. `ctally setup` quits and removes `~/Applications/CTally.app` and its login item, and keeps your opacity,
+fold setting and position.
+
+### Ubuntu
+
+```sh
+sudo apt install pipx libxcb-cursor0
+pipx ensurepath          # then open a new terminal
+pipx install git+https://github.com/JinyuJinyuJinyu/ctally.git
+ctally setup --tmux
+```
+
+`libxcb-cursor0` is the one library Qt needs that a desktop install of Ubuntu lacks.
+
+- **Wayland** (Ubuntu's default) lets no app keep itself on top or choose where its window goes, so CTally
+  runs through XWayland, which allows both. That happens on its own; you don't need to switch sessions.
+- **The top-bar icon** uses Ubuntu's AppIndicator support, which is on by default. On a desktop without a
+  tray, right-click the indicator itself for the menu.
+- **Clicking a session** switches tmux to its pane, and opens a terminal on that tmux session if none shows
+  it. Raising the terminal's window works on X11 with `xdotool` installed (`sudo apt install xdotool`);
+  under Wayland no app may raise another's window, so bring the terminal up yourself. prefix + J needs
+  neither.
 
 ## Using it
 
@@ -140,24 +169,26 @@ hooks keep reporting until you restart them.
 |---|---|
 | Move it | Drag it anywhere. It remembers the spot and grows up and left from its bottom-right corner. |
 | Go to a session | Click its row (or its badge). |
-| Jump to the session that needs you | In tmux, press prefix + J (set up by `./install.sh --tmux`). Again for the next one. |
+| Jump to the session that needs you | In tmux, press prefix + J (set up by `ctally setup --tmux`). Again for the next one. |
 | Fold or unfold the list | Click the chevron on the count bar, or right-click → Fold List. |
-| Hide or show it | Use the hexagon in the menu bar, or right-click → Hide CTally. |
-| Change opacity | Menu bar → Settings… |
+| Hide or show it | Use the hexagon in the menu bar (top bar on Ubuntu), or right-click → Hide CTally. |
+| Change opacity | Menu bar → Settings…, or right-click → Settings… |
+| Start or stop it | `ctally run` starts it; Quit in its menu stops it. |
 | Name a session | Run `/rename my-name` in Claude Code. CTally picks the name up within seconds. |
 
-**The first time you click a session**, macOS asks whether CTally may control Terminal. Allow it so CTally can
-bring the right tab forward. You can change this later in **System Settings → Privacy & Security → Automation**.
+**The first time you click a session** on macOS, macOS asks whether CTally (shown as Python, which runs it) may
+control Terminal. Allow it so CTally can bring the right tab forward. You can change this later in
+**System Settings → Privacy & Security → Automation**.
 
 ## How it works
 
 ```
-Claude Code ──hooks──▶ ~/.claude/ctally.d/<session id> ──read 5×/s──▶ CTally.app
+Claude Code ──hooks──▶ ~/.claude/ctally.d/<session id> ──read 5×/s──▶ ctally run
 ```
 
 Two pieces, connected by a folder:
 
-1. **Hooks.** `hooks/ctally.sh` runs on Claude Code events and writes one small file per session:
+1. **Hooks.** `ctally.sh` (in `src/ctally/hooks/`) runs on Claude Code events and writes one small file per session:
    `working <pid> <project>`.
 
    | Event | State written |
@@ -178,7 +209,7 @@ Two pieces, connected by a folder:
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
    is running: a finished one stays so you can still see it. Leftover files are cleaned up after a day.
 
-To add the hooks by hand, copy `hooks/ctally.sh` to `~/.claude/hooks/` and merge this into
+To add the hooks by hand, copy `src/ctally/hooks/ctally.sh` to `~/.claude/hooks/` and merge this into
 `~/.claude/settings.json`:
 
 ```json
@@ -198,7 +229,7 @@ To add the hooks by hand, copy `hooks/ctally.sh` to `~/.claude/hooks/` and merge
 
 ### Privacy
 
-Everything stays on your Mac. The app makes no network requests. To show session names it reads each
+Everything stays on your machine. The app makes no network requests. To show session names it reads each
 transcript in `~/.claude/projects/`, but only two parts:
 
 - the last 256 KB, for the `/rename` name or the generated title
@@ -210,39 +241,47 @@ conversations otherwise.
 
 ### Terminal support
 
-Clicking a session works best in **Terminal.app**, with or without tmux: CTally finds the exact tab, or the
+On macOS, clicking a session works best in **Terminal.app**, with or without tmux: CTally finds the exact tab, or the
 exact tmux pane and the tab attached to it. In other terminals (iTerm2, VS Code, …) and for sessions in the
 Claude desktop app, it still switches tmux to the right pane and brings the app forward, but can't pick the
-tab. The prefix + J jump key works in any terminal.
+tab. On Linux, see [Ubuntu](#ubuntu). The prefix + J jump key works in any terminal.
 
 ## Uninstall
 
 ```sh
-./uninstall.sh
+ctally uninstall
+pipx uninstall ctally
 ```
 
-This removes the app, the hook script, the `ctally` command, the hooks in `~/.claude/settings.json` and the
-block in your tmux config (both after a backup), the state files and the preferences. Your other Claude Code
-and tmux settings are left as they are.
+The first removes the hooks in `~/.claude/settings.json` and the block in your tmux config (both after a
+backup), the hook script, starting at login, the state files and the preferences. Your other Claude Code and
+tmux settings are left as they are. The second removes the command and its Qt.
 
 ## Troubleshooting
 
 - **CTally doesn't change state.** Restart your Claude Code sessions after installing. Then check that
   `~/.claude/ctally.d/` gets a file when you send a prompt.
-- **Clicking a session does nothing.** Allow CTally to control Terminal under
+- **Clicking a session does nothing.** On macOS, allow Python (which runs CTally) to control Terminal under
   **System Settings → Privacy & Security → Automation**.
 - **prefix + J says "nothing needs you".** That means no session is waiting or done; `ctally list` shows what
   CTally sees. A session started outside tmux can't be jumped to.
-- **CTally is gone.** Use the hexagon icon in the menu bar → Show CTally. If the icon is gone too, the app isn't
-  running: open CTally from Spotlight.
+- **CTally is gone.** Use the hexagon icon in the menu bar → Show CTally. If the icon is gone too, it isn't
+  running: run `ctally run`. Its log is `~/Library/Logs/ctally.log` on macOS and
+  `~/.local/state/ctally/ctally.log` on Linux.
+- **Ubuntu: "Could not load the Qt platform plugin xcb".** Install the library it names, usually
+  `sudo apt install libxcb-cursor0`.
 
-## Building by hand
+## Developing
 
 ```sh
-swiftc -O ctally.swift -o ctally     # the app, as a bare binary
-./ctally &                           # run it without a bundle
-swiftc -O make-icon.swift -o make-icon && ./make-icon CTally.icns
+python3 -m venv .venv && .venv/bin/pip install -e . pytest
+.venv/bin/ctally run                 # the indicator, from your checkout
+.venv/bin/python -m pytest tests     # the tests
+.venv/bin/python tools/snapshot.py   # the README's screenshots, from demo data
 ```
+
+Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR` and `CTALLY_CONFIG_DIR` to run it against other folders than
+`~/.claude/ctally.d`, `~/.claude/projects` and its own settings.
 
 ## License
 

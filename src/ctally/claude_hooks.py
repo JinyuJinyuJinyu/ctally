@@ -1,21 +1,22 @@
-#!/usr/bin/env python3
 """Add CTally's hooks to Claude Code's settings, or take them out again.
 
-    configure-hooks.py install   [path/to/settings.json]
-    configure-hooks.py uninstall [path/to/settings.json]
-
-The settings file defaults to ~/.claude/settings.json. It is merged, never overwritten:
-other hooks and settings are left as they are, and a timestamped backup is written before
-any change. Earlier CTally hooks, and those from when it was called Claude Pet, are
-replaced rather than duplicated, so running it twice is harmless.
+The settings file (~/.claude/settings.json) is merged, never overwritten: other hooks and
+settings are left as they are, and a timestamped backup is written before any change.
+Earlier CTally hooks, and those from when it was called Claude Pet, are replaced rather
+than duplicated, so running it twice is harmless.
 """
+from __future__ import annotations
+
 import json
 import os
 import shutil
-import sys
 import tempfile
 import time
+from importlib import resources
+from pathlib import Path
 
+SETTINGS = Path.home() / ".claude" / "settings.json"
+SCRIPT = Path.home() / ".claude" / "hooks" / "ctally.sh"
 HOOK = '"$HOME/.claude/hooks/ctally.sh"'
 
 # Each event, and the state it reports. No "matcher": these events take none.
@@ -30,16 +31,19 @@ EVENTS = {
     "SubagentStop": "agent-stop",   # and comes back
 }
 
-
 # "claude-pet" catches the hooks from before the rename, inline or scripted.
 MARKERS = ("ctally", "claude-pet")
 
 
-def is_ours(hook):
+class SettingsError(Exception):
+    """The settings file can't be read or isn't what we expect; it was left alone."""
+
+
+def is_ours(hook: dict) -> bool:
     return any(marker in hook.get("command", "") for marker in MARKERS)
 
 
-def configure(settings, install):
+def configure(settings: dict, install: bool) -> dict:
     """Settings with every CTally hook removed, then (if installing) added back."""
     settings = json.loads(json.dumps(settings))  # work on a copy
     hooks = settings.get("hooks", {})
@@ -67,58 +71,73 @@ def configure(settings, install):
     return settings
 
 
-def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("install", "uninstall"):
-        sys.exit(__doc__)
-    install = sys.argv[1] == "install"
-    path = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else "~/.claude/settings.json")
-
+def update(install: bool, path: Path = SETTINGS) -> str:
+    """Installs or removes the hooks in a settings file; returns what happened."""
     settings = {}
     # Only a file that is really not there counts as empty. One that merely can't be seen (no
     # permission, or a sandbox hiding it) would otherwise be replaced by just our hooks.
     try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
+        text = path.read_text(encoding="utf-8")
         exists = True
     except FileNotFoundError:
         exists = False
     except OSError as error:
-        sys.exit(f"Can't read {path} ({error.strerror}); left it alone.")
+        raise SettingsError(f"Can't read {path} ({error.strerror}); left it alone.") from error
     if exists:
         try:
             settings = json.loads(text) if text.strip() else {}
         except json.JSONDecodeError as error:
-            sys.exit(f"{path} is not valid JSON ({error}); left it alone.")
+            raise SettingsError(f"{path} is not valid JSON ({error}); left it alone.") from error
         if not isinstance(settings, dict):
-            sys.exit(f"{path} does not hold a JSON object; left it alone.")
+            raise SettingsError(f"{path} does not hold a JSON object; left it alone.")
 
     updated = configure(settings, install)
     if updated == settings and exists:
-        print(f"Claude Code hooks already {'installed' if install else 'removed'} in {path}")
-        return
+        return f"Claude Code hooks already {'installed' if install else 'removed'} in {path}"
 
+    notes = []
     if exists:
-        # Never overwrite an earlier backup, even one made the same second.
-        stamp = time.strftime('%Y%m%d-%H%M%S')
-        backup, n = f"{path}.bak.{stamp}", 1
-        while os.path.exists(backup):
-            n += 1
-            backup = f"{path}.bak.{stamp}-{n}"
-        shutil.copy2(path, backup)
-        print(f"Backed up {path} to {backup}")
+        notes.append(f"Backed up {path} to {backup(path)}")
     # A symlink (into a dotfiles checkout, say) is written through, not replaced by a file.
-    target = os.path.realpath(path)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    target = Path(os.path.realpath(path))
+    target.parent.mkdir(parents=True, exist_ok=True)
     # Write beside the file, then swap it in, so a crash can't leave half a settings file.
-    fd, temp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".settings.", suffix=".json")
+    fd, temp = tempfile.mkstemp(dir=target.parent, prefix=".settings.", suffix=".json")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(updated, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    if os.path.exists(target):
+    if target.exists():
         shutil.copymode(target, temp)
     os.replace(temp, target)
-    print(f"Claude Code hooks {'installed in' if install else 'removed from'} {path}")
+    notes.append(f"Claude Code hooks {'installed in' if install else 'removed from'} {path}")
+    return "\n".join(notes)
 
 
-if __name__ == "__main__":
-    main()
+def backup(path: Path) -> Path:
+    """Copies a file aside, never over an earlier backup, even one made the same second."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    copy, n = Path(f"{path}.bak.{stamp}"), 1
+    while copy.exists():
+        n += 1
+        copy = Path(f"{path}.bak.{stamp}-{n}")
+    shutil.copy2(path, copy)
+    return copy
+
+
+def install_script() -> None:
+    """Puts the hook script where the hooks call it."""
+    SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+    source = resources.files("ctally").joinpath("hooks/ctally.sh").read_bytes()
+    temp = SCRIPT.with_name(".ctally.sh.new")
+    temp.write_bytes(source)
+    temp.chmod(0o755)
+    os.replace(temp, SCRIPT)
+
+
+def remove_scripts() -> None:
+    for name in ("ctally.sh", "claude-pet.sh"):
+        (SCRIPT.parent / name).unlink(missing_ok=True)
+    try:
+        SCRIPT.parent.rmdir()               # only if nothing else lives there
+    except OSError:
+        pass
