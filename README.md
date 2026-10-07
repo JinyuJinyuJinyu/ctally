@@ -183,7 +183,9 @@ Restart any Claude Code sessions that were already running so they pick up the h
 | `--no-launch` | set up without starting CTally now |
 
 To upgrade: `pipx upgrade ctally`, then `ctally setup` again. It restarts CTally and keeps your preferences.
-For the latest commit, before it's released: `pipx install --force git+https://github.com/JinyuJinyuJinyu/ctally.git`.
+For the latest commit, before it's released: `pipx install --force git+https://github.com/JinyuJinyuJinyu/ctally.git`
+(or, keeping the Qt you have, `pipx runpip ctally install --no-deps --force-reinstall git+https://github.com/JinyuJinyuJinyu/ctally.git`),
+then `ctally setup`. Its version ends in `.dev0`, and `pipx upgrade` leaves it until the next release.
 
 **Upgrading from the Swift version** (CTally.app, installed with `./install.sh`): remove the old `ctally`
 script first, since pipx won't replace a file it didn't put there: `rm ~/.local/bin/ctally`. Then install as
@@ -373,9 +375,13 @@ Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR`, `CTALLY_SESSIONS_DIR`, `CTALLY_CO
 Releases go to PyPI from GitHub, by `.github/workflows/publish.yml`, using PyPI's Trusted Publishing: PyPI
 trusts that workflow in this repository, so no token is stored anywhere.
 
-1. Bump `__version__` in `src/ctally/__init__.py`, then commit and push.
-2. Create a release whose tag matches it: `gh release create v0.2.1 --generate-notes`, or on GitHub.
+Pushing doesn't release anything. Between releases, `__version__` in `src/ctally/__init__.py` is the next
+version marked `.dev0` (`0.3.2.dev0`), so builds from `main` say they aren't a release.
+
+1. Drop the `.dev0` (`0.3.2.dev0` → `0.3.2`), then commit and push.
+2. Create a release whose tag matches it: `gh release create v0.3.2 --generate-notes`, or on GitHub.
 3. The workflow builds the package, checks it and uploads it. `pipx upgrade ctally` then picks it up.
+4. Set `__version__` to the next one, `0.3.3.dev0`, and commit.
 
 Once, before the first release: on [pypi.org](https://pypi.org) → your account → **Publishing**, add a pending
 publisher with PyPI project `ctally`, owner `JinyuJinyuJinyu`, repository `ctally`, workflow `publish.yml`
