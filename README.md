@@ -4,7 +4,7 @@ A floating status light for your Claude Code sessions on **macOS and Ubuntu**: *
 Glance over instead of tabbing back to the terminal.
 
 ```sh
-pipx install git+https://github.com/JinyuJinyuJinyu/ctally.git
+pipx install ctally
 ctally setup --tmux
 ```
 
@@ -114,7 +114,7 @@ $ ctally jump          # inside tmux: go to the session that needs you
 ## Install
 
 ```sh
-pipx install git+https://github.com/JinyuJinyuJinyu/ctally.git
+pipx install ctally
 ctally setup            # or: ctally setup --tmux
 ```
 
@@ -135,8 +135,8 @@ Restart any Claude Code sessions that were already running so they pick up the h
 | `--no-autostart` | don't start CTally at login |
 | `--no-launch` | set up without starting CTally now |
 
-To upgrade: `pipx upgrade ctally` (or `pipx install --force git+…` for the latest commit), then `ctally setup`
-again. It restarts CTally and keeps your preferences.
+To upgrade: `pipx upgrade ctally`, then `ctally setup` again. It restarts CTally and keeps your preferences.
+For the latest commit, before it's released: `pipx install --force git+https://github.com/JinyuJinyuJinyu/ctally.git`.
 
 **Upgrading from the Swift version** (CTally.app, installed with `./install.sh`): remove the old `ctally`
 script first, since pipx won't replace a file it didn't put there: `rm ~/.local/bin/ctally`. Then install as
@@ -148,7 +148,7 @@ fold setting and position.
 ```sh
 sudo apt install pipx libxcb-cursor0
 pipx ensurepath          # then open a new terminal
-pipx install git+https://github.com/JinyuJinyuJinyu/ctally.git
+pipx install ctally
 ctally setup --tmux
 ```
 
