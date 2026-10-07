@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "ctally"
 dynamic = ["version"]
 description = "A floating status light for your Claude Code sessions: whose turn is it?"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "JinyuJinyuJinyu" }]
 requires-python = ">=3.9"
 dependencies = [
@@ -17,7 +18,6 @@ dependencies = [
 classifiers = [
     "Environment :: MacOS X",
     "Environment :: X11 Applications :: Qt",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",

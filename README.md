@@ -11,7 +11,7 @@ ctally setup --tmux
 The name comes from the *tally light*, the lamp on a broadcast camera that shows it's live, and from tallying
 up your sessions.
 
-![CTally with one session, three sessions, a list of six with subagents at work, and the list folded](docs/overview.png)
+![CTally with one session, three sessions, a list of six with subagents at work, and the list folded](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/overview.png)
 
 Every session gets a hexagon whose glyph and color say what it's doing:
 
@@ -44,7 +44,7 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **One Python package**, installed with pipx: the same Qt app on macOS and Linux, and a `ctally` command for
   the terminal and tmux.
 
-![The settings window](docs/settings.png)
+![The settings window](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/settings.png)
 
 ## Subagents and workflows
 
@@ -282,6 +282,19 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 
 Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR` and `CTALLY_CONFIG_DIR` to run it against other folders than
 `~/.claude/ctally.d`, `~/.claude/projects` and its own settings.
+
+## Releasing
+
+Releases go to PyPI from GitHub, by `.github/workflows/publish.yml`, using PyPI's Trusted Publishing: PyPI
+trusts that workflow in this repository, so no token is stored anywhere.
+
+1. Bump `__version__` in `src/ctally/__init__.py`, then commit and push.
+2. Create a release whose tag matches it: `gh release create v0.2.1 --generate-notes`, or on GitHub.
+3. The workflow builds the package, checks it and uploads it. `pipx upgrade ctally` then picks it up.
+
+Once, before the first release: on [pypi.org](https://pypi.org) → your account → **Publishing**, add a pending
+publisher with PyPI project `ctally`, owner `JinyuJinyuJinyu`, repository `ctally`, workflow `publish.yml`
+and environment `pypi`.
 
 ## License
 
