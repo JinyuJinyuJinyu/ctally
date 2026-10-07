@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Add Claude Pet's hooks to Claude Code's settings, or take them out again.
+
+    configure-hooks.py install   [path/to/settings.json]
+    configure-hooks.py uninstall [path/to/settings.json]
+
+The settings file defaults to ~/.claude/settings.json. It is merged, never overwritten:
+other hooks and settings are left as they are, and a timestamped backup is written before
+any change. Earlier Claude Pet hooks, including the inline commands from before
+hooks/claude-pet.sh existed, are replaced rather than duplicated, so running it twice is
+harmless.
+"""
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+
+HOOK = '"$HOME/.claude/hooks/claude-pet.sh"'
+
+# Each event, and the state it reports. No "matcher": these events take none.
+EVENTS = {
+    "UserPromptSubmit": "working",  # a turn starts
+    "PreToolUse": "working",        # back to work after a permission prompt
+    "Stop": "done",                 # the turn is over
+    "Notification": "waiting",      # a permission prompt, or idle waiting for input
+    "SessionEnd": "end",            # the session is gone
+}
+
+
+def is_ours(group):
+    return any("claude-pet" in hook.get("command", "") for hook in group.get("hooks", []))
+
+
+def configure(settings, install):
+    """Settings with every Claude Pet hook removed, then (if installing) added back."""
+    settings = json.loads(json.dumps(settings))  # work on a copy
+    hooks = settings.get("hooks", {})
+    for event in list(hooks):
+        kept = [group for group in hooks[event] if not is_ours(group)]
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    if install:
+        for event, state in EVENTS.items():
+            hooks.setdefault(event, []).append(
+                {"hooks": [{"type": "command", "command": f"{HOOK} {state}"}]})
+    if hooks:
+        settings["hooks"] = hooks
+    else:
+        settings.pop("hooks", None)
+    return settings
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ("install", "uninstall"):
+        sys.exit(__doc__)
+    install = sys.argv[1] == "install"
+    path = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else "~/.claude/settings.json")
+
+    settings = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        try:
+            settings = json.loads(text) if text.strip() else {}
+        except json.JSONDecodeError as error:
+            sys.exit(f"{path} is not valid JSON ({error}); left it alone.")
+        if not isinstance(settings, dict):
+            sys.exit(f"{path} does not hold a JSON object; left it alone.")
+
+    updated = configure(settings, install)
+    if updated == settings and os.path.exists(path):
+        print(f"Claude Code hooks already {'installed' if install else 'removed'} in {path}")
+        return
+
+    if os.path.exists(path):
+        # Never overwrite an earlier backup, even one made the same second.
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        backup, n = f"{path}.bak.{stamp}", 1
+        while os.path.exists(backup):
+            n += 1
+            backup = f"{path}.bak.{stamp}-{n}"
+        shutil.copy2(path, backup)
+        print(f"Backed up {path} to {backup}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Write beside the file, then swap it in, so a crash can't leave half a settings file.
+    fd, temp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(updated, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    if os.path.exists(path):
+        shutil.copymode(path, temp)
+    os.replace(temp, path)
+    print(f"Claude Code hooks {'installed in' if install else 'removed from'} {path}")
+
+
+if __name__ == "__main__":
+    main()

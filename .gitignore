@@ -1,0 +1,9 @@
+# Build output (install.sh builds into build/)
+build/
+/claude-pet
+/make-icon
+*.icns
+
+# Backups and macOS litter
+*.bak*
+.DS_Store
