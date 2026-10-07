@@ -6,9 +6,12 @@
 // Reads ~/.claude/ctally.d/<session-id>, one file per Claude Code session, each
 // holding "<word> <pid> <project name>" written by hooks/ctally.sh:
 //   working | done | waiting | idle   (anything else, or an empty directory, means idle)
+// and ~/.claude/ctally.d/.agents/<session-id>/, a file per subagent running for it.
 //
 // Up to three sessions show as big badges; four or more as a compact list, one row per
 // session with its name (from /rename, or the title Claude gave it) over its directory.
+// While a session's subagents run, its row says how many and what they're doing, with a
+// workflow's progress, and its badge carries their count.
 // The chevron on the list's count bar folds it down to just the counts.
 // Click a row (or a badge) to bring that session's terminal to the front.
 //
@@ -62,6 +65,28 @@ struct SessionSnapshot: Equatable {
     var title: String? = nil   // session name, from the transcript
     var path: String? = nil    // directory the session started in, from the transcript
     var tmux: String? = nil    // where it sits in tmux, "report:0.2", if it runs there
+    var agents: AgentActivity? = nil   // its subagents, while any run
+}
+
+/// A session's subagents while they run, its own and a workflow's.
+struct AgentActivity: Equatable {
+    var running: Int
+    var started = 0            // a workflow's agents set off so far
+    var done = 0               // and of those, finished
+    var detail: String? = nil  // the workflow's phase, or what a lone agent was asked to do
+
+    /// "4 agents · Verify"
+    var summary: String {
+        let count = running == 1 ? "1 agent" : "\(running) agents"
+        guard let detail = detail, !detail.isEmpty else { return count }
+        return count + " · " + detail
+    }
+
+    /// "12/16": a workflow's progress, as far as it has got. A workflow decides as it goes
+    /// how many agents to set off, so the total grows as each phase starts.
+    var progress: String? {
+        started > 0 ? "\(min(done, started))/\(started)" : nil
+    }
 }
 
 /// CTally's shape: a hexagon standing on a point, shared by the badges, the list's marks and
@@ -125,6 +150,11 @@ final class SessionInfoReader {
         }
         entries[id] = entry
         return (entry.custom ?? entry.generated, entry.path)
+    }
+
+    /// The session's transcript, once a look for its name has found it.
+    func transcript(for id: String) -> URL? {
+        entries[id]?.transcript
     }
 
     func forget(allBut ids: Set<String>) {
@@ -259,9 +289,151 @@ final class TmuxLocator {
     }
 }
 
+// MARK: - Subagents
+
+/// What each session's subagents are up to. The hooks keep a file per running agent in
+/// ~/.claude/ctally.d/.agents/<session id>/, holding the agent's type: that says how many
+/// run. Beside the session's transcript, a workflow keeps a journal with a line as each of
+/// its agents starts (and in which phase) and as each ends, and a plain agent leaves a note
+/// of what it was asked to do: that says what they're doing.
+final class AgentWatcher {
+
+    private struct Journal {
+        var modified = Date.distantPast
+        var size = 0
+        var phase: String?
+        var started = 0
+        var done = 0
+    }
+
+    private struct Look {
+        var folderModified = Date.distantPast
+        var lastLook = Date.distantPast
+        var activity: AgentActivity?
+        var journals: [String: Journal] = [:]        // by path
+        var descriptions: [String: String] = [:]     // by agent id
+    }
+
+    private static let every: TimeInterval = 2   // a workflow's progress, between agents coming and going
+    private static let generic: Set<String> = ["", "general-purpose", "workflow-subagent"]
+
+    private let dir: URL
+    private var looks: [String: Look] = [:]
+
+    init(directory: URL) {
+        self.dir = directory
+    }
+
+    /// Cheap to call every poll: the agents' folder is one stat, and looked into only when
+    /// an agent has come or gone, or every few seconds while any run.
+    func activity(for id: String, transcript: URL?) -> AgentActivity? {
+        let folder = dir.appendingPathComponent(id)
+        guard let modified = (try? FileManager.default.attributesOfItem(atPath: folder.path))?[.modificationDate]
+                as? Date else {
+            looks[id] = nil
+            return nil
+        }
+        var look = looks[id] ?? Look()
+        let now = Date()
+        if modified != look.folderModified || now.timeIntervalSince(look.lastLook) >= AgentWatcher.every {
+            look.folderModified = modified
+            look.lastLook = now
+            let activity = examine(folder, transcript: transcript, look: &look)
+            look.activity = activity
+        }
+        looks[id] = look
+        return look.activity
+    }
+
+    func forget(allBut ids: Set<String>) {
+        looks = looks.filter { ids.contains($0.key) }
+    }
+
+    private func examine(_ folder: URL, transcript: URL?, look: inout Look) -> AgentActivity? {
+        let fm = FileManager.default
+        // Dot files are the hook's own notes, not agents.
+        let agents = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        guard !agents.isEmpty else { return nil }
+        var types: [String: String] = [:]
+        var oldest = Date.distantFuture
+        for agent in agents {
+            let path = folder.appendingPathComponent(agent).path
+            types[agent] = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let started = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date {
+                oldest = min(oldest, started)
+            }
+        }
+        look.descriptions = look.descriptions.filter { types[$0.key] != nil }
+
+        var activity = AgentActivity(running: agents.count)
+        // The transcript's folder: <projects>/<directory>/<session id>/.
+        guard let base = transcript?.deletingPathExtension() else { return activity }
+
+        if types.values.contains("workflow-subagent") {
+            // The workflows running now: a journal but no final record yet, and written to
+            // since the oldest of these agents set off (a run a crash cut short never gets
+            // its record).
+            let runs = base.appendingPathComponent("subagents/workflows")
+            var live = 0, phase: String?
+            var seen = Set<String>()
+            for run in ((try? fm.contentsOfDirectory(atPath: runs.path)) ?? []).sorted() where run.hasPrefix("wf_") {
+                let journal = runs.appendingPathComponent(run).appendingPathComponent("journal.jsonl")
+                guard !fm.fileExists(atPath: base.appendingPathComponent("workflows/\(run).json").path),
+                      let attrs = try? fm.attributesOfItem(atPath: journal.path),
+                      let modified = attrs[.modificationDate] as? Date,
+                      modified.timeIntervalSince(oldest) > -5 else { continue }
+                let read = AgentWatcher.read(journal, modified: modified, size: attrs[.size] as? Int ?? 0,
+                                             known: look.journals[journal.path])
+                look.journals[journal.path] = read
+                seen.insert(journal.path)
+                live += 1
+                activity.started += read.started
+                activity.done += read.done
+                phase = read.phase ?? phase
+            }
+            look.journals = look.journals.filter { seen.contains($0.key) }
+            activity.detail = live > 1 ? "\(live) workflows" : phase
+        } else if agents.count == 1, let agent = agents.first {
+            if look.descriptions[agent] == nil {
+                let meta = base.appendingPathComponent("subagents/agent-\(agent).meta.json")
+                let record = (try? Data(contentsOf: meta)).flatMap { try? JSONSerialization.jsonObject(with: $0) }
+                look.descriptions[agent] = (record as? [String: Any])?["description"] as? String ?? ""
+            }
+            let type = types[agent] ?? ""
+            let described = look.descriptions[agent] ?? ""
+            activity.detail = !described.isEmpty ? described : AgentWatcher.generic.contains(type) ? nil : type
+        }
+        return activity
+    }
+
+    /// A journal's phase (that of the agent started last), and how many agents have started
+    /// and ended, read again only when it has grown. Each line is a record whose type comes first;
+    /// those of agents that ended carry their whole result, so only the started ones are
+    /// parsed.
+    private static func read(_ url: URL, modified: Date, size: Int, known: Journal?) -> Journal {
+        if let known = known, known.modified == modified, known.size == size { return known }
+        var journal = Journal(modified: modified, size: size)
+        guard let data = try? Data(contentsOf: url) else { return journal }
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            let head = String(decoding: line.prefix(32), as: UTF8.self)
+            if head.hasPrefix("{\"type\":\"result\"") || head.hasPrefix("{\"type\":\"failed\"") {
+                journal.done += 1
+            } else if head.hasPrefix("{\"type\":\"started\"") {
+                journal.started += 1
+                if let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                   let phase = record["phase"] as? String, !phase.isEmpty {
+                    journal.phase = phase
+                }
+            }
+        }
+        return journal
+    }
+}
+
 // MARK: - State directory
 
-/// Watches one state file per session.
+/// Watches one state file per session, and the folder of running agents beside it.
 final class StateReader {
 
     private struct Session {
@@ -284,6 +456,7 @@ final class StateReader {
     private let dir: URL
     private let namer: SessionInfoReader
     private let locator = TmuxLocator()
+    private let watcher: AgentWatcher
     private var cache: [String: Session] = [:]
     private var firstSeen: [String: Date] = [:]
     private var lastPrune = Date.distantPast
@@ -291,6 +464,7 @@ final class StateReader {
     init(directory: URL, transcripts: URL) {
         self.dir = directory
         self.namer = SessionInfoReader(projects: transcripts)
+        self.watcher = AgentWatcher(directory: directory.appendingPathComponent(".agents"))
     }
 
     func poll() -> [SessionSnapshot] {
@@ -317,6 +491,7 @@ final class StateReader {
         prune()
         namer.forget(allBut: Set(cache.keys))
         locator.forget(allBut: Set(cache.keys))
+        watcher.forget(allBut: Set(cache.keys))
 
         // Oldest session first, so rows never shuffle under me.
         let ordered = cache.keys.sorted {
@@ -342,7 +517,8 @@ final class StateReader {
                                pid: session?.pid ?? 0,
                                title: info.title,
                                path: info.path,
-                               tmux: locator.location(for: name, pid: session?.pid ?? 0))
+                               tmux: locator.location(for: name, pid: session?.pid ?? 0),
+                               agents: watcher.activity(for: name, transcript: namer.transcript(for: name)))
     }
 
     private func read(_ path: String, modified: Date, size: Int) -> Session? {
@@ -359,16 +535,24 @@ final class StateReader {
                        size: size)
     }
 
-    /// Sessions killed without a SessionEnd hook leave their file behind.
+    /// Sessions killed without a SessionEnd hook leave their file behind, and any agents'
+    /// folder.
     private func prune() {
+        let fm = FileManager.default
         let now = Date()
         guard now.timeIntervalSince(lastPrune) > 60 else { return }
         lastPrune = now
         for (name, session) in cache
         where !session.isAlive && now.timeIntervalSince(session.modified) > StateReader.staleAfter {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
             cache[name] = nil
             firstSeen[name] = nil
+        }
+        let agents = dir.appendingPathComponent(".agents")
+        for name in (try? fm.contentsOfDirectory(atPath: agents.path)) ?? [] where cache[name] == nil {
+            let folder = agents.appendingPathComponent(name)
+            let modified = (try? fm.attributesOfItem(atPath: folder.path))?[.modificationDate] as? Date ?? .distantPast
+            if now.timeIntervalSince(modified) > StateReader.staleAfter { try? fm.removeItem(at: folder) }
         }
     }
 }
@@ -616,7 +800,8 @@ final class FoldButton: NSView {
 /// Up to three sessions get big badges: hexagons with a transport-control glyph (play,
 /// pause, check, dot), side by side, each captioned with its session's name and directory
 /// once there is more than one. Four or more become a list, one row per session: a small
-/// hexagon, the name over the directory, and the state in words. The list grows upward
+/// hexagon, the name over the directory, and the state in words, plus a line about its
+/// agents while any run. The list grows upward
 /// from its bottom-right corner with the oldest session at the bottom, so rows already on
 /// screen stay put when a new session starts.
 final class TallyView: NSView {
@@ -626,6 +811,7 @@ final class TallyView: NSView {
         let title: String          // session name, numbered when two share one
         let path: String           // directory, with ~ for home
         let tmux: String           // "report:0.2", or empty outside tmux
+        let agents: String         // "4 agents · Verify", or empty with none running
     }
 
     /// One big badge, or one of a few side by side with a caption under each.
@@ -646,6 +832,8 @@ final class TallyView: NSView {
     private static let maxRows = 16
     private static let padding: CGFloat = 8
     private static let rowHeight: CGFloat = 38
+    private static let agentLineHeight: CGFloat = 14   // added under a row while its agents run
+    private static let progressWidth: CGFloat = 54     // a workflow's progress bar, at the end of that line
     private static let overflowHeight: CGFloat = 22
     private static let headerHeight: CGFloat = 26   // the count bar, which is all a folded list shows
     private static let headerGap: CGFloat = 6       // between the count bar and the rows
@@ -659,6 +847,8 @@ final class TallyView: NSView {
     private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
     private static let pathFont = NSFont.systemFont(ofSize: 10)
     private static let tmuxFont = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .medium)
+    private static let agentFont = NSFont.systemFont(ofSize: 10, weight: .medium)
+    private static let tagFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
     private static let stateFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
     private static let captionTitleFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
     private static let captionPathFont = NSFont.systemFont(ofSize: 9)
@@ -689,6 +879,7 @@ final class TallyView: NSView {
     }
     private var sessions: [SessionSnapshot] = []
     private var rows: [Row] = []
+    private var rowOffsets: [CGFloat] = [0]   // each row's bottom above the first's, and the total last
     private var counts: [(state: SessionState, count: Int)] = []
     private var overflow = 0
     private var listWidth = TallyView.widthRange.lowerBound
@@ -719,8 +910,7 @@ final class TallyView: NSView {
         }
         let bar = 2 * TallyView.padding + TallyView.headerHeight
         if folded { return NSSize(width: barWidth, height: bar) }
-        let height = bar + TallyView.headerGap + CGFloat(rows.count) * TallyView.rowHeight
-            + (overflow > 0 ? TallyView.overflowHeight : 0)
+        let height = bar + TallyView.headerGap + rowsHeight + (overflow > 0 ? TallyView.overflowHeight : 0)
         return NSSize(width: max(listWidth, barWidth), height: height)
     }
 
@@ -848,16 +1038,27 @@ final class TallyView: NSView {
             Row(session: session,
                 title: titles[session.id] ?? "",
                 path: session.path.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "",
-                tmux: session.tmux ?? "")
+                tmux: session.tmux ?? "",
+                agents: session.agents?.summary ?? "")
+        }
+        rowOffsets = rows.reduce(into: [0]) { offsets, row in
+            offsets.append(offsets[offsets.count - 1] + TallyView.rowHeight
+                           + (row.agents.isEmpty ? 0 : TallyView.agentLineHeight))
         }
 
         // Wide enough for the longest name or path, within reason; longer ones truncate.
         func measure(_ text: String, _ font: NSFont) -> CGFloat {
             ceil((text as NSString).size(withAttributes: [.font: font]).width)
         }
+        func agentsWidth(_ row: Row) -> CGFloat {
+            guard !row.agents.isEmpty else { return 0 }
+            let progress = row.session.agents?.progress.map { 14 + TallyView.progressWidth + measure($0, TallyView.tagFont) }
+            return 16 + measure(row.agents, TallyView.agentFont) + (progress ?? 0)
+        }
         let widest = rows.map {
             max(measure($0.title, TallyView.titleFont) + 8 + TallyView.stateWidth,
-                measure($0.path, TallyView.pathFont) + ($0.tmux.isEmpty ? 0 : 10 + measure($0.tmux, TallyView.tmuxFont)))
+                measure($0.path, TallyView.pathFont) + ($0.tmux.isEmpty ? 0 : 10 + measure($0.tmux, TallyView.tmuxFont)),
+                agentsWidth($0))
         }.max() ?? 0
         let wanted = 2 * TallyView.padding + TallyView.textX + widest
         listWidth = min(max(wanted, TallyView.widthRange.lowerBound), TallyView.widthRange.upperBound)
@@ -928,7 +1129,7 @@ final class TallyView: NSView {
         if isList {
             drawList()
         } else if rows.isEmpty {
-            drawChip(Row(session: SessionSnapshot(id: "", state: .idle, label: ""), title: "", path: "", tmux: ""),
+            drawChip(Row(session: SessionSnapshot(id: "", state: .idle, label: ""), title: "", path: "", tmux: "", agents: ""),
                      in: bounds, chip: TallyView.single)
         } else {
             let chip = self.chip
@@ -985,6 +1186,24 @@ final class TallyView: NSView {
         accent.setStroke()
         drawGlyph(session.state, at: centre, scale: radius / 44)
         ctx.restoreGraphicsState()
+
+        if let agents = session.agents {
+            drawAgentTag(agents.running, at: CGPoint(x: centre.x + radius * 0.8, y: centre.y + radius * 0.66))
+        }
+    }
+
+    /// On a badge's shoulder while its agents run: how many.
+    private func drawAgentTag(_ count: Int, at c: CGPoint) {
+        let text = "⚙ \(count)"
+        let width = ceil((text as NSString).size(withAttributes: [.font: TallyView.tagFont]).width) + 10
+        let tag = NSRect(x: c.x - width / 2, y: c.y - 8, width: width, height: 16)
+        NSColor(white: 0.04, alpha: 0.8).setFill()
+        NSBezierPath(roundedRect: tag, xRadius: 8, yRadius: 8).fill()
+        SessionState.working.accent.withAlphaComponent(0.6).setStroke()
+        let edge = NSBezierPath(roundedRect: tag.insetBy(dx: 0.5, dy: 0.5), xRadius: 7.5, yRadius: 7.5)
+        edge.lineWidth = 1
+        edge.stroke()
+        drawText(text, in: tag, font: TallyView.tagFont, color: SessionState.working.accent, alignment: .center)
     }
 
     /// Which session this badge is: its name over its directory, on a card of their own so
@@ -1032,7 +1251,7 @@ final class TallyView: NSView {
             if needsToDraw(rect.insetBy(dx: -4, dy: -6)) { draw(row, in: rect, highlighted: index == hovered) }
         }
         if overflow > 0 {
-            let y = rowsBottom + CGFloat(rows.count) * TallyView.rowHeight
+            let y = rowsBottom + rowsHeight
             drawText("+\(overflow) more",
                      in: NSRect(x: TallyView.padding + TallyView.textX, y: y,
                                 width: bounds.width - 2 * TallyView.padding - TallyView.textX,
@@ -1046,9 +1265,13 @@ final class TallyView: NSView {
         TallyView.padding + TallyView.headerHeight + TallyView.headerGap
     }
 
+    private var rowsHeight: CGFloat {
+        rowOffsets[rowOffsets.count - 1]
+    }
+
     private func rowRect(_ index: Int) -> NSRect {
-        NSRect(x: TallyView.padding, y: rowsBottom + CGFloat(index) * TallyView.rowHeight,
-               width: bounds.width - 2 * TallyView.padding, height: TallyView.rowHeight)
+        NSRect(x: TallyView.padding, y: rowsBottom + rowOffsets[index],
+               width: bounds.width - 2 * TallyView.padding, height: rowOffsets[index + 1] - rowOffsets[index])
     }
 
     /// How long ago the most recent turn landed.
@@ -1118,19 +1341,31 @@ final class TallyView: NSView {
             state.accent.withAlphaComponent(0.30 * fade).setFill()
             NSBezierPath(roundedRect: rect.insetBy(dx: -3, dy: 1), xRadius: 7, yRadius: 7).fill()
         }
+        // The session itself takes the top of the row; what its agents are doing, if any
+        // run, a line under it.
+        let main = NSRect(x: rect.minX, y: rect.maxY - TallyView.rowHeight, width: rect.width, height: TallyView.rowHeight)
         let move = motion(state, age: age)
-        drawSmallMark(state, at: CGPoint(x: rect.minX + TallyView.markX, y: rect.midY + move.bob), glow: move.glow)
+        drawSmallMark(state, at: CGPoint(x: main.minX + TallyView.markX, y: main.midY + move.bob), glow: move.glow)
 
         let textLeft = rect.minX + TallyView.textX
         guard needsToDraw(NSRect(x: textLeft, y: rect.minY, width: rect.maxX - textLeft, height: rect.height))
         else { return }
 
+        if !row.agents.isEmpty {
+            var line = NSRect(x: textLeft, y: rect.minY + 1, width: rect.maxX - textLeft, height: TallyView.agentLineHeight)
+            if let agents = row.session.agents, let progress = agents.progress {
+                line.size.width -= drawProgress(agents, label: progress, endingAt: line.maxX, midY: line.midY) + 8
+            }
+            drawText("⚙ " + row.agents, in: line, font: TallyView.agentFont,
+                     color: SessionState.working.accent.withAlphaComponent(0.85), alignment: .left)
+        }
+
         // Name and state on the upper line, the directory under them; with no directory
         // known yet, the name line sits centred instead.
         let upper = row.path.isEmpty
-            ? NSRect(x: textLeft, y: rect.minY, width: rect.maxX - textLeft, height: rect.height)
-            : NSRect(x: textLeft, y: rect.midY, width: rect.maxX - textLeft, height: rect.height / 2 - 2)
-        let lower = NSRect(x: textLeft, y: rect.minY + 2, width: rect.maxX - textLeft, height: rect.height / 2 - 2)
+            ? NSRect(x: textLeft, y: main.minY, width: main.maxX - textLeft, height: main.height)
+            : NSRect(x: textLeft, y: main.midY, width: main.maxX - textLeft, height: main.height / 2 - 2)
+        let lower = NSRect(x: textLeft, y: main.minY + 2, width: main.maxX - textLeft, height: main.height / 2 - 2)
         drawText(row.title,
                  in: NSRect(x: upper.minX, y: upper.minY, width: upper.width - TallyView.stateWidth - 6,
                             height: upper.height),
@@ -1150,6 +1385,28 @@ final class TallyView: NSView {
         }
         drawText(row.path, in: pathLine, font: TallyView.pathFont, color: NSColor(white: 0.95, alpha: 0.6),
                  alignment: .left, truncation: .byTruncatingMiddle)
+    }
+
+    /// A workflow's agents finished out of those started, as a bar and in numbers, right-aligned
+    /// to a point. Returns the width it took.
+    private func drawProgress(_ agents: AgentActivity, label: String, endingAt right: CGFloat, midY: CGFloat) -> CGFloat {
+        let accent = SessionState.working.accent
+        let labelWidth = ceil((label as NSString).size(withAttributes: [.font: TallyView.tagFont]).width)
+        drawText(label, in: NSRect(x: right - labelWidth, y: midY - 7, width: labelWidth, height: 14),
+                 font: TallyView.tagFont, color: accent.withAlphaComponent(0.85), alignment: .right)
+
+        let track = NSRect(x: right - labelWidth - 6 - TallyView.progressWidth, y: midY - 2,
+                           width: TallyView.progressWidth, height: 4)
+        NSColor(white: 1, alpha: 0.12).setFill()
+        NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
+        let share = CGFloat(min(agents.done, agents.started)) / CGFloat(max(agents.started, 1))
+        if share > 0 {
+            var filled = track
+            filled.size.width = max(4, track.width * share)
+            accent.withAlphaComponent(0.9).setFill()
+            NSBezierPath(roundedRect: filled, xRadius: 2, yRadius: 2).fill()
+        }
+        return right - track.minX
     }
 
     /// A small tinted hexagon with the state's glyph: a solid outline rather than the big

@@ -22,9 +22,11 @@ HOOK = '"$HOME/.claude/hooks/ctally.sh"'
 EVENTS = {
     "UserPromptSubmit": "working",  # a turn starts
     "PreToolUse": "working",        # back to work after a permission prompt
-    "Stop": "done",                 # the turn is over
+    "Stop": "done",                 # the turn is over, unless agents still run behind it
     "Notification": "waiting",      # a permission prompt, or idle waiting for input
     "SessionEnd": "end",            # the session is gone
+    "SubagentStart": "agent-start", # a subagent, maybe one of a workflow's, sets off
+    "SubagentStop": "agent-stop",   # and comes back
 }
 
 

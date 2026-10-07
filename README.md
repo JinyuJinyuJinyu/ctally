@@ -6,13 +6,13 @@ Glance over instead of tabbing back to the terminal.
 The name comes from the *tally light*, the lamp on a broadcast camera that shows it's live, and from tallying
 up your sessions.
 
-![CTally with one session, three sessions, a list of six, and the list folded](docs/overview.png)
+![CTally with one session, three sessions, a list of six with subagents at work, and the list folded](docs/overview.png)
 
 Every session gets a hexagon whose glyph and color say what it's doing:
 
 | | State | Meaning |
 |---|---|---|
-| ▶ cyan | **working** | Claude's turn: it's working |
+| ▶ cyan | **working** | Claude's turn: it's working, or its subagents or a workflow still are |
 | ⏸ amber | **waiting** | your turn: a permission prompt, or it's waiting for input |
 | ✓ green | **done** | your turn: the turn finished, and it stays here until your next prompt |
 | • slate | **idle** | nothing running |
@@ -22,6 +22,9 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **Floats above everything**, on every Space and beside full-screen apps, without ever taking keyboard focus.
 - **One to three sessions show as big badges**; four or more become a compact list with each session's
   name and directory, up to 16 rows. Session names come from `/rename`, or else the title Claude gave the session.
+- **Sees subagents and workflows**: while a session's agents run, its row says how many and what they're up
+  to (`4 agents · Verify`), with a progress bar for a workflow, and its badge carries the count.
+  [More below.](#subagents-and-workflows)
 - **Built for tmux**: every row shows its pane, a click switches to it, **prefix + J** jumps to the session
   that needs you, and the counts can sit in tmux's status line. [More below.](#built-for-tmux)
 - **Click a row to bring that session's terminal forward**: the exact Terminal tab, or the exact tmux pane.
@@ -33,6 +36,23 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **One Swift file**: no Xcode project and no dependencies.
 
 ![The settings window](docs/settings.png)
+
+## Subagents and workflows
+
+When a session hands work to subagents, or runs a whole workflow of them, CTally follows along:
+
+- **The row grows a line about its agents**: how many are running, and what they're doing. For a workflow
+  that's the phase it has reached (`4 agents · Verify`), with a progress bar of its agents finished out of
+  those started so far (`12/16`; the total grows as each phase sets off more). For a single agent it's the
+  task it was given (`1 agent · Find callers of parseConfig`).
+- **The badge carries the count** (`⚙ 4`) on its shoulder.
+- **The session stays working until its agents are back.** A session that sends agents off in the background
+  finishes its own turn at once, and would otherwise look done for as long as they run, sometimes hours. CTally
+  keeps it cyan until they return and Claude has taken in their results, and prefix + J leaves it alone till
+  then.
+
+`ctally list` shows the count too. This needs the subagent hooks that `./install.sh` adds; if you set up
+CTally before they existed, run `./install.sh` again and restart your sessions.
 
 ## Built for tmux
 
@@ -68,9 +88,9 @@ The same `ctally` command works in any shell (it's installed to `~/.local/bin`):
 
 ```console
 $ ctally list
-waiting  webapp:0.0       webapp                   5f3c…
-done     webapp:0.1       webapp                   9a1e…
-working  api:0.0          api                      c27d…
+waiting  webapp:0.0       -         webapp                   5f3c…
+done     webapp:0.1       -         webapp                   9a1e…
+working  api:0.0          4 agents  api                      c27d…
 $ ctally status
 !1 ▶1 ✓1
 $ ctally jump          # inside tmux: go to the session that needs you
@@ -144,11 +164,13 @@ Two pieces, connected by a folder:
    |---|---|
    | `UserPromptSubmit` | `working` |
    | `PreToolUse` | `working` (back to work after a permission prompt) |
-   | `Stop` | `done` |
+   | `Stop` | `done`, or still `working` if subagents or a workflow run on in the background |
    | `Notification` | `waiting` (a permission prompt, or idle input) |
    | `SessionEnd` | removes the file |
+   | `SubagentStart` / `SubagentStop` | adds / removes a file per agent in `~/.claude/ctally.d/.agents/<session id>/` |
 
-   A `waiting` never overwrites `done`: Claude Code also sends its idle notification after a turn ends.
+   A `waiting` never overwrites `done`: Claude Code also sends its idle notification after a turn ends. Nor
+   does the idle notification count while the session's agents are still out.
    Inside tmux, a change of state also redraws tmux's status lines, so the counts there update at once.
 
 2. **The app.** It polls the folder five times a second, checking modification times first so unchanged files
@@ -165,7 +187,9 @@ To add the hooks by hand, copy `hooks/ctally.sh` to `~/.claude/hooks/` and merge
     "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" working" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" done" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" waiting" }] }],
-    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" end" }] }]
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" end" }] }],
+    "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" agent-start" }] }],
+    "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "\"$HOME/.claude/hooks/ctally.sh\" agent-stop" }] }]
   }
 }
 ```
@@ -178,7 +202,9 @@ transcript in `~/.claude/projects/`, but only two parts:
 - the last 256 KB, for the `/rename` name or the generated title
 - the first 256 KB, once, for the directory the session started in
 
-It never reads your conversations otherwise.
+While agents run it also reads, beside the transcript, a running workflow's progress journal (for its phase
+and how many agents are done) and a lone subagent's one-line task description. It never reads your
+conversations otherwise.
 
 ### Terminal support
 

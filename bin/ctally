@@ -4,15 +4,17 @@
 #   ctally status [--tmux]       counts of live sessions by state, most urgent first:
 #                                "!1 ▶2 ✓5 ·1" (waiting, working, done, idle); --tmux adds
 #                                status-line colours
-#   ctally list                  one line per live session: state, tmux pane, project, id
+#   ctally list                  one line per live session: state, tmux pane, subagents
+#                                running, project, id
 #   ctally jump [pane client socket]
 #                                switch a tmux client to the session that needs you:
 #                                waiting first, then finished, longest-waiting first.
 #                                Run it again to move on to the next one. A key binding
 #                                passes '#{pane_id}' '#{client_name}' '#{socket_path}'.
 #
-# Reads ~/.claude/ctally.d, which CTally's Claude Code hooks keep up to date. A session
-# started inside tmux carries TMUX (the server's socket) and TMUX_PANE (its pane) in its
+# Reads ~/.claude/ctally.d, which CTally's Claude Code hooks keep up to date, with a file
+# per running subagent in ~/.claude/ctally.d/.agents/<session id>/. A session started
+# inside tmux carries TMUX (the server's socket) and TMUX_PANE (its pane) in its
 # environment; that's how a session is found in tmux.
 
 dir="$HOME/.claude/ctally.d"
@@ -70,7 +72,12 @@ list() {
       location=$(tmux -S "${where% *}" display-message -p -t "${where#* }" \
         '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || echo "-")
     fi
-    printf '%-8s %-16s %-24s %s\n' "$state" "$location" "$project" "$id"
+    set -- "$dir/.agents/$id"/*
+    agents=""
+    if [ -e "$1" ]; then
+      if [ $# -eq 1 ]; then agents="1 agent"; else agents="$# agents"; fi
+    fi
+    printf '%-8s %-16s %-9s %-24s %s\n' "$state" "$location" "${agents:--}" "$project" "$id"
   done
 }
 
