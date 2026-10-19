@@ -28,7 +28,8 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **Floats above everything** without ever taking keyboard focus; on macOS on every Space and beside
   full-screen apps too.
 - **One to three sessions show as big badges**; four or more become a compact list with each session's
-  name and directory, up to 16 rows. Session names come from `/rename`, or else the title Claude gave the session.
+  name and directory. Past 16 rows (or the screen's height) it scrolls, with a scroll bar that marks the
+  sessions waiting on you. Session names come from `/rename`, or else the title Claude gave the session.
 - **Sees subagents and workflows**: while a session's agents run, its row says how many and what they're up
   to (`4 agents · Verify`), with a progress bar for a workflow, and its badge carries the count.
   [More below.](#subagents-and-workflows)

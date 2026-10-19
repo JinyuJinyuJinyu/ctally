@@ -357,16 +357,19 @@ class Controller:
         # While I'm dragging it, the pointer places it; it settles once I let go.
         if self.view.is_dragging:
             return
-        size = self.view.preferred_size()
         right, edge, top = self.anchor()
         self.view.grows_down = top
+        corner = QPoint(right - 1, edge if top else edge - 1)
+        screen = QGuiApplication.screenAt(corner) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            # Rows that would run taller than the screen scroll instead.
+            self.view.max_height = screen.availableGeometry().height() - 2 * INSET
+        size = self.view.preferred_size()
         y = edge if top else edge - size.height()
         target = QRect(right - size.width(), y, size.width(), size.height())
         # A tall list slides back rather than run off the screen's far edge, and a wide one
         # right rather than off the left edge; the saved corner stays where I put it, for
         # when the list shrinks again.
-        corner = QPoint(right - 1, edge if top else edge - 1)
-        screen = QGuiApplication.screenAt(corner) or QGuiApplication.primaryScreen()
         if screen is not None:
             target.moveTo(*_clamped(target, screen.availableGeometry()))
         if self.view.geometry() != target:

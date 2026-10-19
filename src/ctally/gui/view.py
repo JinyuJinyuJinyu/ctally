@@ -8,6 +8,8 @@ and a line about its agents while any run. The list opens away from the screen e
 nearer: upward from a count bar at its bottom, or, high on the screen, downward from a count
 bar at its top. The oldest session sits next to the bar, so rows already on screen stay put
 when a new session starts; the chevron on the bar folds the list away to just the counts.
+More rows than fit (sixteen, or what the screen has room for) scroll, with the wheel or the
+scroll bar beside them, which marks where the sessions waiting on me are.
 
 A press that moves drags the indicator; one that doesn't is a click, which asks for that
 session's terminal. The view moves its own window while dragging and says when it's
@@ -182,12 +184,11 @@ class TallyView(QWidget):
     LIST_FROM = 4
 
     # The list.
-    MAX_ROWS = 16
+    MAX_ROWS = 16           # rows shown at once; past that they scroll
     PADDING = 8
     ROW_HEIGHT = 38
     AGENT_LINE = 14         # added under a row while its agents run
     PROGRESS_WIDTH = 54     # a workflow's progress bar, at the end of that line
-    OVERFLOW_HEIGHT = 22
     HEADER_HEIGHT = 26      # the count bar, which is all a folded list shows
     HEADER_GAP = 6          # between the count bar and the rows
     FOLD_SIZE = 22
@@ -196,6 +197,9 @@ class TallyView(QWidget):
     TEXT_X = 30             # text start, from the row's left edge
     STATE_WIDTH = 46        # right-hand column for the state word
     WIDTH_RANGE = (200, 320)
+    SCROLL_GUTTER = 8       # added beside the rows for the scroll bar, while they scroll
+    SCROLL_WIDTH = 4
+    SCROLL_MIN_THUMB = 24
 
     # Usage limits.
     USAGE_LINE = 18         # one limit in the list
@@ -217,7 +221,10 @@ class TallyView(QWidget):
         self._rows: list[Row] = []
         self._row_offsets = [0.0]       # each row's bottom above the first's, and the total last
         self._counts: list[tuple[State, int]] = []
-        self._overflow = 0
+        self._scroll = 0.0              # how far the rows are scrolled, away from the bar
+        self._max_height: int | None = None
+        self._grab: float | None = None     # dragging the scroll bar: where in its thumb I hold it
+        self._over_scroll_bar = False
         self._list_width = float(TallyView.WIDTH_RANGE[0])
         self._bar_width = float(TallyView.WIDTH_RANGE[0])
         self._entered: dict[str, float] = {}
@@ -270,6 +277,19 @@ class TallyView(QWidget):
         if value != self._grows_down:
             self._grows_down = value
             self._hovered = None
+            self._version += 1
+            self.update()
+
+    @property
+    def max_height(self) -> int | None:
+        """The tallest the indicator may get, from the controller, by the screen it's on; the
+        rows scroll rather than run past it."""
+        return self._max_height
+
+    @max_height.setter
+    def max_height(self, value: int | None) -> None:
+        if value != self._max_height:
+            self._max_height = value
             self._version += 1
             self.update()
 
@@ -344,9 +364,9 @@ class TallyView(QWidget):
         bar = 2 * TallyView.PADDING + TallyView.HEADER_HEIGHT
         if self._folded:
             return QSize(math.ceil(self._bar_width + (self._meter_width + 14 if self._compact else 0)), bar)
-        height = (bar + TallyView.HEADER_GAP + self._usage_height + self._rows_height
-                  + (TallyView.OVERFLOW_HEIGHT if self._overflow else 0))
-        return QSize(math.ceil(max(self._list_width, self._bar_width)), math.ceil(height))
+        height = bar + TallyView.HEADER_GAP + self._usage_height + self._view_height
+        width = self._list_width + (TallyView.SCROLL_GUTTER if self._scrolls else 0)
+        return QSize(math.ceil(max(width, self._bar_width)), math.ceil(height))
 
     @property
     def is_animating(self) -> bool:
@@ -391,8 +411,7 @@ class TallyView(QWidget):
     # MARK: Layout
 
     def _recompute(self) -> None:
-        # Number repeated names in age order, over every session, so a row keeps its name
-        # whether or not the cap hides its siblings.
+        # Number repeated names in age order, so a row keeps its name as its siblings come and go.
         seen: dict[str, int] = {}
         titles: dict[str, str] = {}
         for session in self._sessions:
@@ -400,21 +419,13 @@ class TallyView(QWidget):
             seen[base] = seen.get(base, 0) + 1
             titles[session.id] = base if seen[base] == 1 else f"{base} {seen[base]}"
 
-        # Over the cap, the sessions that most want me survive; the rest become "+N more".
-        visible = self._sessions
-        self._overflow = 0
-        if len(self._sessions) > TallyView.MAX_ROWS:
-            ranked = sorted(enumerate(self._sessions), key=lambda pair: (-pair[1].state.urgency, pair[0]))
-            chosen = {index for index, _ in ranked[:TallyView.MAX_ROWS - 1]}
-            visible = [s for i, s in enumerate(self._sessions) if i in chosen]
-            self._overflow = len(self._sessions) - len(visible)
         home = str(Path.home())
         self._rows = [Row(session=s,
                           title=titles.get(s.id, ""),
                           path=("~" + s.path[len(home):]) if s.path and (s.path + "/").startswith(home + "/") else (s.path or ""),
                           tmux=s.tmux or "",
                           agents=s.agents.summary if s.agents else "")
-                      for s in visible]
+                      for s in self._sessions]
         self._row_offsets = [0.0]
         for row in self._rows:
             self._row_offsets.append(self._row_offsets[-1] + TallyView.ROW_HEIGHT
@@ -440,7 +451,7 @@ class TallyView(QWidget):
         self._list_width = min(max(wanted, self._usage_width, low), high)
         self._meter_width = self._small_meter_width() if self._compact else 0
 
-        # The count bar covers every session, hidden or not, most urgent first.
+        # The count bar covers every session, scrolled out of sight or not, most urgent first.
         self._counts = [(state, n) for state in BY_URGENCY
                         if (n := sum(1 for s in self._sessions if s.state is state))]
         items = sum(self._count_item_width(n) for _, n in self._counts)
@@ -479,7 +490,39 @@ class TallyView(QWidget):
 
     @property
     def _rows_height(self) -> float:
+        """Every row's, whether it shows or is scrolled away."""
         return self._row_offsets[-1]
+
+    @property
+    def _view_height(self) -> float:
+        """How much of the rows shows at once: all of them, or as many as fit, the rest
+        scrolling. Never under a couple of rows, however short the screen."""
+        room = TallyView.MAX_ROWS * TallyView.ROW_HEIGHT
+        if self._max_height is not None:
+            others = 2 * TallyView.PADDING + TallyView.HEADER_HEIGHT + TallyView.HEADER_GAP + self._usage_height
+            room = min(room, max(2 * TallyView.ROW_HEIGHT, self._max_height - others))
+        return min(self._rows_height, room)
+
+    @property
+    def _scrolls(self) -> bool:
+        return self.is_list and not self._folded and self._rows_height > self._view_height + 0.5
+
+    @property
+    def _scroll_limit(self) -> float:
+        return max(0.0, self._rows_height - self._view_height) if self._scrolls else 0.0
+
+    @property
+    def _offset(self) -> float:
+        """The scroll in use: what's kept may be past the end, once rows have gone."""
+        return min(max(self._scroll, 0.0), self._scroll_limit)
+
+    @property
+    def _rows_view(self) -> QRectF:
+        """The band of the window the rows show through, edge to edge so a highlight's
+        margin isn't cut off."""
+        height = self._view_height
+        top = self._rows_edge if self._grows_down else self._rows_edge - height
+        return QRectF(0, top, self.width(), height)
 
     @property
     def _bar_rect(self) -> QRectF:
@@ -496,13 +539,55 @@ class TallyView(QWidget):
         return beyond if self._grows_down else self.height() - beyond
 
     def _row_rect(self, index: int) -> QRectF:
-        """Row 0, the oldest session, next to the bar; each later one further out."""
+        """Row 0, the oldest session, next to the bar; each later one further out, and all of
+        them further in as the list scrolls."""
         if self._grows_down:
-            top = self._rows_edge + self._row_offsets[index]
+            top = self._rows_edge + self._row_offsets[index] - self._offset
         else:
-            top = self._rows_edge - self._row_offsets[index + 1]
-        return QRectF(TallyView.PADDING, top, self.width() - 2 * TallyView.PADDING,
+            top = self._rows_edge - self._row_offsets[index + 1] + self._offset
+        gutter = TallyView.SCROLL_GUTTER if self._scrolls else 0
+        return QRectF(TallyView.PADDING, top, self.width() - 2 * TallyView.PADDING - gutter,
                       self._row_offsets[index + 1] - self._row_offsets[index])
+
+    def _row_shows(self, index: int) -> bool:
+        return not self._scrolls or self._row_rect(index).intersects(self._rows_view)
+
+    def _scroll_track(self) -> QRectF:
+        """The scroll bar's groove, in the gutter beside the rows."""
+        view = self._rows_view
+        x = self.width() - TallyView.PADDING + 2 - TallyView.SCROLL_WIDTH
+        return QRectF(x, view.y() + 3, TallyView.SCROLL_WIDTH, view.height() - 6)
+
+    def _scroll_thumb(self) -> QRectF:
+        """The part of the groove for the rows in view: at the bar's end unscrolled, moving
+        away from it as the rows do."""
+        track = self._scroll_track()
+        length = max(TallyView.SCROLL_MIN_THUMB, track.height() * self._view_height / max(self._rows_height, 1))
+        length = min(length, track.height())
+        travel = (track.height() - length) * self._offset / max(self._scroll_limit, 1)
+        y = track.y() + travel if self._grows_down else track.bottom() - length - travel
+        return QRectF(track.x(), y, track.width(), length)
+
+    def _scroll_to(self, value: float, pointer: QPointF | None = None) -> None:
+        """Scrolls the rows; the row under the pointer, if it's over them, is a new one now."""
+        value = min(max(value, 0.0), self._scroll_limit)
+        if value == self._offset and value == self._scroll:
+            return
+        self._scroll = value
+        self._version += 1
+        self.update()
+        self._hovered = None
+        if pointer is not None:
+            self._set_hovered(self._item_at(pointer))
+
+    def _scroll_by_thumb(self, y: float) -> None:
+        """Puts the thumb's top (or, opening upward, its bottom) where the pointer drags it."""
+        track, thumb = self._scroll_track(), self._scroll_thumb()
+        travel = track.height() - thumb.height()
+        if travel <= 0:
+            return
+        moved = (y - track.y()) if self._grows_down else (track.bottom() - thumb.height() - y)
+        self._scroll_to(self._scroll_limit * moved / travel)
 
     def _fold_rect(self) -> QRectF:
         size = TallyView.FOLD_SIZE
@@ -543,7 +628,13 @@ class TallyView(QWidget):
         """The row or badge under a point, if it stands for a session."""
         if not self._rows or (self.is_list and self._folded):
             return None
+        if self._scrolls and not self._rows_view.contains(point):
+            return None                              # a row scrolled under the bar or the edge
         return next((i for i in range(len(self._rows)) if self._item_rect(i).contains(point)), None)
+
+    def _on_scroll_bar(self, point: QPointF) -> bool:
+        """Over the scroll bar, with a little to spare: it's thin."""
+        return self._scrolls and self._scroll_track().adjusted(-4, -3, 4, 3).contains(point)
 
     # MARK: Clicks, drags and hovering
 
@@ -556,12 +647,45 @@ class TallyView(QWidget):
         self._hovered = index
         self._version += 1
 
+    def _set_over_scroll_bar(self, over: bool) -> None:
+        if over != self._over_scroll_bar:
+            self._over_scroll_bar = over
+            self._version += 1
+            self.update(self._scroll_track().adjusted(-3, -3, 3, 3).toAlignedRect())
+
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
-            self._press = [event.globalPosition(), self.window().pos(), False]
+        if event.button() != Qt.LeftButton:
+            return
+        point = event.position()
+        if self._on_scroll_bar(point):
+            # The thumb is held where it's pressed; pressed beside it, it jumps there first.
+            thumb = self._scroll_thumb()
+            if not thumb.top() - 3 <= point.y() <= thumb.bottom() + 3:
+                self._scroll_by_thumb(point.y() - thumb.height() / 2)
+                thumb = self._scroll_thumb()
+            self._grab = point.y() - thumb.y()
+            self._press = None
+            return
+        self._press = [event.globalPosition(), self.window().pos(), False]
+
+    def wheelEvent(self, event) -> None:
+        """The wheel or two fingers scroll the rows, once there are more than fit. The rows
+        follow the fingers: moving them down shows what's above."""
+        if not self._scrolls:
+            event.ignore()
+            return
+        pixels = event.pixelDelta().y()
+        down = pixels if pixels else event.angleDelta().y() / 120 * TallyView.ROW_HEIGHT
+        if down:
+            self._scroll_to(self._offset + (-down if self._grows_down else down), event.position())
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:
+        if self._grab is not None:
+            self._scroll_by_thumb(event.position().y() - self._grab)
+            return
         if self._press is None or not (event.buttons() & Qt.LeftButton):
+            self._set_over_scroll_bar(self._on_scroll_bar(event.position()))
             self._set_hovered(self._item_at(event.position()))
             return
         start, origin, dragging = self._press
@@ -581,6 +705,10 @@ class TallyView(QWidget):
         self.window().move(origin + delta.toPoint())
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._grab is not None:
+            self._grab = None
+            self._set_over_scroll_bar(self._on_scroll_bar(event.position()))
+            return
         if event.button() != Qt.LeftButton or self._press is None:
             return
         dragging = self._press[2]
@@ -597,11 +725,13 @@ class TallyView(QWidget):
             self.selected.emit(self._rows[index].session, event.timestamp())
 
     def contextMenuEvent(self, event) -> None:
-        self._press = None
+        self._press = self._grab = None
         self.menu_requested.emit(event.globalPos())
 
     def leaveEvent(self, event) -> None:
         self._set_hovered(None)
+        if self._grab is None:
+            self._set_over_scroll_bar(False)
 
     def event(self, event) -> bool:
         """Hovering over the usage limits spells them out: every limit, its reset, and how old
@@ -731,13 +861,21 @@ class TallyView(QWidget):
                 self._draw_sprite(painter, state, 8, QPointF(x + 8, bar.center().y() - rise), glow)
                 x += self._count_item_width(count)
             return
+        scrolls = self._scrolls
+        if scrolls:
+            painter.save()
+            painter.setClipRect(self._rows_view)
         for index, row in enumerate(self._rows):
+            if not self._row_shows(index):
+                continue
             main = self._row_rect(index)
             centre = QPointF(main.x() + TallyView.MARK_X, main.y() + TallyView.ROW_HEIGHT / 2)
             if self._needs(QRectF(centre.x() - 12, centre.y() - 18, 24, 36)):
                 rise, glow = self._motion(row.session.state, self._age(row.session))
                 self._draw_sprite(painter, row.session.state, TallyView.MARK_RADIUS,
                                   QPointF(centre.x(), centre.y() - rise), glow)
+        if scrolls:
+            painter.restore()
 
     def _sprite(self, key: tuple, size: float, draw) -> QPixmap:
         """A small image drawn once and reused: `draw(painter, centre)` paints it."""
@@ -893,19 +1031,42 @@ class TallyView(QWidget):
             painter.fillRect(QRectF(bar.x() + 4, beside_bar - 0.5, bar.width() - 8, 1), white(1, 0.08))
             if self._needs(usage):
                 self._draw_usage_lines(painter, usage)
+        # Scrolling, rows are cut off where the band they show through ends.
+        scrolls = self._scrolls
+        if scrolls:
+            painter.save()
+            painter.setClipRect(self._rows_view)
         for index, row in enumerate(self._rows):
+            if not self._row_shows(index):
+                continue
             rect = self._row_rect(index)
             # Bounces reach a little beyond the row.
             if self._needs(rect.adjusted(-4, -6, 4, 6)):
                 self._draw_row(painter, row, rect, highlighted=index == self._hovered)
-        if self._overflow:
-            # Beyond the last row.
-            y = (self._rows_edge + self._rows_height if self._grows_down
-                 else self._rows_edge - self._rows_height - TallyView.OVERFLOW_HEIGHT)
-            left = TallyView.PADDING + TallyView.TEXT_X
-            draw_text(painter, f"+{self._overflow} more",
-                      QRectF(left, y, self.width() - TallyView.PADDING - left, TallyView.OVERFLOW_HEIGHT),
-                      self.fonts.title, ACCENT[State.IDLE])
+        if scrolls:
+            painter.restore()
+            track = self._scroll_track()
+            if self._needs(track.adjusted(-3, -3, 3, 3)):
+                self._draw_scroll_bar(painter, track)
+
+    def _draw_scroll_bar(self, painter: QPainter, track: QRectF) -> None:
+        """A groove, the thumb for the rows in view, brighter under the pointer, and a tick
+        for each session waiting on me, so none is missed for being scrolled away."""
+        radius = track.width() / 2
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(white(1, 0.08))
+        painter.drawRoundedRect(track, radius, radius)
+        lit = self._over_scroll_bar or self._grab is not None
+        painter.setBrush(white(1, 0.55 if lit else 0.32))
+        painter.drawRoundedRect(self._scroll_thumb(), radius, radius)
+        total = max(self._rows_height, 1)
+        painter.setBrush(ACCENT[State.WAITING])
+        for index, row in enumerate(self._rows):
+            if row.session.state is not State.WAITING:
+                continue
+            middle = (self._row_offsets[index] + TallyView.ROW_HEIGHT / 2) / total * track.height()
+            y = track.y() + middle if self._grows_down else track.bottom() - middle
+            painter.drawRoundedRect(QRectF(track.x() - 1, y - 1.5, track.width() + 2, 3), 1.5, 1.5)
 
     def _draw_fold_button(self, painter: QPainter, rect: QRectF) -> None:
         """The chevron that folds the list: pointing the way the rows will open, or, open, the
