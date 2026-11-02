@@ -10,7 +10,7 @@
                                 (waiting, working, done, idle); --tmux adds status-line colours
                                 and your plan's session and weekly usage: "5h 71% 7d 49%"
   ctally list                   one line per live session: state, tmux pane, subagents running,
-                                project, id
+                                how full its context is, project, id
   ctally usage [--json]         your plan's usage limits, as Claude Code's /usage shows them:
                                 the session, the week, each model's week, and when each resets
   ctally jump [pane client socket]
@@ -30,7 +30,8 @@ from typing import NamedTuple
 
 from . import __version__, system
 from . import usage as limits
-from .sessions import PROJECTS_DIR, STATE_DIR, AgentWatcher, Names, Registry, read_limit, reconcile, stopped_by_hand
+from .sessions import (PROJECTS_DIR, STATE_DIR, AgentWatcher, Names, Notes, Registry, context_from, read_limit,
+                       reconcile, stopped_by_hand)
 
 GLYPH = {"waiting": "!", "working": "▶", "done": "✓", "idle": "·"}
 COLOUR = {"waiting": "#ffb329", "working": "#4accf2", "done": "#45e087", "idle": "#99a6bd"}
@@ -148,12 +149,15 @@ def usage(as_json: bool) -> int:
 
 
 def list_sessions() -> None:
+    contexts = Notes(STATE_DIR / ".status", context_from)
     for session in live_sessions():
         target = system.tmux_pane(session.pid)
         location = (system.tmux_location(target) if target else None) or "-"
         n = agents_running(session.id)
         agents = "-" if n == 0 else "1 agent" if n == 1 else f"{n} agents"
-        print(f"{session.state:<8} {location:<16} {agents:<9} {session.project:<24} {session.id}")
+        context = contexts.get(session.id)
+        full = context.text if context else "-"
+        print(f"{session.state:<8} {location:<16} {agents:<9} {full:<4} {session.project:<24} {session.id}")
 
 
 def jump(current: str | None, client: str | None, here: str | None) -> int:

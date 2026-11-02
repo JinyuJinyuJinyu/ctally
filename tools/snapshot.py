@@ -21,18 +21,21 @@ MODES = ("one", "three", "list", "folded")
 
 
 def demo_sessions():
-    from ctally.sessions import Agents, Ask, Session, State
+    from ctally.sessions import Agents, Ask, Context, Session, State
 
     home = os.path.expanduser("~")         # shown as "~", so no real name appears
     return [
         Session("demo-1", State.WORKING, "api", 101, "Migrate to Postgres 16", f"{home}/code/api", "api:0.0",
-                Agents(4, started=16, done=12, detail="Verify")),
+                Agents(4, started=16, done=12, detail="Verify"), context=Context(62, 200_000, 124_000)),
         Session("demo-2", State.WAITING, "webapp", 102, "fix-flaky-tests", f"{home}/code/webapp", "webapp:0.0",
-                ask=Ask("question", "Retry the flaky tests, or skip them?", options=("Retry", "Skip"))),
-        Session("demo-3", State.DONE, "webapp", 103, "Add dark mode toggle", f"{home}/code/webapp", "webapp:0.1"),
-        Session("demo-4", State.DONE, "docs", 104, "release-notes", f"{home}/code/docs", "docs:0.0"),
+                ask=Ask("question", "Retry the flaky tests, or skip them?", options=("Retry", "Skip")),
+                context=Context(34, 200_000, 68_000)),
+        Session("demo-3", State.DONE, "webapp", 103, "Add dark mode toggle", f"{home}/code/webapp", "webapp:0.1",
+                context=Context(81, 200_000, 162_000)),
+        Session("demo-4", State.DONE, "docs", 104, "release-notes", f"{home}/code/docs", "docs:0.0",
+                context=Context(12, 1_000_000, 120_000)),
         Session("demo-5", State.WORKING, "api", 105, "Refactor auth middleware", f"{home}/code/api", "api:0.1",
-                Agents(1, detail="Find every caller of verifyToken")),
+                Agents(1, detail="Find every caller of verifyToken"), context=Context(93, 200_000, 186_000)),
         Session("demo-6", State.IDLE, "playground", 106, "playground", f"{home}/sandbox/playground"),
     ]
 

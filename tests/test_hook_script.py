@@ -507,3 +507,30 @@ def test_a_new_prompt_or_the_end_of_the_turn_settles_it(hook, state, fields):
     hook("asking", ASK)
     hook(state, payload(**fields))
     assert asked(hook) is None
+
+
+# MARK: Each session's context, from the status line
+
+CONTEXT = {"session_id": "s1", "context_window": {
+    "total_input_tokens": 195019, "context_window_size": 1000000, "used_percentage": 20,
+    "current_usage": {"input_tokens": 2, "output_tokens": 11996, "cache_creation_input_tokens": 7878,
+                      "cache_read_input_tokens": 187139}},
+    "rate_limits": {"five_hour": {"used_percentage": 17, "resets_at": 1793592000}}}
+
+
+def test_status_line_keeps_each_sessions_own(tmp_path):
+    done = status_line(tmp_path, CONTEXT)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    status = tmp_path / ".claude" / "ctally.d" / ".status"
+    assert json.loads((status / "s1").read_text()) == CONTEXT
+    status_line(tmp_path, {**CONTEXT, "session_id": "s2"})
+    assert sorted(os.listdir(status)) == ["s1", "s2"]                  # one each, no temporary left
+
+
+def test_status_line_keeps_no_context_it_wasnt_given_or_cant_name(tmp_path):
+    status_line(tmp_path, LIMITS)
+    for bad in ("../escape", ".hidden", ""):
+        status_line(tmp_path, {**CONTEXT, "session_id": bad})
+    status = tmp_path / ".claude" / "ctally.d" / ".status"
+    assert not status.exists() or os.listdir(status) == []
+    assert not (tmp_path / ".claude" / "escape").exists()

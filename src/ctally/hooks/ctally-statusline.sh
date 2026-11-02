@@ -1,5 +1,6 @@
 #!/bin/sh
-# Claude Code status line for CTally: keeps your plan's usage limits where CTally reads them.
+# Claude Code status line for CTally: keeps your plan's usage limits, and how full each
+# session's context is, where CTally reads them.
 #
 #   ctally-statusline.sh ['<the status line you had before>']
 #
@@ -16,6 +17,9 @@
 #
 # A usage limit the hook noted as hit (.limit) is over once its window has moved on: a limit
 # reset early starts a new window, which ends later than the one that was used up.
+#
+# The JSON also says how full the session's own context window is. Each session's latest is
+# saved too, as it comes, to ~/.claude/ctally.d/.status/<session id>.
 
 input=$(cat)
 
@@ -50,6 +54,24 @@ no_older() {
     exit 0
   }'
 }
+
+# Each session's own, how full its context window is, comes in the same JSON. That's kept
+# whole, per session, in ~/.claude/ctally.d/.status/<session id>: the latest says.
+case "$input" in
+  *'"context_window"'*)
+    session=$(printf '%s\n' "$input" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 \
+      | sed 's/.*"\([^"]*\)"$/\1/')
+    case "$session" in
+      "" | */* | .*) ;;
+      *)
+        status="$HOME/.claude/ctally.d/.status"
+        mkdir -p "$status" 2>/dev/null
+        printf '%s\n' "$input" 2>/dev/null > "$status/.$session.$$" \
+          && mv -f "$status/.$session.$$" "$status/$session" 2>/dev/null || rm -f "$status/.$session.$$" 2>/dev/null
+        ;;
+    esac
+    ;;
+esac
 
 case "$input" in
   *'"rate_limits"'*)

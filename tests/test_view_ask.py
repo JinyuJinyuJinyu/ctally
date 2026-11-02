@@ -78,6 +78,7 @@ SCRIPT = textwrap.dedent('''
     text = TallyView.describe_row(view._rows[waiting])
     assert text.splitlines()[0] == "fix-flaky-tests: waiting", text
     assert "Retry the flaky tests, or skip them?" in text and "Click the amber line" in text
+    assert "Context 34% full: 68k of 200k tokens" in text.splitlines()[2], text
 
     # Badges: the caption says what's asked, and clicking it asks for the answers.
     view = make(sessions[:3])

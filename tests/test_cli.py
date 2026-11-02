@@ -123,12 +123,16 @@ def test_list_columns(state, capsys, outside_tmux):
         for i in range(count):
             (folder / f"a{i}").write_text("Explore")
         (folder / ".background").write_text("")
+    (state / ".status").mkdir()
+    (state / ".status" / "s-one").write_text(json.dumps({"session_id": "s-one", "context_window": {
+        "context_window_size": 200000, "used_percentage": 62,
+        "current_usage": {"input_tokens": 4, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 123000}}}))
     cli.main(["list"])
     lines = capsys.readouterr().out.splitlines()
     assert lines == [
-        f"{'waiting':<8} {'-':<16} {'-':<9} {'docs':<24} s-none",
-        f"{'working':<8} {'-':<16} {'1 agent':<9} {'api':<24} s-one",
-        f"{'working':<8} {'-':<16} {'3 agents':<9} {'my project':<24} s-three",
+        f"{'waiting':<8} {'-':<16} {'-':<9} {'-':<4} {'docs':<24} s-none",
+        f"{'working':<8} {'-':<16} {'1 agent':<9} {'62%':<4} {'api':<24} s-one",
+        f"{'working':<8} {'-':<16} {'3 agents':<9} {'-':<4} {'my project':<24} s-three",
     ]
 
 

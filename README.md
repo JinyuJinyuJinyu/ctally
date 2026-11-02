@@ -38,6 +38,9 @@ Every session gets a hexagon whose glyph and color say what it's doing:
   choices Claude Code shows. [More below.](#answering-from-ctally)
 - **Your plan's usage limits**: the session, the week, and each model's week, as bars with when each
   resets, kept fresh after every reply. [More below.](#usage-limits)
+- **How full each session's context is**: a small gauge on every row and badge fills as the conversation
+  grows, turning amber at 75% and red at 90%, before Claude Code compacts it. These are Claude Code's own
+  numbers, from the status line; hover for the tokens.
 - **Built for tmux**: every row shows its pane, a click switches to it, **prefix + J** jumps to the session
   that needs you, and the counts can sit in tmux's status line. [More below.](#built-for-tmux)
 - **Click a row to bring that session's terminal forward**: the exact tmux pane, and on macOS the exact
@@ -164,9 +167,9 @@ The same `ctally` command works in any shell (it's installed to `~/.local/bin`):
 
 ```console
 $ ctally list
-waiting  webapp:0.0       -         webapp                   5f3c…
-done     webapp:0.1       -         webapp                   9a1e…
-working  api:0.0          4 agents  api                      c27d…
+waiting  webapp:0.0       -         34%  webapp                   5f3c…
+done     webapp:0.1       -         81%  webapp                   9a1e…
+working  api:0.0          4 agents  62%  api                      c27d…
 $ ctally status
 !1 ▶1 ✓1
 $ ctally usage         # your plan's usage limits
@@ -297,8 +300,9 @@ Two pieces, connected by a folder:
    any session, to `~/.claude/ctally.d/.statusline` whenever it includes the usage limits. Each session hands
    over the numbers from its own last reply, and an idle one redraws its line now and then with numbers hours
    old, so a reading is kept only if it isn't older than the saved one: usage only grows within a window, and
-   a later reset time is a later window. It prints nothing, or runs the status line you had before and prints
-   what that prints.
+   a later reset time is a later window. It also saves each session's latest to
+   `~/.claude/ctally.d/.status/<session id>`, for how full that session's context is. It prints nothing, or
+   runs the status line you had before and prints what that prints.
 
 2. **The app.** It polls the folder twice a second, checking modification times first so unchanged files
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
@@ -350,6 +354,8 @@ While a session waits on you, the hook keeps what it asked (the tool and its inp
 plan) in `~/.claude/ctally.d/.asks/`, and deletes it once that's settled. To answer from CTally, it reads the
 screen of that session's tmux pane when you open the menu, and types only the digit you pick.
 
+For how full each session's context is, it reads the latest its status line was handed for that session
+(which also holds the model, the session's cost so far and its folder; CTally uses only the context numbers).
 For the usage limits it reads what its status line saved, and from `~/.claude.json` only the cached `/usage`
 numbers and your account's id, to check they're yours. It never touches your credentials.
 
@@ -389,6 +395,8 @@ tmux settings are left as they are. The second removes the command and its Qt.
 - **CTally is gone.** Use the hexagon icon in the menu bar → Show CTally. If the icon is gone too, it isn't
   running: run `ctally run`. Its log is `~/Library/Logs/ctally.log` on macOS and
   `~/.local/state/ctally/ctally.log` on Linux.
+- **No context gauge.** It needs CTally's status line (not with `--no-statusline`), a version of it from 0.3.3
+  on (run `ctally setup` again after upgrading), and a reply in that session since.
 - **No usage limits.** They need a Pro, Max or Team plan, and a reply in some session since CTally's setup
   (restart sessions that were running then). `ctally usage` shows what CTally has.
 - **Ubuntu: "Could not load the Qt platform plugin xcb".** Install the library it names, usually

@@ -11,8 +11,8 @@ import pytest
 from conftest import dead_pid, sleeper, wait_for
 
 from ctally import system
-from ctally.sessions import (AgentWatcher, Agents, Ask, Names, State, StateReader, TmuxLocator, ask_from,
-                             cut_short, stop_in)
+from ctally.sessions import (AgentWatcher, Agents, Ask, Context, Names, State, StateReader, TmuxLocator, ask_from,
+                             context_from, cut_short, stop_in)
 
 LIVE = os.getpid()
 
@@ -740,3 +740,64 @@ def test_a_dead_sessions_note_is_pruned(dirs):
     keep_ask(state, "fresh")
     StateReader(state, projects).poll()
     assert sorted(os.listdir(state / ".asks")) == ["fresh"]
+
+
+# MARK: How full a session's context is
+
+def window(**fields) -> dict:
+    return {"session_id": "s", "context_window": fields}
+
+
+def test_context_as_claude_code_tells_it():
+    usage = {"input_tokens": 2, "cache_creation_input_tokens": 7878, "cache_read_input_tokens": 187139,
+             "output_tokens": 11996}
+    context = context_from(window(context_window_size=1_000_000, used_percentage=20, current_usage=usage))
+    assert context == Context(20.0, 1_000_000, 195_019)
+    assert (context.text, context.level) == ("20%", 0)
+    assert context.describe() == "Context 20% full: 195k of 1M tokens"
+    # No share given: worked out from what's in it.
+    assert context_from(window(context_window_size=200_000, current_usage=usage)).percent == pytest.approx(97.5, abs=0.1)
+
+
+def test_no_context_yet_or_nothing_sensible():
+    assert context_from({"session_id": "s"}) is None
+    assert context_from(window(context_window_size=200_000, used_percentage=None, current_usage=None)) is None
+    assert context_from(window(context_window_size=0, used_percentage=5)) is None
+    assert context_from(window(context_window_size=True, used_percentage=5)) is None
+    assert context_from(window(context_window_size=200_000, used_percentage="5")) is None
+
+
+def test_context_levels_and_words():
+    assert [Context(p, 200_000, 0).level for p in (10, 74.9, 75, 89, 90, 120)] == [0, 0, 1, 1, 2, 2]
+    assert [Context(p, 200_000, 0).text for p in (0.4, 61.6, 140, -3)] == ["0%", "62%", "100%", "0%"]
+    assert Context(62, 200_000, 124_400).describe() == "Context 62% full: 124k of 200k tokens"
+    assert Context(1, 1_500_000, 950).describe() == "Context 1% full: 950 of 1.5M tokens"
+
+
+def keep_status(state, sid: str, percent: float, mtime: float | None = None) -> None:
+    (state / ".status").mkdir(exist_ok=True)
+    path = state / ".status" / sid
+    path.write_text(json.dumps(window(context_window_size=200_000, used_percentage=percent)))
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+
+
+def test_sessions_say_how_full_their_context_is(dirs, registry, processes):
+    state, projects = dirs
+    write(state, "heard", f"working {LIVE} api\n")
+    keep_status(state, "heard", 62)
+    listed(registry, processes(), "only-listed", "/work/docs")
+    keep_status(state, "only-listed", 12)
+    reader = StateReader(state, projects, registry)
+    found = {s.id: s.context for s in reader.poll()}
+    assert found["heard"].text == "62%" and found["only-listed"].text == "12%"
+    keep_status(state, "heard", 81, mtime=time.time() + 5)
+    assert {s.id: s.context for s in reader.poll()}["heard"].level == 1
+
+
+def test_a_dead_sessions_status_is_pruned(dirs):
+    state, projects = dirs
+    keep_status(state, "gone", 50, mtime=time.time() - StateReader.STALE_AFTER - 60)
+    keep_status(state, "fresh", 50)
+    StateReader(state, projects).poll()
+    assert sorted(os.listdir(state / ".status")) == ["fresh"]

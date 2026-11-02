@@ -5,7 +5,8 @@ CTally's hooks keep one file per session in ~/.claude/ctally.d/<session id>, hol
 idle), and a file per running subagent in ~/.claude/ctally.d/.agents/<session id>/. A session
 stopped by the plan's usage limit shows as waiting until the limit resets (.limit says when).
 A turn I stop by hand (Esc), and agents I kill, get no hook at all, so the transcripts are
-what show those. Each session's name
+what show those. What a waiting session asks the hook keeps in .asks/<session id>, and how
+full each session's context is, CTally's status line in .status/<session id>. Each session's name
 and directory come from its transcript in ~/.claude/projects/, where it sits in tmux from
 its process's environment, and what a workflow is up to from its journal.
 
@@ -104,6 +105,7 @@ class Session:
     agents: Agents | None = None    # its subagents, while any run
     limited: bool = False           # waiting on the plan's usage limit, not on me
     ask: Ask | None = None          # what it's waiting on me for, when it's known
+    context: Context | None = None  # how full its context is, once Claude Code has said
 
 
 # MARK: Stopping by hand
@@ -256,15 +258,18 @@ def ask_from(record: dict) -> Ask | None:
     return Ask("tool", f"Allow {name}({argument})?" if argument else f"Allow {name}?", detail)
 
 
-class AskReader:
-    """What each waiting session asks, as the hook keeps it in ~/.claude/ctally.d/.asks/<session
-    id>: the whole PermissionRequest. Each is read again only when it changes."""
+class Notes:
+    """A folder of notes about sessions, one JSON file each by session id, kept beside the state
+    files: what each waiting session asks (.asks, from the hook), what Claude Code last told its
+    status line (.status). Cheap to ask every poll: a note is read again only when it changes,
+    and made into what's wanted of it by `parse`."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, parse):
         self.dir = directory
-        self.cache: dict[str, tuple] = {}       # id -> ((modified, size), Ask or None)
+        self.parse = parse
+        self.cache: dict[str, tuple] = {}       # id -> ((modified, size), what parse made of it)
 
-    def ask(self, sid: str) -> Ask | None:
+    def get(self, sid: str):
         path = self.dir / sid
         try:
             stat = path.stat()
@@ -279,12 +284,71 @@ class AskReader:
             record = json.loads(path.read_bytes())
         except (OSError, ValueError):
             record = None
-        found = ask_from(record) if isinstance(record, dict) else None
+        found = self.parse(record) if isinstance(record, dict) else None
         self.cache[sid] = (key, found)
         return found
 
     def forget(self, keep: set[str]) -> None:
         self.cache = {k: v for k, v in self.cache.items() if k in keep}
+
+
+# MARK: How full a session's context is
+
+# As the usage limits: amber getting close, red nearly out.
+CONTEXT_WARN, CONTEXT_ALERT = 75, 90
+
+
+@dataclass(frozen=True)
+class Context:
+    """How full a session's context window is, as Claude Code last told its status line."""
+    percent: float          # used, 0–100
+    size: int               # the window, in tokens
+    tokens: int             # in it now
+
+    @property
+    def level(self) -> int:
+        """0 room to spare, 1 getting full, 2 nearly full: Claude Code compacts it soon."""
+        return 2 if self.percent >= CONTEXT_ALERT else 1 if self.percent >= CONTEXT_WARN else 0
+
+    @property
+    def text(self) -> str:
+        """"62%\""""
+        return f"{min(max(round(self.percent), 0), 100)}%"
+
+    def describe(self) -> str:
+        """"Context 62% full: 124k of 200k tokens\""""
+        return f"Context {self.text} full: {_tokens(self.tokens)} of {_tokens(self.size)} tokens"
+
+
+def _tokens(count: int) -> str:
+    """"124k", "1M", "950"."""
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if count >= 1000:
+        return f"{round(count / 1000)}k"
+    return str(count)
+
+
+def context_from(record: dict) -> Context | None:
+    """From the JSON Claude Code hands its status line: "context_window", with the window's
+    size, what's in it now, and the share used. Before the first reply nothing's in it yet."""
+    window = record.get("context_window")
+    if not isinstance(window, dict):
+        return None
+    size = window.get("context_window_size")
+    if isinstance(size, bool) or not isinstance(size, (int, float)) or size <= 0:
+        return None
+    current = window.get("current_usage")
+    tokens = 0
+    if isinstance(current, dict):
+        tokens = sum(v for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+                     if isinstance(v := current.get(k), (int, float)) and not isinstance(v, bool))
+    percent = window.get("used_percentage")
+    if isinstance(percent, bool) or not isinstance(percent, (int, float)):
+        if not tokens:
+            return None
+        percent = 100 * tokens / size
+    return Context(float(percent), int(size), int(tokens))
 
 
 # MARK: Session names
@@ -810,7 +874,8 @@ class StateReader:
         self.names = Names(projects)
         self.locator = TmuxLocator()
         self.watcher = AgentWatcher(directory / ".agents")
-        self.asks = AskReader(directory / ".asks")
+        self.asks = Notes(directory / ".asks", ask_from)
+        self.contexts = Notes(directory / ".status", context_from)
         self.registry = Registry(registry)
         self.cache: dict[str, StateReader.Entry] = {}
         self.unheard: dict[str, Running] = {}   # sessions only Claude Code's list knows of
@@ -861,6 +926,7 @@ class StateReader:
         self.locator.forget(keep)
         self.watcher.forget(keep)
         self.asks.forget(keep)
+        self.contexts.forget(keep)
 
         # Oldest session first, so rows never shuffle under me.
         def age(name: str) -> tuple:
@@ -884,12 +950,12 @@ class StateReader:
         if busy and stopped_by_hand(self.names, self.watcher, name, entry.modified):
             state = State.DONE
         # What it asked counts only while it's still waiting on me for it.
-        ask = self.asks.ask(name) if state is State.WAITING and not limited else None
+        ask = self.asks.get(name) if state is State.WAITING and not limited else None
         return Session(id=name, state=state, label=entry.label, pid=entry.pid,
                        title=title, path=path,
                        tmux=self.locator.location(name, entry.pid),
                        agents=self.watcher.activity(name, self.names.transcript(name)),
-                       limited=limited, ask=ask)
+                       limited=limited, ask=ask, context=self.contexts.get(name))
 
     def _listed(self, running: Running) -> Session:
         """A session only Claude Code's list knows of, in the state it gives, named after the
@@ -899,7 +965,8 @@ class StateReader:
         return Session(id=running.id, state=running.state, label=os.path.basename((path or "").rstrip("/")),
                        pid=running.pid, title=title, path=path,
                        tmux=self.locator.location(running.id, running.pid),
-                       agents=self.watcher.activity(running.id, self.names.transcript(running.id)))
+                       agents=self.watcher.activity(running.id, self.names.transcript(running.id)),
+                       context=self.contexts.get(running.id))
 
     @staticmethod
     def _read(path: Path, modified: float, size: int) -> StateReader.Entry | None:
@@ -917,7 +984,7 @@ class StateReader:
 
     def _prune(self) -> None:
         """Sessions killed without a SessionEnd hook leave their file behind, and any
-        agents' folder or note of what they asked."""
+        agents' folder or notes: what they asked, what their status line said."""
         now = time.time()
         if now - self.last_prune < 60:
             return
@@ -930,7 +997,7 @@ class StateReader:
                     pass
                 self.cache.pop(name, None)
                 self.first_seen.pop(name, None)
-        for kind in (".agents", ".asks"):
+        for kind in (".agents", ".asks", ".status"):
             folder = self.dir / kind
             try:
                 names = os.listdir(folder)

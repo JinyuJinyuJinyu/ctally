@@ -20,6 +20,9 @@ session's terminal. The view moves its own window while dragging and says when i
 dropped; everything else about the window is the controller's business. Hovering a session
 spells out all there is to know about it.
 
+How full each session's context is shows as a small gauge, filling clockwise: at the end of
+its row's directory line, or on its badge's shoulder, quiet until it's getting full.
+
 Your plan's usage limits ride along when known: every one of them, a bar each, between the
 list's rows and its count bar; the session and the week as two small meters in the folded bar
 and on a card under the badges. Hovering any of them gives the details.
@@ -36,7 +39,7 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiAppl
                            QPainterPath, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from ..sessions import BY_URGENCY, Session, State
+from ..sessions import BY_URGENCY, Context, Session, State
 from ..usage import Usage, describe, percent_text, when
 
 ACCENT = {
@@ -197,6 +200,7 @@ class TallyView(QWidget):
     AGENT_LINE = 14         # added under a row while its agents run
     ASK_LINE = 14           # added under a row waiting on me, saying what for
     CHIP_PAD = 7            # either side of the word in the "answer" chip
+    GAUGE_RADIUS = 4.5      # the context gauge
     PROGRESS_WIDTH = 54     # a workflow's progress bar, at the end of that line
     HEADER_HEIGHT = 26      # the count bar, which is all a folded list shows
     HEADER_GAP = 6          # between the count bar and the rows
@@ -450,8 +454,13 @@ class TallyView(QWidget):
             extra = 14 + TallyView.PROGRESS_WIDTH + measure(progress, f.tag) if progress else 0
             return 16 + measure(row.agents, f.agent) + extra
 
+        def lower_width(row: Row) -> float:
+            context = row.session.context
+            return (measure(row.path, f.path) + (10 + measure(row.tmux, f.tmux) if row.tmux else 0)
+                    + (8 + self._context_width(context) if context else 0))
+
         widest = max((max(measure(r.title, f.title) + 8 + TallyView.STATE_WIDTH,
-                          measure(r.path, f.path) + (10 + measure(r.tmux, f.tmux) if r.tmux else 0),
+                          lower_width(r),
                           agents_width(r))
                       for r in self._rows), default=0)
         wanted = 2 * TallyView.PADDING + TallyView.TEXT_X + widest
@@ -465,6 +474,9 @@ class TallyView(QWidget):
                         if (n := sum(1 for s in self._sessions if s.state is state))]
         items = sum(self._count_item_width(n) for _, n in self._counts)
         self._bar_width = math.ceil(2 * TallyView.PADDING + 4 + items + TallyView.FOLD_SIZE + 8)
+
+    def _context_width(self, context: Context) -> float:
+        return 2 * TallyView.GAUGE_RADIUS + 3 + measure(context.text, self.fonts.meter)
 
     @staticmethod
     def _row_height(row: Row) -> float:
@@ -812,6 +824,8 @@ class TallyView(QWidget):
         where = " · ".join(part for part in (row.path, row.tmux and f"tmux {row.tmux}") if part)
         if where:
             lines.append(where)
+        if session.context:
+            lines.append(session.context.describe())
         if session.ask:
             lines += ["", session.ask.summary]
             lines += [line for line in session.ask.detail.splitlines() if line.strip() and line != session.ask.summary]
@@ -1005,9 +1019,7 @@ class TallyView(QWidget):
 
         self._blit(painter, self._sprite(("plate", radius, lit), size, plate), centre)
         self._blit(painter, self._sprite(("ring", session.state, radius), size, mark), centre, glow)
-        if session.agents:
-            self._draw_agent_tag(painter, session.agents.running,
-                                 QPointF(centre.x() + radius * 0.8, centre.y() - radius * 0.66))
+        self._draw_shoulder_tags(painter, session, centre, radius)
 
     # Badges
 
@@ -1031,10 +1043,7 @@ class TallyView(QWidget):
         painter.setOpacity(glow)
         self._draw_ring_and_glyph(painter, session.state, centre, radius)
         painter.restore()
-
-        if session.agents:
-            self._draw_agent_tag(painter, session.agents.running,
-                                 QPointF(centre.x() + radius * 0.8, centre.y() - radius * 0.66))
+        self._draw_shoulder_tags(painter, session, centre, radius)
 
     @staticmethod
     def _draw_ring_and_glyph(painter: QPainter, state: State, centre: QPointF, radius: float) -> None:
@@ -1048,6 +1057,50 @@ class TallyView(QWidget):
             a, b = points[i], points[(i + 1) % 6]
             painter.drawLine(lerp(a, b, 0.17), lerp(a, b, 0.83))
         draw_glyph(painter, state, centre, radius / 44, accent)
+
+    def _draw_shoulder_tags(self, painter: QPainter, session: Session, centre: QPointF, radius: float) -> None:
+        """On a badge's shoulders: its agents at work up on the right, how full its context is
+        low on the left."""
+        if session.agents:
+            self._draw_agent_tag(painter, session.agents.running,
+                                 QPointF(centre.x() + radius * 0.8, centre.y() - radius * 0.66))
+        if session.context:
+            self._draw_context_tag(painter, session.context,
+                                   QPointF(centre.x() - radius * 0.8, centre.y() + radius * 0.66))
+
+    def _draw_context_tag(self, painter: QPainter, context: Context, c: QPointF) -> None:
+        """The context gauge on a little card of its own, like the agents' count."""
+        width = self._context_width(context) + 10
+        tag = QRectF(c.x() - width / 2, c.y() - 8, width, 16)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(white(0.04, 0.8))
+        painter.drawRoundedRect(tag, 8, 8)
+        if context.level:
+            painter.setPen(QPen(faded(LEVEL[context.level], 0.6), 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(tag.adjusted(0.5, 0.5, -0.5, -0.5), 7.5, 7.5)
+        self._draw_context(painter, context, tag.right() - 5, tag.center().y())
+
+    def _draw_context(self, painter: QPainter, context: Context, right: float, mid_y: float) -> float:
+        """How full a session's context is: a pie filling clockwise from the top, then the share,
+        right-aligned to a point. Quiet while there's room, amber then red as it fills. Returns
+        the width it took."""
+        colour = LEVEL[context.level] if context.level else white(0.95, 0.55)
+        text_width = measure(context.text, self.fonts.meter)
+        draw_text(painter, context.text, QRectF(right - text_width, mid_y - 7, text_width, 14),
+                  self.fonts.meter, colour, Qt.AlignRight)
+        r = TallyView.GAUGE_RADIUS
+        c = QPointF(right - text_width - 3 - r, mid_y)
+        painter.setPen(QPen(faded(colour, 0.7), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(c, r, r)
+        share = min(max(context.percent / 100, 0.0), 1.0)
+        if share > 0:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(colour)
+            inner = r - 1.5
+            painter.drawPie(QRectF(c.x() - inner, c.y() - inner, 2 * inner, 2 * inner), 90 * 16, -round(360 * 16 * share))
+        return right - (c.x() - r)
 
     def _draw_agent_tag(self, painter: QPainter, count: int, c: QPointF) -> None:
         """On a badge's shoulder while its agents run: how many."""
@@ -1243,11 +1296,15 @@ class TallyView(QWidget):
         word = "limit" if row.session.limited else state.value     # stopped by the usage limit
         draw_text(painter, word, QRectF(upper.right() - TallyView.STATE_WIDTH, upper.y(), TallyView.STATE_WIDTH, upper.height()),
                   self.fonts.state, ACCENT[state], Qt.AlignRight)
-        # Where it sits in tmux, at the end of the directory line; the path gives way to it.
+        # How full its context is, at the end of the directory line, and where it sits in tmux
+        # before that; the path gives way to both.
         path_line = QRectF(lower)
+        if row.session.context:
+            used = self._draw_context(painter, row.session.context, lower.right(), lower.center().y())
+            path_line.setWidth(path_line.width() - used - 8)
         if row.tmux:
-            tmux_width = min(measure(row.tmux, self.fonts.tmux), lower.width() / 2)
-            draw_text(painter, row.tmux, QRectF(lower.right() - tmux_width, lower.y(), tmux_width, lower.height()),
+            tmux_width = min(measure(row.tmux, self.fonts.tmux), path_line.width() / 2)
+            draw_text(painter, row.tmux, QRectF(path_line.right() - tmux_width, lower.y(), tmux_width, lower.height()),
                       self.fonts.tmux, white(0.95, 0.5), Qt.AlignRight)
             path_line.setWidth(path_line.width() - tmux_width - 10)
         draw_text(painter, row.path, path_line, self.fonts.path, white(0.95, 0.6), elide=Qt.ElideMiddle)
