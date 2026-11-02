@@ -371,8 +371,11 @@ Two pieces, connected by a folder:
    The hooks hear of a session only once it does something, so the app also reads Claude Code's own list of
    its running sessions, `~/.claude/sessions/`. A session the hooks haven't heard from yet, idle since setup or
    never sent a prompt, shows from there: idle, or working or waiting as Claude Code has it. Once its hooks
-   run, they say. Only interactive sessions are listed: not background jobs, nor the spare processes Claude
-   Code starts ahead of need. Sessions are listed oldest first, by when they started.
+   run, they say. Background jobs count too, but not the spare processes Claude Code starts ahead of need. A
+   session sent to the background goes on as a job under a new id: CTally shows it once, in the terminal
+   that sent it, which is where clicking it takes you. The list also says when a session went idle without
+   a word to the hooks, as a job can after a prompt it never answers: one the hooks last heard working is
+   then done, unless its agents are still at work. Sessions are listed oldest first, by when they started.
 
 To add the hooks by hand, copy `src/ctally/hooks/ctally.sh` and `ctally-statusline.sh` to `~/.claude/hooks/`
 and merge this into `~/.claude/settings.json` (to keep a status line you have, put its command after

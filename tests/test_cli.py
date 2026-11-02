@@ -76,6 +76,24 @@ def test_sessions_the_hooks_have_not_heard_from_count_too(state, own_usage_and_p
                                                                  ("idle", "api", "x")]
 
 
+def test_a_session_gone_on_in_a_background_job_counts_once(state, own_usage_and_prefs, outside_tmux, capsys):
+    """Its terminal still sends the hooks a word under the old id; the job, idle since its last
+    prompt with no hook to say so, is what counts, and in the terminal's place."""
+    registry = own_usage_and_prefs / "sessions"
+    registry.mkdir()
+    terminal, worker, now = outside_tmux(), outside_tmux(), time.time()
+    for pid, record in ((terminal, {"sessionId": "old", "kind": "interactive", "parkedJobId": "j1"}),
+                        (worker, {"sessionId": "new", "kind": "bg", "jobId": "j1", "statusUpdatedAt": (now - 5) * 1000})):
+        (registry / f"{pid}.json").write_text(json.dumps({
+            "pid": pid, "cwd": "/work/api", "status": "idle", "procStart": system.started(pid),
+            "startedAt": 1000, "updatedAt": 1000, **record}))
+    write(state, "old", f"waiting {terminal} p\n")
+    write(state, "new", f"working {worker} p\n", mtime=now - 10)
+    assert cli.main(["status"]) == 0
+    assert capsys.readouterr().out == "✓1\n"
+    assert [(s.id, s.state, s.pid) for s in cli.live_sessions()] == [("new", "done", terminal)]
+
+
 def test_a_turn_stopped_with_esc_counts_as_done(state, capsys, monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     monkeypatch.setattr(cli, "PROJECTS_DIR", projects)

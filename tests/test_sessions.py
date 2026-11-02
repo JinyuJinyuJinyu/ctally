@@ -260,17 +260,46 @@ def test_a_listed_session_follows_its_status(dirs, registry):
     assert reader.poll() == []
 
 
-def test_only_live_interactive_sessions_are_listed(dirs, registry, processes):
+def test_only_live_sessions_and_jobs_are_listed(dirs, registry, processes):
     state, projects = dirs
-    listed(registry, processes(), "job", kind="bg")
-    listed(registry, processes(), "spare", spare=True)
+    listed(registry, processes(), "job", kind="bg", jobId="job", started=100)
+    listed(registry, processes(), "spare", kind="bg", spare=True)
+    listed(registry, processes(), "other", kind="something-else")
     listed(registry, dead_pid(), "gone")
     listed(registry, processes(), "../escape")
     listed(registry, processes(), ".hidden")
     (registry / "junk.json").write_text("{not json")
     (registry / "list.json").write_text("[]")
-    listed(registry, processes(), "fine")
-    assert [s.id for s in StateReader(state, projects, registry).poll()] == ["fine"]
+    listed(registry, processes(), "fine", started=200)
+    assert [s.id for s in StateReader(state, projects, registry).poll()] == ["job", "fine"]
+
+
+def test_a_session_gone_on_in_a_background_job_is_the_job_in_its_terminal(dirs, registry, processes):
+    """A terminal can hand its session to Claude Code's daemon, which goes on with it as a job
+    under a new id. The terminal stays on only to show the job, and still sends the hooks a
+    word now and then, under the old id; the job's own hooks run where the daemon runs it."""
+    state, projects = dirs
+    now = time.time()
+    terminal, worker, other = processes(), processes(), processes()
+    listed(registry, other, "other", started=200)
+    listed(registry, terminal, "old", started=100, updated=now - 3600, parkedJobId="j1")
+    listed(registry, worker, "new", kind="bg", jobId="j1", started=300)
+    write(state, "old", f"waiting {terminal} p\n", mtime=now - 60)
+    reader = StateReader(state, projects, registry)
+    # One row for it, in the terminal's place, and the terminal to go to.
+    assert [(s.id, s.state, s.pid) for s in reader.poll()] == [("new", State.IDLE, terminal),
+                                                               ("other", State.IDLE, other)]
+    write(state, "new", f"working {worker} p\n", mtime=now - 5)          # once the job's hooks run
+    assert [(s.id, s.state, s.pid) for s in reader.poll()] == [("new", State.WORKING, terminal),
+                                                               ("other", State.IDLE, other)]
+
+
+def test_a_parked_session_taken_up_elsewhere_is_shown(dirs, registry, processes):
+    state, projects = dirs
+    terminal, elsewhere = processes(), processes()
+    listed(registry, terminal, "old", parkedJobId="j1")         # its job has finished since
+    write(state, "old", f"working {elsewhere} p\n")              # and the session was resumed
+    assert [(s.id, s.pid) for s in StateReader(state, projects, registry).poll()] == [("old", elsewhere)]
 
 
 @pytest.mark.skipif(not system.LINUX, reason="Claude Code notes /proc's start time on Linux")
@@ -630,6 +659,24 @@ def test_killed_agents_mid_turn_leave_claude_working(dirs):
     agent_transcript(path, "bg", [said("Build", now - 70), said(ESC, now - 10)], note={"stoppedByUser": True})
     [session] = StateReader(state, projects).poll()
     assert (session.state, session.agents) == (State.WORKING, None)
+
+
+@pytest.mark.parametrize("status, since, agents, expected", [
+    ("idle", -5, None, State.DONE),             # idle since the hook last said: the turn is over
+    ("idle", -20, None, State.WORKING),         # idle before the prompt the hook heard
+    ("busy", -5, None, State.WORKING),
+    ("idle", -5, {"bg": "Explore"}, State.WORKING),     # waiting on its agents
+])
+def test_a_turn_claude_code_has_had_idle_since_is_done(dirs, registry, status, since, agents, expected):
+    """A background job can take a prompt and go idle without answering it, and no hook says."""
+    now = time.time()
+    state, projects, path = stuck(dirs, "working", [said(".", now - 10)], hooked=now - 10, agents=agents)
+    if agents:
+        agent_transcript(path, "bg", [said("Find", now - 9), answered(now - 1)])
+    listed(registry, LIVE, "s", kind="bg", jobId="s", status=status, started=now - 3600,
+           statusUpdatedAt=(now + since) * 1000)
+    [session] = StateReader(state, projects, registry).poll()
+    assert session.state is expected
 
 
 def test_limited_sessions_are_left_to_the_limit(dirs):

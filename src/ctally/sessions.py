@@ -12,7 +12,8 @@ its process's environment, and what a workflow is up to from its journal.
 
 The hooks hear of a session only once it does something. Claude Code's own list of its running
 sessions, ~/.claude/sessions/, shows the rest: those idle since CTally was set up, or never
-sent a prompt.
+sent a prompt. It also says which sessions a terminal has handed to a background job, and
+when a session went idle without a word to the hooks.
 """
 from __future__ import annotations
 
@@ -131,7 +132,8 @@ class Session:
     id: str
     state: State
     label: str                      # project folder name, from the hook or Claude Code's list
-    pid: int = 0                    # the claude process, from the same
+    pid: int = 0                    # the claude process I see it in, from the same: for a
+                                    # background job, the terminal showing it
     title: str | None = None        # session name, from the transcript
     path: str | None = None         # directory the session started in, from the transcript (or the list)
     tmux: str | None = None         # where it sits in tmux, "report:0.2", if it runs there
@@ -789,6 +791,9 @@ class Running(NamedTuple):
     state: State            # Claude Code's own word for it: busy, waiting on me, or idle
     started: float          # when the process started, Unix time
     updated: float          # when Claude Code last wrote it down: a new state, or a new session id
+    changed: float = 0.0    # when its state last changed, if Claude Code says
+    job: str | None = None  # a background job's id ("f64ac6b7"), when that's what it is
+    parked: str | None = None   # the job a terminal's session went on in, leaving it only to show it
 
 
 def _seconds(milliseconds) -> float:
@@ -801,9 +806,14 @@ class Registry:
     /resume move the process on to a new session id). It lists sessions the hooks haven't heard
     from: idle since CTally was set up, or never sent a prompt.
 
-    Only interactive sessions count, not background jobs, nor the spare processes Claude Code
-    starts ahead of need. A file left by a process that has gone, or whose pid has passed to
-    another process since, is passed over: Claude Code notes when the process started."""
+    Sessions in a terminal count, and background jobs, which Claude Code's daemon runs; not the
+    spare processes it starts ahead of need. A terminal's session can go on in a job: the
+    session's own id is then done with, and the terminal stays on only to show the job (its
+    file names the job as parked there). A file left by a process that has gone, or whose pid
+    has passed to another process since, is passed over: Claude Code notes when the process
+    started."""
+
+    KINDS = ("interactive", "bg")
 
     # Its "shell" is idle, with a shell command of its own running.
     STATES = {"busy": State.WORKING, "waiting": State.WAITING}
@@ -840,16 +850,20 @@ class Registry:
             record = json.loads(path.read_bytes())
         except (OSError, ValueError):
             return None
-        if not isinstance(record, dict) or record.get("kind", "interactive") != "interactive" or record.get("spare"):
+        if not isinstance(record, dict) or record.get("kind", "interactive") not in Registry.KINDS or record.get("spare"):
             return None
         sid, pid, cwd = record.get("sessionId"), record.get("pid"), record.get("cwd")
         # The id names files, as the hook's does.
         if not isinstance(sid, str) or not sid or "/" in sid or sid.startswith(".") or not isinstance(pid, int) or pid <= 0:
             return None
         started = _seconds(record.get("startedAt"))
+        updated = _seconds(record.get("updatedAt")) or started
+        job, parked = record.get("jobId"), record.get("parkedJobId")
         running = Running(sid, pid, cwd if isinstance(cwd, str) else "",
                           Registry.STATES.get(record.get("status"), State.IDLE),
-                          started, _seconds(record.get("updatedAt")) or started)
+                          started, updated, _seconds(record.get("statusUpdatedAt")) or updated,
+                          job if isinstance(job, str) and job else None,
+                          parked if isinstance(parked, str) and parked else None)
         began = record.get("procStart")
         return running, (str(began) if began is not None else None)
 
@@ -865,12 +879,22 @@ def reconcile(running: list[Running], heard: dict[str, tuple[int, float]]) -> tu
     """Claude Code's list beside the hooks' files, given each live session's pid and when its
     file was last written. Returns the listed sessions the hooks haven't heard from, and the
     hooks' sessions whose process has since moved on to another (/clear, /resume): a process is
-    one session at a time, and of its file and its place in the list, the newer says which."""
+    one session at a time, and of its file and its place in the list, the newer says which.
+    One whose session went on in a background job has none of its own any more, whatever it
+    still sends the hooks: the job is the session now."""
     listed = {r.pid: r for r in running}
     left = {sid for sid, (pid, modified) in heard.items()
             if pid in listed and listed[pid].id != sid and listed[pid].updated > modified}
+    left |= {r.id for r in running if r.parked and r.id in heard and heard[r.id][0] == r.pid}
     pids = {pid for sid, (pid, _) in heard.items() if sid not in left}
-    return [r for r in running if r.id not in heard and r.pid not in pids], left
+    return [r for r in running if r.id not in heard and r.pid not in pids and not r.parked], left
+
+
+def fronts(running: list[Running]) -> dict[str, Running]:
+    """Where each background job is on show, by the job's session id: the terminal whose
+    session went on in it. Its tmux pane and its window are the job's."""
+    jobs = {r.job: r.id for r in running if r.job}
+    return {jobs[r.parked]: r for r in running if r.parked in jobs}
 
 
 # MARK: The state directory
@@ -905,6 +929,16 @@ def stopped_by_hand(names: Names, watcher: AgentWatcher, sid: str, modified: flo
         return True
     stopped = names.stopped(sid)
     return stopped is not None and stopped >= modified - 2
+
+
+def gone_idle(names: Names, watcher: AgentWatcher, sid: str, modified: float, listed: Running | None) -> bool:
+    """Whether a session the hooks last left working has gone idle since (modified), as
+    Claude Code's list has it: a turn over without a word to the hooks, as a background job's
+    can be when it takes a prompt and never answers it. Agents still at work keep it working,
+    whatever the list says."""
+    if listed is None or listed.state is not State.IDLE or listed.changed <= modified:
+        return False
+    return watcher.activity(sid, names.transcript(sid)) is None
 
 
 def read_limit(directory: Path = STATE_DIR) -> LimitHit | None:
@@ -947,13 +981,19 @@ class StateReader:
         self.registry = Registry(registry)
         self.cache: dict[str, StateReader.Entry] = {}
         self.unheard: dict[str, Running] = {}   # sessions only Claude Code's list knows of
+        self.listed: dict[tuple[str, int], Running] = {}    # all it lists, by session id and pid
+        self.fronts: dict[str, Running] = {}    # background jobs' terminals, by job session id
         self.first_seen: dict[str, float] = {}
         self.last_prune = 0.0
         self.limit: LimitHit | None = None
 
     def poll(self) -> list[Session]:
         running = self.registry.poll()
+        self.listed = {(r.id, r.pid): r for r in running}
+        self.fronts = fronts(running)
+        # A job goes by its terminal's start, so its row stays where that terminal's was.
         started = {r.id: r.started for r in running if r.started}
+        started.update((sid, r.started) for sid, r in self.fronts.items() if r.started)
         try:
             names = {n for n in os.listdir(self.dir) if not n.startswith(".")}
         except OSError:
@@ -984,7 +1024,7 @@ class StateReader:
         unheard, left = reconcile(running, heard)
         self.unheard = {r.id: r for r in unheard}
         for r in unheard:
-            self.first_seen.setdefault(r.id, r.started or sweep)
+            self.first_seen.setdefault(r.id, started.get(r.id, sweep))
         self.first_seen = {k: v for k, v in self.first_seen.items() if k in names or k in self.unheard}
 
         self._prune()
@@ -1017,11 +1057,16 @@ class StateReader:
             state, limited = State.DONE, False      # the limit is over; the session just sits
         if busy and stopped_by_hand(self.names, self.watcher, name, entry.modified):
             state = State.DONE
+        elif state is State.WORKING and not limited and \
+                gone_idle(self.names, self.watcher, name, entry.modified, self.listed.get((name, entry.pid))):
+            state = State.DONE
         # What it asked counts only while it's still waiting on me for it.
         ask = self.asks.get(name) if state is State.WAITING and not limited else None
-        return Session(id=name, state=state, label=entry.label, pid=entry.pid,
+        # A background job is wherever its terminal is.
+        pid = self.fronts[name].pid if name in self.fronts else entry.pid
+        return Session(id=name, state=state, label=entry.label, pid=pid,
                        title=title, path=path,
-                       tmux=self.locator.location(name, entry.pid),
+                       tmux=self.locator.location(name, pid),
                        agents=self.watcher.activity(name, self.names.transcript(name)),
                        limited=limited, ask=ask, context=self.contexts.get(name))
 
@@ -1030,9 +1075,10 @@ class StateReader:
         folder it started in, or else the one it's in."""
         title, path = self.names.info(running.id, busy=running.state is State.WORKING)
         path = path or running.cwd or None
+        pid = self.fronts[running.id].pid if running.id in self.fronts else running.pid
         return Session(id=running.id, state=running.state, label=os.path.basename((path or "").rstrip("/")),
-                       pid=running.pid, title=title, path=path,
-                       tmux=self.locator.location(running.id, running.pid),
+                       pid=pid, title=title, path=path,
+                       tmux=self.locator.location(running.id, pid),
                        agents=self.watcher.activity(running.id, self.names.transcript(running.id)),
                        context=self.contexts.get(running.id))
 
