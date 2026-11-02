@@ -65,6 +65,9 @@ When a session hands work to subagents, or runs a whole workflow of them, CTally
   that's the phase it has reached (`4 agents · Verify`), with a progress bar of its agents finished out of
   those started so far (`12/16`; the total grows as each phase sets off more). For a single agent it's the
   task it was given (`1 agent · Find callers of parseConfig`).
+- **Click that line for a closer look**: a workflow's phases, each with its own progress bar and the agents
+  still at work in it (`Verify  verify:schema, verify:queries  0/4`), or each agent and what it's doing
+  (`Explore · Find callers of parseConfig`). Click again to fold it away. Hover over a badge for the same.
 - **The badge carries the count** (`⚙ 4`) on its shoulder.
 - **The session stays working until its agents are back.** A session that sends agents off in the background
   finishes its own turn at once, and would otherwise look done for as long as they run, sometimes hours. CTally
@@ -247,6 +250,7 @@ ctally setup --tmux
 |---|---|
 | Move it | Drag it anywhere. It remembers the spot and grows left from there, and away from the nearer screen edge: up from the bottom half of the screen, down from the top half, where the list unfolds downward. |
 | Go to a session | Click its row (or its badge). |
+| See what a session's agents are doing | Click the line about its agents; again to fold it. |
 | Answer a session waiting on you | Click the amber line saying what it asks, or right-click the session, and pick a choice. In tmux. |
 | Jump to the session that needs you | In tmux, press prefix + J (set up by `ctally setup --tmux`). Again for the next one. |
 | Fold or unfold the list | Click the chevron on the count bar, or right-click → Fold List. |
@@ -346,8 +350,8 @@ transcript in `~/.claude/projects/`, but only two parts:
 - the last 256 KB, for the `/rename` name or the generated title
 - the first 256 KB, once, for the directory the session started in
 
-While agents run it also reads, beside the transcript, a running workflow's progress journal (for its phase
-and how many agents are done) and a lone subagent's one-line task description. It never reads your
+While agents run it also reads, beside the transcript, a running workflow's progress journal (for its phases,
+its agents' labels and how many are done) and each running subagent's one-line task description. It never reads your
 conversations otherwise.
 
 While a session waits on you, the hook keeps what it asked (the tool and its input, the questions, or the

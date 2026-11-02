@@ -11,6 +11,10 @@ when a new session starts; the chevron on the bar folds the list away to just th
 More rows than fit (sixteen, or what the screen has room for) scroll, with the wheel or the
 scroll bar beside them, which marks where the sessions waiting on me are.
 
+Clicking a row's line about its agents opens it up for a closer look: a workflow's phases, each
+with its own progress and the agents still at work in it, or each agent and what it's doing.
+Clicking it again folds that away.
+
 A session waiting on me says what for, a line under its row (or on its caption): the tool to
 allow, the question, the plan. Clicking that asks for its answers, as does a right-click on
 any session waiting on me; the controller reads them off the session's screen.
@@ -39,7 +43,7 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiAppl
                            QPainterPath, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from ..sessions import BY_URGENCY, Context, Session, State
+from ..sessions import BY_URGENCY, Agents, Context, Session, State
 from ..usage import Usage, describe, percent_text, when
 
 ACCENT = {
@@ -152,6 +156,14 @@ def draw_text(painter: QPainter, text: str, rect: QRectF, font: QFont, color: QC
     painter.drawText(rect, int(align | Qt.AlignVCenter), shown)
 
 
+class Detail(NamedTuple):
+    """One line of a closer look at a session's agents."""
+    text: str               # a workflow's phase, "Verify", or an agent: "Explore · Find callers"
+    note: str = ""          # a phase's agents still at work: "verify:auth, verify:db"
+    done: int = 0           # a phase's own progress
+    started: int = 0
+
+
 class Row(NamedTuple):
     session: Session
     title: str          # session name, numbered when two share one
@@ -159,6 +171,21 @@ class Row(NamedTuple):
     tmux: str           # "report:0.2", or empty outside tmux
     agents: str         # "4 agents · Verify", or empty with none running
     ask: str = ""       # what it waits on me for: "Allow Bash(npm publish)?", or empty
+    details: tuple = () # its agents up close, a Detail a line, while opened up
+
+
+def details(agents: Agents | None, limit: int = 8) -> tuple[Detail, ...]:
+    """What a closer look at a session's agents shows: each phase of a workflow, or each agent."""
+    if agents is None:
+        return ()
+    if agents.phases:
+        lines = [Detail(p.name, ", ".join(m.what for m in agents.members if m.phase == p.name), p.done, p.started)
+                 for p in agents.phases]
+    else:
+        lines = [Detail(f"{m.kind} · {m.what}" if m.kind and m.kind != m.what else m.what) for m in agents.members]
+    if len(lines) > limit:
+        lines = lines[:limit - 1] + [Detail(f"+{len(lines) - limit + 1} more")]
+    return tuple(lines)
 
 
 class Meter(NamedTuple):
@@ -187,6 +214,7 @@ class TallyView(QWidget):
     selected = Signal(object, object)   # a row or badge was clicked: its Session, and when (focus.focus)
     answer_requested = Signal(object, QPoint)   # what a session asks was clicked: its Session, and where
     drag_finished = Signal()            # dropped after a drag
+    layout_changed = Signal()           # wants another size: a closer look opened or folded
     menu_requested = Signal(QPoint, object)     # a right-click, in global coordinates, and the Session there
 
     SINGLE = Chip(120, 120, 44, 66, 18, False)
@@ -199,6 +227,7 @@ class TallyView(QWidget):
     ROW_HEIGHT = 38
     AGENT_LINE = 14         # added under a row while its agents run
     ASK_LINE = 14           # added under a row waiting on me, saying what for
+    DETAIL_LINE = 14        # each line of a closer look at a row's agents
     CHIP_PAD = 7            # either side of the word in the "answer" chip
     GAUGE_RADIUS = 4.5      # the context gauge
     PROGRESS_WIDTH = 54     # a workflow's progress bar, at the end of that line
@@ -245,6 +274,7 @@ class TallyView(QWidget):
         self._folded = False
         self._grows_down = False
         self._hovered: int | None = None
+        self._opened: set[str] = set()     # sessions whose agents are opened up for a closer look
         self._press: list | None = None    # [global start, window origin, dragging]
         self._region = QRegion()
         # Everything that holds still, drawn once into an image; each frame copies it and
@@ -331,6 +361,7 @@ class TallyView(QWidget):
                 self._entered[session.id] = now      # this session just changed: replay its entry
         ids = {s.id for s in sessions}
         self._entered = {k: v for k, v in self._entered.items() if k in ids}
+        self._opened &= ids
         self._sessions = list(sessions)
         self._hovered = None
         self._version += 1
@@ -438,7 +469,8 @@ class TallyView(QWidget):
                           path=("~" + s.path[len(home):]) if s.path and (s.path + "/").startswith(home + "/") else (s.path or ""),
                           tmux=s.tmux or "",
                           agents=s.agents.summary if s.agents else "",
-                          ask=s.ask.summary if s.ask else "")
+                          ask=s.ask.summary if s.ask else "",
+                          details=details(s.agents) if s.id in self._opened else ())
                       for s in self._sessions]
         self._row_offsets = [0.0]
         for row in self._rows:
@@ -480,15 +512,16 @@ class TallyView(QWidget):
 
     @staticmethod
     def _row_height(row: Row) -> float:
-        """The session's line pair, then a line for what it asks me, then one for its agents."""
+        """The session's line pair, then a line for what it asks me, then one for its agents,
+        and opened up, theirs."""
         return (TallyView.ROW_HEIGHT + (TallyView.ASK_LINE if row.ask else 0)
-                + (TallyView.AGENT_LINE if row.agents else 0))
+                + (TallyView.AGENT_LINE if row.agents else 0) + TallyView.DETAIL_LINE * len(row.details))
 
     @staticmethod
     def _lines(rect: QRectF, row: Row) -> dict[str, QRectF]:
         """Where the lines under a row's name and directory go, by what they say: "ask", then
-        "agents". Edge to edge across the row, as places to click; the text starts in line with
-        the name."""
+        "agents", then their "details" opened up. Edge to edge across the row, as places to
+        click; the text starts in line with the name."""
         y = rect.y() + TallyView.ROW_HEIGHT - 1
         lines = {}
         if row.ask:
@@ -496,7 +529,31 @@ class TallyView(QWidget):
             y += TallyView.ASK_LINE
         if row.agents:
             lines["agents"] = QRectF(rect.x(), y, rect.width(), TallyView.AGENT_LINE)
+            y += TallyView.AGENT_LINE
+        if row.details:
+            lines["details"] = QRectF(rect.x(), y, rect.width(), TallyView.DETAIL_LINE * len(row.details))
         return lines
+
+    @staticmethod
+    def _opens(row: Row) -> bool:
+        """Whether there's more to see of its agents than the one line says."""
+        agents = row.session.agents
+        return bool(agents and (agents.phases or agents.members))
+
+    def _agents_at(self, index: int, point: QPointF) -> bool:
+        """Whether a point is on a row's line about its agents, or on what's opened up under it."""
+        if not self.is_list or not self._opens(self._rows[index]):
+            return False
+        lines = self._lines(self._row_rect(index), self._rows[index])
+        return any(part in lines and lines[part].contains(point) for part in ("agents", "details"))
+
+    def toggle_agents(self, sid: str) -> None:
+        """Opens a session's agents up for a closer look, or folds them away again."""
+        self._opened ^= {sid}
+        self._version += 1
+        self._recompute()
+        self.update()
+        self.layout_changed.emit()
 
     def _count_item_width(self, count: int) -> float:
         """A count in the bar: small mark, then the number, then a gap before the next."""
@@ -783,6 +840,8 @@ class TallyView(QWidget):
         session = self._rows[index].session
         if self._asks_at(index, point):
             self.answer_requested.emit(session, event.globalPosition().toPoint())
+        elif self._agents_at(index, point):
+            self.toggle_agents(session.id)
         else:
             self.selected.emit(session, event.timestamp())
 
@@ -834,6 +893,7 @@ class TallyView(QWidget):
         if session.agents:
             progress = session.agents.progress
             lines += ["", row.agents + (f" ({progress} done)" if progress else "")]
+            lines += ["    " + line for line in session.agents.lines()]
         return "\n".join(lines)
 
     # MARK: Motion
@@ -1278,12 +1338,21 @@ class TallyView(QWidget):
                 line.setWidth(line.width() - self._draw_answer_chip(painter, line.right(), line.center().y()) - 6)
             draw_text(painter, row.ask, line, self.fonts.agent, ACCENT[State.WAITING])
         if "agents" in lines:
+            if self._opens(row):
+                self._draw_disclosure(painter, QPointF(rect.x() + TallyView.MARK_X, lines["agents"].center().y()),
+                                      bool(row.details))
             line = lines["agents"].adjusted(TallyView.TEXT_X, 0, 0, 0)
             agents = row.session.agents
+            # The phases' bars line up under the workflow's: their numbers share a column.
+            labels = [agents.progress] if agents and agents.progress else []
+            labels += [f"{min(d.done, d.started)}/{d.started}" for d in row.details if d.started]
+            column = max((measure(label, self.fonts.tag) for label in labels), default=0)
             if agents and agents.progress:
-                line.setWidth(line.width() - self._draw_progress(painter, agents.progress, agents.done,
-                                                                 agents.started, line.right(), line.center().y()) - 8)
+                line.setWidth(line.width() - self._draw_progress(painter, agents.progress, agents.done, agents.started,
+                                                                 line.right(), line.center().y(), column) - 8)
             draw_text(painter, "⚙ " + row.agents, line, self.fonts.agent, faded(ACCENT[State.WORKING], 0.85))
+        if "details" in lines:
+            self._draw_details(painter, row.details, lines["details"].adjusted(TallyView.TEXT_X + 12, 0, 0, 0), column)
 
         # Name and state on the upper line, the directory under them; with no directory known
         # yet, the name line sits centred instead.
@@ -1309,6 +1378,42 @@ class TallyView(QWidget):
             path_line.setWidth(path_line.width() - tmux_width - 10)
         draw_text(painter, row.path, path_line, self.fonts.path, white(0.95, 0.6), elide=Qt.ElideMiddle)
 
+    @staticmethod
+    def _draw_disclosure(painter: QPainter, c: QPointF, opened: bool) -> None:
+        """In the column of marks, beside the agents' line: a chevron that says it opens up,
+        pointing down once it has."""
+        pen = QPen(faded(ACCENT[State.WORKING], 0.7), 1.4)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        if opened:
+            chevron = QPainterPath(QPointF(c.x() - 3.5, c.y() - 1.75))
+            chevron.lineTo(c.x(), c.y() + 1.75)
+            chevron.lineTo(c.x() + 3.5, c.y() - 1.75)
+        else:
+            chevron = QPainterPath(QPointF(c.x() - 1.75, c.y() - 3.5))
+            chevron.lineTo(c.x() + 1.75, c.y())
+            chevron.lineTo(c.x() - 1.75, c.y() + 3.5)
+        painter.drawPath(chevron)
+
+    def _draw_details(self, painter: QPainter, lines: tuple, rect: QRectF, column: float = 0) -> None:
+        """A closer look at a session's agents, a line each: a workflow's phase, the agents at
+        work in it, and its own progress, numbers in a column `column` wide; or an agent and
+        what it's doing."""
+        colour = faded(ACCENT[State.WORKING], 0.75)
+        for index, detail in enumerate(lines):
+            line = QRectF(rect.x(), rect.y() + index * TallyView.DETAIL_LINE, rect.width(), TallyView.DETAIL_LINE)
+            if detail.started:
+                label = f"{min(detail.done, detail.started)}/{detail.started}"
+                line.setWidth(line.width() - self._draw_progress(painter, label, detail.done, detail.started,
+                                                                 line.right(), line.center().y(), column) - 8)
+            name_width = min(measure(detail.text, self.fonts.agent), line.width())
+            draw_text(painter, detail.text, QRectF(line.x(), line.y(), name_width, line.height()), self.fonts.agent, colour)
+            if detail.note:
+                note = QRectF(line.x() + name_width + 8, line.y(), line.width() - name_width - 8, line.height())
+                draw_text(painter, detail.note, note, self.fonts.path, white(0.95, 0.45))
+
     def _draw_answer_chip(self, painter: QPainter, right: float, mid_y: float) -> float:
         """At the end of the line saying what a session asks: where to click to answer it.
         Returns the width it took."""
@@ -1323,11 +1428,12 @@ class TallyView(QWidget):
         return width
 
     def _draw_progress(self, painter: QPainter, label: str, done: int, started: int,
-                       right: float, mid_y: float) -> float:
+                       right: float, mid_y: float, column: float = 0) -> float:
         """A workflow's agents finished out of those started, as a bar and in numbers,
-        right-aligned to a point. Returns the width it took."""
+        right-aligned to a point, the numbers in a column at least `column` wide. Returns the
+        width it took."""
         accent = ACCENT[State.WORKING]
-        label_width = measure(label, self.fonts.tag)
+        label_width = max(measure(label, self.fonts.tag), column)
         draw_text(painter, label, QRectF(right - label_width, mid_y - 7, label_width, 14),
                   self.fonts.tag, faded(accent, 0.85), Qt.AlignRight)
         track = QRectF(right - label_width - 6 - TallyView.PROGRESS_WIDTH, mid_y - 2, TallyView.PROGRESS_WIDTH, 4)

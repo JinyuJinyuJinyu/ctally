@@ -62,12 +62,45 @@ BY_URGENCY = [State.WAITING, State.WORKING, State.DONE, State.IDLE]
 
 
 @dataclass(frozen=True)
+class Phase:
+    """One phase of a workflow, as far as it has got."""
+    name: str                   # "Verify"
+    started: int                # its agents set off so far
+    done: int                   # and of those, finished
+
+
+@dataclass(frozen=True)
+class Member:
+    """One subagent at work."""
+    what: str                   # its label in a workflow, "verify:auth", or what it was asked to do
+    kind: str = ""              # its type, "Explore", unless one of the general ones
+    phase: str = ""             # its workflow's phase, if it's in one
+
+
+@dataclass(frozen=True)
 class Agents:
     """A session's subagents while they run, its own and a workflow's."""
     running: int
     started: int = 0            # a workflow's agents set off so far
     done: int = 0               # and of those, finished
     detail: str | None = None   # the workflow's phase, or what a lone agent was asked to do
+    phases: tuple[Phase, ...] = ()      # a workflow's phases, in the order they began
+    members: tuple[Member, ...] = ()    # the agents at work, the longest at it first
+
+    def lines(self, limit: int = 8) -> list[str]:
+        """A closer look, in words: each phase of a workflow, how far along, and its agents
+        still at work; or each agent, and what it's doing. No more than `limit` lines."""
+        if self.phases:
+            out = []
+            for phase in self.phases:
+                busy = [m.what for m in self.members if m.phase == phase.name]
+                out.append(f"{phase.name}  {min(phase.done, phase.started)}/{phase.started}"
+                           + (f"  ({', '.join(busy)})" if busy else ""))
+        else:
+            out = [f"{m.kind} · {m.what}" if m.kind and m.kind != m.what else m.what for m in self.members]
+        if len(out) > limit:
+            out = out[:limit - 1] + [f"+{len(out) - limit + 1} more"]
+        return out
 
     @property
     def summary(self) -> str:
@@ -523,6 +556,7 @@ class AgentWatcher:
 
     EVERY = 2   # a workflow's progress, between agents coming and going
     GENERIC = {"", "general-purpose", "workflow-subagent"}
+    MEMBERS = 24    # agents told apart, at most; the rest are only counted
 
     @dataclass
     class Journal:
@@ -531,6 +565,8 @@ class AgentWatcher:
         phase: str | None = None
         started: int = 0
         done: int = 0
+        phases: dict = field(default_factory=dict)      # name -> [started, done], in the order they began
+        labels: dict = field(default_factory=dict)      # agent id -> (its label, its phase)
 
     @dataclass
     class Look:
@@ -590,19 +626,23 @@ class AgentWatcher:
             look.abandoned = bool(listed) and not agents and (folder / ".background").exists()
         if not agents:
             return None
-        types, oldest = {}, float("inf")
+        types, since, oldest = {}, {}, float("inf")
         for agent in agents:
             path = folder / agent
             try:
                 types[agent] = path.read_text(errors="replace").strip()
-                oldest = min(oldest, path.stat().st_mtime)
+                since[agent] = path.stat().st_mtime
+                oldest = min(oldest, since[agent])
             except OSError:
                 types[agent] = ""
         look.descriptions = {k: v for k, v in look.descriptions.items() if k in types}
+        agents = sorted(agents, key=lambda a: (since.get(a, float("inf")), a))      # longest at work first
 
         running, started, done, detail = len(agents), 0, 0, None
         if transcript is None:
             return Agents(running)
+        phases: dict[str, list[int]] = {}
+        labels: dict[str, tuple[str, str]] = {}
 
         if "workflow-subagent" in types.values():
             # The workflows running now: a journal but no final record yet, and written to
@@ -631,10 +671,23 @@ class AgentWatcher:
                 started += read.started
                 done += read.done
                 phase = read.phase or phase
+                for name, (begun, ended) in read.phases.items():
+                    counts = phases.setdefault(name, [0, 0])
+                    counts[0] += begun
+                    counts[1] += ended
+                labels.update(read.labels)
             look.journals = {k: v for k, v in look.journals.items() if k in seen}
             detail = f"{live} workflows" if live > 1 else phase
-        elif len(agents) == 1:
-            agent = agents[0]
+
+        # Each agent at work: its label in a workflow, else what it was asked to do (read once).
+        members = []
+        for agent in agents[:AgentWatcher.MEMBERS]:
+            kind = types.get(agent, "")
+            kind = "" if kind in AgentWatcher.GENERIC else kind
+            if agent in labels:
+                label, in_phase = labels[agent]
+                members.append(Member(label or kind or "agent", kind, in_phase))
+                continue
             if agent not in look.descriptions:
                 description = ""
                 try:
@@ -642,10 +695,13 @@ class AgentWatcher:
                     description = meta.get("description") or ""
                 except (OSError, ValueError, AttributeError):
                     pass
-                look.descriptions[agent] = description
-            kind = types.get(agent, "")
-            detail = look.descriptions[agent] or (None if kind in AgentWatcher.GENERIC else kind)
-        return Agents(running, started, done, detail)
+                look.descriptions[agent] = description if isinstance(description, str) else ""
+            members.append(Member(look.descriptions[agent] or kind or "agent", kind))
+        if len(agents) == 1 and not labels:
+            detail = members[0].what if members and members[0].what != "agent" else None
+        return Agents(running, started, done, detail,
+                      tuple(Phase(name, begun, ended) for name, (begun, ended) in phases.items() if name),
+                      tuple(members))
 
     TAIL = 16 * 1024
 
@@ -683,12 +739,15 @@ class AgentWatcher:
         look.over[agent] = (key, over)
         return over
 
+    AGENT_ID = re.compile(rb'"agentId"\s*:\s*"([^"]+)"')
+
     @staticmethod
     def _read(path: Path, modified: float, size: int, known: Journal | None) -> Journal:
-        """A journal's phase (that of the agent started last), and how many agents have
-        started and ended, read again only when it has grown. Each line is a record whose
-        type comes first; those of agents that ended carry their whole result, so only the
-        started ones are parsed."""
+        """A journal's phase (that of the agent started last), how many agents have started
+        and ended in all and in each phase, and each one's label, read again only when it has
+        grown. Each line is a record whose type comes first; those of agents that ended carry
+        their whole result, so only the started ones are parsed, and of the rest only the
+        agent's id near the start."""
         if known and known.modified == modified and known.size == size:
             return known
         journal = AgentWatcher.Journal(modified, size)
@@ -700,14 +759,23 @@ class AgentWatcher:
             head = line[:32]
             if head.startswith((b'{"type":"result"', b'{"type":"failed"')):
                 journal.done += 1
+                found = AgentWatcher.AGENT_ID.search(line[:400])
+                label = journal.labels.get(found.group(1).decode(errors="replace")) if found else None
+                if label and label[1] in journal.phases:
+                    journal.phases[label[1]][1] += 1
             elif head.startswith(b'{"type":"started"'):
                 journal.started += 1
                 try:
-                    phase = json.loads(line).get("phase")
+                    record = json.loads(line)
                 except ValueError:
-                    phase = None
+                    record = {}
+                phase = record.get("phase") if isinstance(record.get("phase"), str) else ""
                 if phase:
                     journal.phase = phase
+                journal.phases.setdefault(phase, [0, 0])[0] += 1
+                agent, label = record.get("agentId"), record.get("label")
+                if isinstance(agent, str):
+                    journal.labels[agent] = (label if isinstance(label, str) else "", phase)
         return journal
 
 

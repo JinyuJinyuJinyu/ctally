@@ -11,8 +11,8 @@ import pytest
 from conftest import dead_pid, sleeper, wait_for
 
 from ctally import system
-from ctally.sessions import (AgentWatcher, Agents, Ask, Context, Names, State, StateReader, TmuxLocator, ask_from,
-                             context_from, cut_short, stop_in)
+from ctally.sessions import (AgentWatcher, Agents, Ask, Context, Member, Names, Phase, State, StateReader,
+                             TmuxLocator, ask_from, context_from, cut_short, stop_in)
 
 LIVE = os.getpid()
 
@@ -337,6 +337,11 @@ def journal(transcript_path, run: str, phases: list[str], finished: int, final: 
     return path
 
 
+def core(agents: Agents | None) -> tuple | None:
+    """How many, how far along, and the detail: without the closer look (phases, members)."""
+    return None if agents is None else (agents.running, agents.started, agents.done, agents.detail)
+
+
 def test_running_agents_counted_and_dot_files_ignored(dirs):
     state, _ = dirs
     folder = agents_folder(state, "s", {"a1": "general-purpose", "a2": "general-purpose"})
@@ -363,7 +368,7 @@ def test_workflow_phase_and_progress(dirs):
     agents_folder(state, "s", {f"v{i}": "workflow-subagent" for i in range(4)})
     journal(path, "wf_one", ["Review"] * 12 + ["Verify"] * 4, finished=12)
     activity = AgentWatcher(state / ".agents").activity("s", path)
-    assert activity == Agents(4, started=16, done=12, detail="Verify")
+    assert core(activity) == core(Agents(4, started=16, done=12, detail="Verify"))
     assert activity.summary == "4 agents · Verify"
     assert activity.progress == "12/16"
 
@@ -386,7 +391,7 @@ def test_finished_and_stale_runs_are_left_out(dirs):
     journal(path, "wf_done", ["Old"], finished=0, final=True)
     journal(path, "wf_crashed", ["Crashed"], finished=0, mtime=now - 3600)
     activity = AgentWatcher(state / ".agents").activity("s", path)
-    assert activity == Agents(1)
+    assert core(activity) == core(Agents(1))
 
 
 def test_lone_agent_description(dirs):
@@ -414,7 +419,7 @@ def test_several_plain_agents_have_no_detail(dirs):
     state, projects = dirs
     path = transcript(projects, "s", [{"cwd": "/w"}])
     agents_folder(state, "s", {"b1": "Explore", "b2": "Plan"})
-    assert AgentWatcher(state / ".agents").activity("s", path) == Agents(2)
+    assert core(AgentWatcher(state / ".agents").activity("s", path)) == core(Agents(2))
 
 
 def test_agents_follow_the_folder(dirs):
@@ -433,7 +438,7 @@ def test_agents_reach_the_snapshot(dirs):
     write(state, "s", f"working {LIVE} p\n")
     agents_folder(state, "s", {"a1": "Explore"})
     [session] = StateReader(state, projects).poll()
-    assert session.agents == Agents(1, detail="Explore")
+    assert core(session.agents) == core(Agents(1, detail="Explore"))
 
 
 def test_summary_and_progress_strings():
@@ -561,7 +566,7 @@ def test_an_agent_resumed_after_esc_counts_again(dirs):
     assert watcher.activity("s", path) is None
     agent_transcript(path, "a1", [said("Find", T - 9), said(ESC, T), said("go on", T + 5), answered(T + 9)])
     os.utime(folder, (time.time() + 5, time.time() + 5))
-    assert watcher.activity("s", path) == Agents(1, detail="Explore")
+    assert core(watcher.activity("s", path)) == core(Agents(1, detail="Explore"))
 
 
 def stuck(dirs, word: str, records: list, hooked: float, agents: dict | None = None) -> tuple:
@@ -602,7 +607,7 @@ def test_agents_still_at_work_keep_a_stopped_session_working(dirs):
                                   agents={"bg": "Explore"})
     agent_transcript(path, "bg", [said("Find", now - 40), answered(now - 1)])
     [session] = StateReader(state, projects).poll()
-    assert (session.state, session.agents) == (State.WORKING, Agents(1, detail="Explore"))
+    assert (session.state, core(session.agents)) == (State.WORKING, core(Agents(1, detail="Explore")))
 
 
 def test_waiting_only_on_killed_agents_is_done(dirs):
@@ -801,3 +806,52 @@ def test_a_dead_sessions_status_is_pruned(dirs):
     keep_status(state, "fresh", 50)
     StateReader(state, projects).poll()
     assert sorted(os.listdir(state / ".status")) == ["fresh"]
+
+
+# MARK: A closer look at the agents
+
+def test_a_workflow_up_close(dirs):
+    state, projects = dirs
+    path = transcript(projects, "s", [{"cwd": "/w"}])
+    now = time.time()
+    # Twelve agents reviewed and finished; four verifying, the last one set off the longest at it.
+    folder = agents_folder(state, "s", {f"x{i}": "workflow-subagent" for i in (12, 13, 14, 15)}, started=now)
+    os.utime(folder / "x15", (now - 10, now - 10))
+    journal(path, "wf_one", ["Review"] * 12 + ["Verify"] * 4, finished=12)
+    activity = AgentWatcher(state / ".agents").activity("s", path)
+    assert activity.phases == (Phase("Review", 12, 12), Phase("Verify", 4, 0))
+    assert [m.what for m in activity.members] == ["l15", "l12", "l13", "l14"]
+    assert {m.phase for m in activity.members} == {"Verify"}
+    assert activity.lines() == ["Review  12/12", "Verify  0/4  (l15, l12, l13, l14)"]
+
+
+def test_plain_agents_up_close(dirs):
+    state, projects = dirs
+    path = transcript(projects, "s", [{"cwd": "/w"}])
+    now = time.time()
+    folder = agents_folder(state, "s", {"b1": "Explore", "b2": "general-purpose", "b3": "Plan"}, started=now)
+    os.utime(folder / "b3", (now - 60, now - 60))
+    notes = path.with_suffix("") / "subagents"
+    notes.mkdir(parents=True)
+    (notes / "agent-b1.meta.json").write_text(json.dumps({"agentType": "Explore", "description": "Find callers"}))
+    (notes / "agent-b2.meta.json").write_text(json.dumps({"agentType": "general-purpose", "description": "Verify"}))
+    activity = AgentWatcher(state / ".agents").activity("s", path)
+    assert activity.members == (Member("Plan", "Plan"), Member("Find callers", "Explore"), Member("Verify", ""))
+    assert activity.lines() == ["Plan", "Explore · Find callers", "Verify"]
+    assert activity.detail is None and activity.phases == ()
+
+
+def test_stopped_agents_are_left_out_of_the_closer_look(dirs):
+    state, projects = dirs
+    path = transcript(projects, "s", [{"cwd": "/w"}])
+    now = time.time()
+    agents_folder(state, "s", {"live": "Explore", "killed": "Explore"})
+    agent_transcript(path, "killed", [said("Find", now - 40), said(ESC, now - 1)])
+    activity = AgentWatcher(state / ".agents").activity("s", path)
+    assert activity.running == 1 and [m.what for m in activity.members] == ["Explore"]
+
+
+def test_a_closer_look_stops_at_a_limit():
+    agents = Agents(10, members=tuple(Member(f"task {i}") for i in range(10)))
+    assert agents.lines(limit=4) == ["task 0", "task 1", "task 2", "+7 more"]
+    assert Agents(1).lines() == []

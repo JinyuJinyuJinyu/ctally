@@ -139,6 +139,7 @@ class Controller:
         self.view.selected.connect(lambda session, when: focus.focus(session.pid, when))
         self.view.answer_requested.connect(self.show_answers)
         self.view.drag_finished.connect(self.settle_after_drag)
+        self.view.layout_changed.connect(self.fit)
         self.view.menu_requested.connect(self.show_menu)
 
         self.poll_timer = QTimer()
