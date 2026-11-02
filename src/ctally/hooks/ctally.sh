@@ -22,6 +22,11 @@
 # taken in their results. Meanwhile a .background file there says Claude itself is idle, so
 # CTally can tell when those agents have all been stopped (killed agents get no hook).
 #
+# For `ctally stats`, ~/.claude/ctally.d/.history/<date> gets a line, "<Unix time> <session
+# id> <state>", when the state changes, for each prompt (with "prompt" after it), and every
+# few minutes while a state lasts and Claude Code keeps calling, so a session killed without
+# a word leaves no endless stretch behind; "end" when the session ends.
+#
 # Inside tmux, a change of state also redraws tmux's status lines, so CTally's counts
 # there change at once. Silent, and always exits 0, so it never gets in Claude Code's way.
 
@@ -101,6 +106,18 @@ limit_holds() {
   [ "$resets" -eq 0 ] || [ "$resets" -gt "$(date +%s)" ]
 }
 
+# Notes in the history what just happened: the state, and "prompt" for a prompt. Beside it,
+# .<session id> holds when the session's last line was written, and how many calls since.
+history="$dir/.history"
+BEAT=300            # a lasting state is noted again after five minutes,
+CALLS=20            # looked into every twenty calls: the clock costs a process
+log_history() {
+  stamp=${stamp:-$(date '+%s %Y-%m-%d')}
+  mkdir -p "$history" 2>/dev/null
+  printf '%s %s %s\n' "${stamp% *}" "$session" "$1" 2>/dev/null >> "$history/${stamp#* }"
+  printf '%s 0\n' "${stamp% *}" 2>/dev/null > "$history/.$session"
+}
+
 # Keeps what's being asked, whole: a tool and its input, the questions and their options, or
 # the plan. CTally reads it as JSON, which this script can't.
 keep_ask() {
@@ -125,6 +142,8 @@ case "$state" in
   end)
     rm -f "$file" "$ask"
     rm -rf "$agents"
+    [ -f "$history/.$session" ] && log_history end
+    rm -f "$history/.$session"
     redraw_tmux
     exit 0
     ;;
@@ -213,5 +232,32 @@ mkdir -p "$dir" 2>/dev/null
 tmp="$dir/.$session.$$"
 printf '%s %s %s\n' "$state" "${CLAUDE_PID:-$PPID}" "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")" \
   2>/dev/null > "$tmp" && mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+
+# The history: a change, a prompt, a session not in it yet (working when this hook came), or
+# a state that has lasted since the last line about it.
+case "$input" in
+  *'"hook_event_name":"UserPromptSubmit"'* | *'"hook_event_name": "UserPromptSubmit"'*) prompt=" prompt" ;;
+esac
+if [ "${before%% *}" != "$state" ] || [ -n "${prompt:-}" ] || [ ! -f "$history/.$session" ]; then
+  log_history "$state${prompt:-}"
+else
+  last=0 calls=0
+  [ -f "$history/.$session" ] && read -r last calls < "$history/.$session" 2>/dev/null
+  case "$last" in "" | *[!0-9]*) last=0 ;; esac
+  case "$calls" in "" | *[!0-9]*) calls=0 ;; esac
+  calls=$((calls + 1))
+  if [ "$last" -eq 0 ]; then
+    log_history "$state"               # a mark with no time in it: as good as none
+  elif [ "$calls" -ge "$CALLS" ]; then
+    stamp=$(date '+%s %Y-%m-%d')
+    if [ $((${stamp% *} - last)) -ge "$BEAT" ]; then
+      log_history "$state"
+    else
+      printf '%s 0\n' "$last" 2>/dev/null > "$history/.$session"
+    fi
+  else
+    printf '%s %s\n' "$last" "$calls" 2>/dev/null > "$history/.$session"
+  fi
+fi
 [ "${before%% *}" = "$state" ] || redraw_tmux
 exit 0

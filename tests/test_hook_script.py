@@ -46,19 +46,19 @@ def test_unknown_word_writes_nothing(hook):
 
 def test_first_session_id_wins(hook):
     hook("working", {"session_id": "real", "tool_name": "mcp__x", "tool_input": {"session_id": "phantom"}})
-    assert sorted(os.listdir(hook.dir)) == ["real"]
+    assert sorted(os.listdir(hook.dir)) == [".history", "real"]
 
 
 def test_environment_session_id_wins_over_stdin(hook):
     hook("working", payload(), CLAUDE_CODE_SESSION_ID="from-env")
-    assert sorted(os.listdir(hook.dir)) == ["from-env"]
+    assert sorted(os.listdir(hook.dir)) == [".history", "from-env"]
 
 
 def test_missing_or_unsafe_session_id_falls_back_to_default(hook):
     hook("working", {"prompt": "no id"})
     hook("working", {"session_id": "../escape"})
     hook("working", {"session_id": ".hidden"})
-    assert sorted(os.listdir(hook.dir)) == ["default"]
+    assert sorted(os.listdir(hook.dir)) == [".history", "default"]
     assert not (hook.home / ".claude" / "escape").exists()
 
 
@@ -181,8 +181,9 @@ def test_no_temporary_files_left_behind(hook):
         hook(state, payload())
     hook("agent-start", payload(agent_id="a1", agent_type="Explore"))
     hook("agent-stop", payload(agent_id="a1"))
-    leftovers = [name for name in os.listdir(hook.dir) if name not in (SID, ".agents")]
+    leftovers = [name for name in os.listdir(hook.dir) if name not in (SID, ".agents", ".history")]
     assert leftovers == []
+    assert sorted(os.listdir(hook.dir / ".history")) == ["." + SID, time.strftime("%Y-%m-%d")]
 
 
 def test_always_exits_zero_and_silent(hook, tmp_path):
@@ -303,7 +304,7 @@ def test_the_usage_limit_leaves_the_session_limited_and_notes_when_it_resets(hoo
     seen_limits(hook, int(time.time()) - 60, much_later)            # the status line is out of date
     failed(hook)
     assert noted(hook) == f"0 {SESSION_HIT}\n"
-    assert sorted(os.listdir(hook.dir)) == [".limit", ".statusline", SID]
+    assert sorted(os.listdir(hook.dir)) == [".history", ".limit", ".statusline", SID]
 
 
 def test_a_prompt_while_the_limit_holds_stays_limited(hook):
@@ -534,3 +535,58 @@ def test_status_line_keeps_no_context_it_wasnt_given_or_cant_name(tmp_path):
     status = tmp_path / ".claude" / "ctally.d" / ".status"
     assert not status.exists() or os.listdir(status) == []
     assert not (tmp_path / ".claude" / "escape").exists()
+
+
+# MARK: The history, for ctally stats
+
+def history(hook) -> list[list[str]]:
+    """Today's lines, without the time: [session, state, ...]."""
+    path = hook.dir / ".history" / time.strftime("%Y-%m-%d")
+    return [line.split()[1:] for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_history_notes_changes_and_prompts(hook):
+    before = time.time()
+    hook("working", payload(hook_event_name="UserPromptSubmit", prompt="go"))
+    hook("working", payload(hook_event_name="PreToolUse", tool_name="Bash"))      # no change: nothing
+    hook("asking", ASK)
+    hook("working", payload(hook_event_name="PostToolUse", tool_name="Bash"))
+    hook("done", payload(hook_event_name="Stop"))
+    hook("working", payload(hook_event_name="UserPromptSubmit", prompt="again"))
+    hook("working", {"session_id": SID, "hook_event_name": "UserPromptSubmit", "prompt": "queued"})
+    hook("end", payload(hook_event_name="SessionEnd"))
+    assert history(hook) == [[SID, "working", "prompt"], [SID, "waiting"], [SID, "working"], [SID, "done"],
+                             [SID, "working", "prompt"], [SID, "working", "prompt"], [SID, "end"]]
+    stamps = [int(line.split()[0]) for line in (hook.dir / ".history" / time.strftime("%Y-%m-%d")).read_text().splitlines()]
+    assert all(before - 1 <= t <= time.time() + 1 for t in stamps)
+    assert not (hook.dir / ".history" / f".{SID}").exists()          # the session's marker goes with it
+
+
+def test_a_lasting_state_is_noted_again_every_few_minutes(hook):
+    hook("working", payload(hook_event_name="PreToolUse"))
+    marker = hook.dir / ".history" / f".{SID}"
+    assert marker.read_text().split()[1] == "0"
+    for _ in range(5):
+        hook("working", payload(hook_event_name="PreToolUse"))
+    assert marker.read_text().split()[1] == "5" and len(history(hook)) == 1   # counted, not yet looked into
+    # Twenty calls on, five minutes since the last line: noted again.
+    marker.write_text(f"{int(time.time()) - 301} 19\n")
+    hook("working", payload(hook_event_name="PreToolUse"))
+    assert history(hook) == [[SID, "working"], [SID, "working"]]
+    # Twenty calls on, but not five minutes: only the count starts again.
+    marker.write_text(f"{int(time.time()) - 60} 19\n")
+    hook("working", payload(hook_event_name="PreToolUse"))
+    assert len(history(hook)) == 2 and marker.read_text().split()[1] == "0"
+
+
+def test_a_session_already_at_work_when_the_hook_came_is_noted_at_once(hook):
+    (hook.dir).mkdir(parents=True)
+    (hook.dir / SID).write_text(f"working {hook.pid} my project\n")       # the old hook's doing
+    hook("working", payload(hook_event_name="PreToolUse"))
+    assert history(hook) == [[SID, "working"]]
+    hook("working", payload(hook_event_name="PreToolUse"))
+    assert history(hook) == [[SID, "working"]]
+    # A mark with no time in it counts as none.
+    (hook.dir / ".history" / f".{SID}").write_text("0 3\n")
+    hook("working", payload(hook_event_name="PreToolUse"))
+    assert history(hook) == [[SID, "working"], [SID, "working"]]

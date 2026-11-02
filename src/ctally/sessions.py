@@ -1065,6 +1065,8 @@ class StateReader:
                     pass
                 self.cache.pop(name, None)
                 self.first_seen.pop(name, None)
+        from . import history                   # it reads this module
+        history.prune(self.dir / ".history", now)
         for kind in (".agents", ".asks", ".status"):
             folder = self.dir / kind
             try:

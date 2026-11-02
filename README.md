@@ -41,6 +41,8 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **How full each session's context is**: a small gauge on every row and badge fills as the conversation
   grows, turning amber at 75% and red at 90%, before Claude Code compacts it. These are Claude Code's own
   numbers, from the status line; hover for the tokens.
+- **Your week with Claude**: `ctally stats` adds up, day by day, how long Claude worked and how long it
+  waited on you, your prompts, finished turns and limit hits. [More below.](#your-stats)
 - **Built for tmux**: every row shows its pane, a click switches to it, **prefix + J** jumps to the session
   that needs you, and the counts can sit in tmux's status line. [More below.](#built-for-tmux)
 - **Click a row to bring that session's terminal forward**: the exact tmux pane, and on macOS the exact
@@ -135,6 +137,33 @@ Turn the limits off with the switch in Settings, or right-click → Hide Usage L
 too. `ctally setup --no-statusline` leaves the status line out; the limits then refresh only when Claude Code
 refreshes its copy.
 
+## Your stats
+
+`ctally stats` adds up the last week (or `--days 30`) from a small history CTally's hook keeps:
+
+```console
+$ ctally stats
+             working  waiting on you  prompts  turns  sessions  limit hits
+Thu Oct 22    4h 10m             12m       41     38         6           -
+…
+Today         1h 43m              2m        3      3         2           -
+Last 7 days  21h 36m          1h 05m      284    261        31           1
+
+Claude worked 21h 36m in all, with up to 6 sessions at once (Tue 3:40 pm); something was working for 11h 20m.
+You answered what it asked in 48s, and came back to finished turns in 3m (medians).
+History since Oct 22.
+```
+
+- **working** adds up every session's time, so sessions running side by side count twice; the line under
+  the table says how long *something* was working.
+- **waiting on you** is time a session sat on a permission, a question or a plan. Time after a finished
+  turn isn't counted there: that's your turn, not Claude being stuck. How soon you got back to it is the
+  median at the bottom (only within two hours; longer, and you'd moved on).
+- `--json` gives the same, with times in seconds.
+
+The history starts once the hook from 0.3.3 is set up (`ctally setup`, then restart your sessions), and keeps
+90 days.
+
 ## Built for tmux
 
 Running a dozen Claude Code sessions across tmux sessions and split panes is exactly what CTally is for.
@@ -176,6 +205,7 @@ working  api:0.0          4 agents  62%  api                      c27d…
 $ ctally status
 !1 ▶1 ✓1
 $ ctally usage         # your plan's usage limits
+$ ctally stats         # the last week: Claude's time and yours
 $ ctally jump          # inside tmux: go to the session that needs you
 ```
 
@@ -299,6 +329,8 @@ Two pieces, connected by a folder:
    its agents' transcripts: a stop there with nothing after it means the turn is over, and an agent whose
    transcript ends interrupted (or that Claude Code marks `stoppedByUser`) is gone.
    Inside tmux, a change of state also redraws tmux's status lines, so the counts there update at once.
+   For `ctally stats`, each change of state, each prompt, and every five minutes of a lasting one, gets a
+   line in `~/.claude/ctally.d/.history/<date>`: the time, the session id and the state.
 
    **The status line.** `ctally-statusline.sh` saves what Claude Code hands its status line, the latest from
    any session, to `~/.claude/ctally.d/.statusline` whenever it includes the usage limits. Each session hands
@@ -351,8 +383,8 @@ transcript in `~/.claude/projects/`, but only two parts:
 - the first 256 KB, once, for the directory the session started in
 
 While agents run it also reads, beside the transcript, a running workflow's progress journal (for its phases,
-its agents' labels and how many are done) and each running subagent's one-line task description. It never reads your
-conversations otherwise.
+its agents' labels and how many are done) and each running subagent's one-line task description. It never
+reads your conversations otherwise.
 
 While a session waits on you, the hook keeps what it asked (the tool and its input, the questions, or the
 plan) in `~/.claude/ctally.d/.asks/`, and deletes it once that's settled. To answer from CTally, it reads the
@@ -362,6 +394,8 @@ For how full each session's context is, it reads the latest its status line was 
 (which also holds the model, the session's cost so far and its folder; CTally uses only the context numbers).
 For the usage limits it reads what its status line saved, and from `~/.claude.json` only the cached `/usage`
 numbers and your account's id, to check they're yours. It never touches your credentials.
+
+The history behind `ctally stats` holds nothing but times, session ids and states, and is kept for 90 days.
 
 To list sessions the hooks haven't heard from, it reads Claude Code's list of running sessions in
 `~/.claude/sessions/`: each one's id, process, folder, status and start time.

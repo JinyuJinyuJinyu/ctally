@@ -13,6 +13,9 @@
                                 how full its context is, project, id
   ctally usage [--json]         your plan's usage limits, as Claude Code's /usage shows them:
                                 the session, the week, each model's week, and when each resets
+  ctally stats [--days N] [--json]
+                                the last week (or N days), day by day: how long Claude worked and
+                                waited on you, prompts, turns finished, sessions, limits hit
   ctally jump [pane client socket]
                                 switch a tmux client to the session that needs you: waiting first,
                                 then finished, longest-waiting first. Run it again to move on to
@@ -148,6 +151,25 @@ def usage(as_json: bool) -> int:
     return 0
 
 
+def stats(days: int, as_json: bool) -> int:
+    from . import history
+    if not 1 <= days <= history.KEEP_DAYS:
+        print(f"ctally stats: --days goes from 1 to {history.KEEP_DAYS}", file=sys.stderr)
+        return 2
+    history.prune()
+    if history.oldest() is None:
+        print("ctally: no history yet. CTally's hook keeps it from version 0.3.3 on: run `ctally setup` "
+              "again, and restart your Claude Code sessions.", file=sys.stderr)
+        return 1
+    now = time.time()
+    found = history.stats(days, now)
+    if as_json:
+        print(json.dumps(history.as_json(found), indent=1))
+    else:
+        print("\n".join(history.report(found, now)))
+    return 0
+
+
 def list_sessions() -> None:
     contexts = Notes(STATE_DIR / ".status", context_from)
     for session in live_sessions():
@@ -222,6 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("list", help="one line per live session")
     usage_ = commands.add_parser("usage", help="your plan's usage limits")
     usage_.add_argument("--json", action="store_true", help="as JSON, with reset times in Unix time")
+    stats_ = commands.add_parser("stats", help="how long Claude worked, and waited on you, day by day")
+    stats_.add_argument("--days", type=int, default=7, help="how many days back, today included (7)")
+    stats_.add_argument("--json", action="store_true", help="as JSON, times in seconds")
     jump_ = commands.add_parser("jump", help="switch tmux to the session that needs you")
     jump_.add_argument("pane", nargs="?")
     jump_.add_argument("client", nargs="?")
@@ -246,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "usage":
         return usage(args.json)
+    if args.command == "stats":
+        return stats(args.days, args.json)
     if args.command == "jump":
         return jump(args.pane, args.client, args.socket)
     parser.print_help()
