@@ -11,7 +11,7 @@ ctally setup --tmux
 The name comes from the *tally light*, the lamp on a broadcast camera that shows it's live, and from tallying
 up your sessions.
 
-![CTally with one session, three sessions, a list of six with subagents at work and the usage limits, and the list folded](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/overview.png)
+![CTally with one session, three sessions, a list of six with each one's context window, a question waiting to be answered, subagents at work and the usage limits, and the list folded](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/overview.png)
 
 Every session gets a hexagon whose glyph and color say what it's doing:
 
@@ -22,6 +22,9 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 | ⏸ amber | **limit** | stopped by your plan's usage limit; it turns to done when the limit resets |
 | ✓ green | **done** | your turn: the turn finished, and it stays here until your next prompt |
 | • slate | **idle** | nothing running |
+
+And a small gauge beside each one says **how full its context window is**: `62%`, turning amber at 75% and
+red at 90%, so you see a session nearing compaction before it gets there. [More below.](#context-window)
 
 ## Features
 
@@ -38,9 +41,9 @@ Every session gets a hexagon whose glyph and color say what it's doing:
   choices Claude Code shows. [More below.](#answering-from-ctally)
 - **Your plan's usage limits**: the session, the week, and each model's week, as bars with when each
   resets, kept fresh after every reply. [More below.](#usage-limits)
-- **How full each session's context is**: a small gauge on every row and badge fills as the conversation
-  grows, turning amber at 75% and red at 90%, before Claude Code compacts it. These are Claude Code's own
-  numbers, from the status line; hover for the tokens.
+- **How full each session's context window is**: a small gauge on every row and badge fills as the
+  conversation grows, turning amber at 75% and red at 90%, before Claude Code compacts it. These are Claude
+  Code's own numbers. [More below.](#context-window)
 - **Your week with Claude**: `ctally stats` adds up, day by day, how long Claude worked and how long it
   waited on you, your prompts, finished turns and limit hits. [More below.](#your-stats)
 - **Built for tmux**: every row shows its pane, a click switches to it, **prefix + J** jumps to the session
@@ -100,6 +103,26 @@ something`, `Tell Claude what to change`) bring the terminal forward for it. A f
 takes one answer at a time, then its review.
 
 Outside tmux, the menu shows what's asked and takes you to the terminal to answer it.
+
+## Context window
+
+Every session shows how much of its context window it has used: a little pie that fills clockwise, and the
+percentage beside it.
+
+- **In the list** it ends the row's directory line (`webapp:0.0  ◔ 34%`); **on a badge** it sits on the
+  lower-left shoulder.
+- **Colours**: quiet grey while there's room, amber from 75%, red from 90%. Claude Code compacts a
+  conversation when it's nearly full, so an amber or red session is one to wrap up, or to `/compact` yourself
+  at a good moment.
+- **Hover over the session** for the tokens: `Context 62% full: 124k of 200k tokens`. A 1M-token window
+  shows as `of 1M`, and fills that much more slowly.
+- **`ctally list`** has it as a column, between the agents and the project.
+
+The numbers are Claude Code's own: after every reply it hands the status line each session's
+`context_window` (its size, what's in it, the share used), and CTally's status line keeps the latest per
+session in `~/.claude/ctally.d/.status/`. A session shows its gauge from its next reply once that status
+line is in place: after upgrading from 0.3.2 or earlier, run `ctally setup` again (sessions already running
+pick it up without a restart). With `--no-statusline` there's no gauge.
 
 ## Usage limits
 
