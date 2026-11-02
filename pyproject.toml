@@ -10,6 +10,9 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "JinyuJinyuJinyu" }]
+# No upper bound. Qt (PySide6) says for itself which Pythons it's built for on each system: 3.15
+# on macOS 14 and Linux, but only up to 3.14 on macOS 13, say. A cap here can't tell systems
+# apart, and pip would only fall back to an older CTally without the cap.
 requires-python = ">=3.9"
 dependencies = [
     "PySide6-Essentials>=6.5",

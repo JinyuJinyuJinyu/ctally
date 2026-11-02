@@ -154,7 +154,10 @@ $ ctally jump          # inside tmux: go to the session that needs you
 ## Requirements
 
 - macOS 12 or later, or Ubuntu 22.04 or later (other Linux desktops should work too; see [Ubuntu](#ubuntu))
-- Python 3.9 or later and [pipx](https://pipx.pypa.io)
+- Python 3.9 or later and [pipx](https://pipx.pypa.io). Qt comes ready-built for each system, and the newest
+  Python can be ahead of what's built for an older one: macOS 12 runs CTally with Python up to 3.13, macOS 13
+  up to 3.14, and macOS 14 or later, Ubuntu 22.04 or later and Windows up to 3.15. If pipx's own Python is
+  newer than yours takes, name one: `pipx install --python python3.14 ctally`.
 - Claude Code
 
 ## Install
@@ -347,6 +350,9 @@ tmux settings are left as they are. The second removes the command and its Qt.
 
 ## Troubleshooting
 
+- **`pipx install ctally` says "No matching distribution found for PySide6-Essentials".** Your Python is
+  newer than any Qt built for your system (see [Requirements](#requirements)). Install with an older one:
+  `pipx install --python python3.14 ctally`. The same goes for `pipx reinstall` after your default Python moves on.
 - **CTally doesn't change state.** Restart your Claude Code sessions after installing. Then check that
   `~/.claude/ctally.d/` gets a file when you send a prompt.
 - **Clicking a session does nothing.** On macOS, allow Python (which runs CTally) to control Terminal under
@@ -371,7 +377,7 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 ```
 
 Every push runs the tests and pyflakes on GitHub (`.github/workflows/test.yml`), on Ubuntu with Python 3.9 and
-3.14 and on macOS with 3.14.
+3.15 and on macOS with 3.15.
 
 Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR`, `CTALLY_SESSIONS_DIR`, `CTALLY_CONFIG_DIR` and
 `CTALLY_CLAUDE_JSON` to run it against other folders than `~/.claude/ctally.d`, `~/.claude/projects`,

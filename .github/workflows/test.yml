@@ -15,8 +15,8 @@ jobs:
         include:
           # Python 3.9 is built for Ubuntu 24.04 at the latest, so not for whatever ubuntu-latest becomes next.
           - { os: ubuntu-24.04, python: "3.9" }
-          - { os: ubuntu-latest, python: "3.14" }
-          - { os: macos-latest, python: "3.14" }
+          - { os: ubuntu-latest, python: "3.15" }
+          - { os: macos-latest, python: "3.15" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
