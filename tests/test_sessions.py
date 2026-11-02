@@ -11,7 +11,8 @@ import pytest
 from conftest import dead_pid, sleeper, wait_for
 
 from ctally import system
-from ctally.sessions import AgentWatcher, Agents, Names, State, StateReader, TmuxLocator, cut_short, stop_in
+from ctally.sessions import (AgentWatcher, Agents, Ask, Names, State, StateReader, TmuxLocator, ask_from,
+                             cut_short, stop_in)
 
 LIVE = os.getpid()
 
@@ -653,3 +654,89 @@ def test_tmux_locator_outside_tmux(tmp_path):
         assert locator.location("s", child.pid) is None
     finally:
         child.kill()
+
+
+# MARK: What a session asks
+
+def request(tool: str, given: dict, cwd: str = "/work/api") -> dict:
+    return {"session_id": "s", "cwd": cwd, "hook_event_name": "PermissionRequest", "tool_name": tool,
+            "tool_input": given}
+
+
+def test_a_tool_as_claude_code_shows_it():
+    ask = ask_from(request("Bash", {"command": "npm publish --tag next\necho done", "description": "Publish it"}))
+    assert ask == Ask("tool", "Allow Bash(npm publish --tag next)?", "Publish it\nnpm publish --tag next\necho done")
+    assert ask_from(request("Write", {"file_path": "/work/api/src/db.py", "content": "x"})).summary \
+        == "Allow Write(src/db.py)?"
+    home = os.path.expanduser("~")
+    assert ask_from(request("Edit", {"file_path": f"{home}/notes.md"})).summary == "Allow Edit(~/notes.md)?"
+    assert ask_from(request("Glob", {"pattern": "**/*.py"})).summary == "Allow Glob(**/*.py)?"
+    assert ask_from(request("mcp__github__create_issue", {"title": "Flaky", "body": "b"})).summary \
+        == "Allow github · create_issue(Flaky)?"
+    assert ask_from(request("Mystery", {})).summary == "Allow Mystery?"
+
+
+def test_questions_and_plans():
+    questions = {"questions": [
+        {"question": "Which colour do you prefer?", "header": "Colour", "multiSelect": False,
+         "options": [{"label": "Red", "description": "Red"}, {"label": "Green", "description": "Green"}]},
+        {"question": "Which size?", "options": [{"label": "Small"}, {"label": "Large"}]}]}
+    ask = ask_from(request("AskUserQuestion", questions))
+    assert (ask.kind, ask.summary, ask.options) == ("question", "Which colour do you prefer? (+1 more)", ("Red", "Green"))
+    assert ask.detail == "Which colour do you prefer?\n    Red · Green\nWhich size?\n    Small · Large"
+    plan = ask_from(request("ExitPlanMode", {"plan": "# Plan: dark mode\n\n1. Add a **toggle**\n2. Ship `it`\n"}))
+    assert (plan.kind, plan.summary) == ("plan", "Approve the plan: Plan: dark mode")
+    assert plan.detail.splitlines() == ["Plan: dark mode", "1. Add a toggle", "2. Ship it"]
+
+
+def test_nothing_known_to_ask():
+    assert ask_from({"hook_event_name": "PermissionRequest"}) is None
+    assert ask_from(request("AskUserQuestion", {"questions": []})) is None
+    assert ask_from(request("AskUserQuestion", {"questions": "junk"})) is None
+
+
+def keep_ask(state, sid: str, tool: str = "Bash", given: dict | None = None) -> None:
+    (state / ".asks").mkdir(exist_ok=True)
+    (state / ".asks" / sid).write_text(json.dumps(request(tool, given or {"command": "make deploy"})))
+
+
+def test_a_waiting_session_says_what_it_asks(dirs):
+    state, projects = dirs
+    write(state, "s", f"waiting {LIVE} api\n")
+    keep_ask(state, "s")
+    reader = StateReader(state, projects)
+    [session] = reader.poll()
+    assert session.ask.summary == "Allow Bash(make deploy)?"
+    keep_ask(state, "s", given={"command": "make test"})
+    os.utime(state / ".asks" / "s", (time.time() + 5, time.time() + 5))    # a coarse clock can't hide it
+    assert reader.poll()[0].ask.summary == "Allow Bash(make test)?"
+    (state / ".asks" / "s").unlink()
+    assert reader.poll()[0].ask is None
+
+
+def test_only_while_it_waits_on_me(dirs):
+    state, projects = dirs
+    for sid, word in (("w", "working"), ("d", "done"), ("l", "limited")):
+        write(state, sid, f"{word} {LIVE} api\n")
+        keep_ask(state, sid)
+    (state / ".limit").write_text("0 You've hit your session limit\n")
+    assert all(s.ask is None for s in StateReader(state, projects).poll())
+
+
+def test_not_once_i_stopped_it(dirs):
+    state, projects = dirs
+    write(state, "s", f"waiting {LIVE} api\n", mtime=time.time() - 30)
+    keep_ask(state, "s")
+    transcript(projects, "s", [{"cwd": "/w"}, said(ESC_IN_TOOL, time.time())])
+    [session] = StateReader(state, projects).poll()
+    assert session.state is State.DONE and session.ask is None
+
+
+def test_a_dead_sessions_note_is_pruned(dirs):
+    state, projects = dirs
+    keep_ask(state, "gone")
+    old = time.time() - StateReader.STALE_AFTER - 60
+    os.utime(state / ".asks" / "gone", (old, old))
+    keep_ask(state, "fresh")
+    StateReader(state, projects).poll()
+    assert sorted(os.listdir(state / ".asks")) == ["fresh"]

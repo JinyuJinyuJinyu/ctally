@@ -11,9 +11,14 @@ when a new session starts; the chevron on the bar folds the list away to just th
 More rows than fit (sixteen, or what the screen has room for) scroll, with the wheel or the
 scroll bar beside them, which marks where the sessions waiting on me are.
 
+A session waiting on me says what for, a line under its row (or on its caption): the tool to
+allow, the question, the plan. Clicking that asks for its answers, as does a right-click on
+any session waiting on me; the controller reads them off the session's screen.
+
 A press that moves drags the indicator; one that doesn't is a click, which asks for that
 session's terminal. The view moves its own window while dragging and says when it's
-dropped; everything else about the window is the controller's business.
+dropped; everything else about the window is the controller's business. Hovering a session
+spells out all there is to know about it.
 
 Your plan's usage limits ride along when known: every one of them, a bar each, between the
 list's rows and its count bar; the session and the week as two small meters in the folded bar
@@ -150,6 +155,7 @@ class Row(NamedTuple):
     path: str           # directory, with ~ for home
     tmux: str           # "report:0.2", or empty outside tmux
     agents: str         # "4 agents · Verify", or empty with none running
+    ask: str = ""       # what it waits on me for: "Allow Bash(npm publish)?", or empty
 
 
 class Meter(NamedTuple):
@@ -176,8 +182,9 @@ class TallyView(QWidget):
 
     fold_requested = Signal(bool)       # the chevron was clicked: the folded state wanted
     selected = Signal(object, object)   # a row or badge was clicked: its Session, and when (focus.focus)
+    answer_requested = Signal(object, QPoint)   # what a session asks was clicked: its Session, and where
     drag_finished = Signal()            # dropped after a drag
-    menu_requested = Signal(QPoint)     # a right-click, in global coordinates
+    menu_requested = Signal(QPoint, object)     # a right-click, in global coordinates, and the Session there
 
     SINGLE = Chip(120, 120, 44, 66, 18, False)
     SEVERAL = Chip(124, 140, 33, 52, 13, True)
@@ -188,6 +195,8 @@ class TallyView(QWidget):
     PADDING = 8
     ROW_HEIGHT = 38
     AGENT_LINE = 14         # added under a row while its agents run
+    ASK_LINE = 14           # added under a row waiting on me, saying what for
+    CHIP_PAD = 7            # either side of the word in the "answer" chip
     PROGRESS_WIDTH = 54     # a workflow's progress bar, at the end of that line
     HEADER_HEIGHT = 26      # the count bar, which is all a folded list shows
     HEADER_GAP = 6          # between the count bar and the rows
@@ -424,12 +433,12 @@ class TallyView(QWidget):
                           title=titles.get(s.id, ""),
                           path=("~" + s.path[len(home):]) if s.path and (s.path + "/").startswith(home + "/") else (s.path or ""),
                           tmux=s.tmux or "",
-                          agents=s.agents.summary if s.agents else "")
+                          agents=s.agents.summary if s.agents else "",
+                          ask=s.ask.summary if s.ask else "")
                       for s in self._sessions]
         self._row_offsets = [0.0]
         for row in self._rows:
-            self._row_offsets.append(self._row_offsets[-1] + TallyView.ROW_HEIGHT
-                                     + (TallyView.AGENT_LINE if row.agents else 0))
+            self._row_offsets.append(self._row_offsets[-1] + self._row_height(row))
 
         # Wide enough for the longest name or path, within reason; longer ones get shortened.
         f = self.fonts
@@ -456,6 +465,26 @@ class TallyView(QWidget):
                         if (n := sum(1 for s in self._sessions if s.state is state))]
         items = sum(self._count_item_width(n) for _, n in self._counts)
         self._bar_width = math.ceil(2 * TallyView.PADDING + 4 + items + TallyView.FOLD_SIZE + 8)
+
+    @staticmethod
+    def _row_height(row: Row) -> float:
+        """The session's line pair, then a line for what it asks me, then one for its agents."""
+        return (TallyView.ROW_HEIGHT + (TallyView.ASK_LINE if row.ask else 0)
+                + (TallyView.AGENT_LINE if row.agents else 0))
+
+    @staticmethod
+    def _lines(rect: QRectF, row: Row) -> dict[str, QRectF]:
+        """Where the lines under a row's name and directory go, by what they say: "ask", then
+        "agents". Edge to edge across the row, as places to click; the text starts in line with
+        the name."""
+        y = rect.y() + TallyView.ROW_HEIGHT - 1
+        lines = {}
+        if row.ask:
+            lines["ask"] = QRectF(rect.x(), y, rect.width(), TallyView.ASK_LINE)
+            y += TallyView.ASK_LINE
+        if row.agents:
+            lines["agents"] = QRectF(rect.x(), y, rect.width(), TallyView.AGENT_LINE)
+        return lines
 
     def _count_item_width(self, count: int) -> float:
         """A count in the bar: small mark, then the number, then a gap before the next."""
@@ -624,6 +653,22 @@ class TallyView(QWidget):
             return QRectF((self.width() - width) / 2, top, width, TallyView.PLATE_HEIGHT)
         return None
 
+    @staticmethod
+    def _caption_rect(rect: QRectF) -> QRectF:
+        """A captioned badge's card, under its hexagon."""
+        return QRectF(rect.x() + 6, rect.height() - 8 - 38, rect.width() - 12, 38)
+
+    def _asks_at(self, index: int, point: QPointF) -> bool:
+        """Whether a point is on what a session asks me: its row's line for it, or the caption
+        that says it under its badge."""
+        row = self._rows[index]
+        if not row.ask:
+            return False
+        if self.is_list:
+            line = self._lines(self._row_rect(index), row).get("ask")
+            return line is not None and line.contains(point)
+        return self.chip.captioned and self._caption_rect(self._item_rect(index)).contains(point)
+
     def _item_at(self, point: QPointF) -> int | None:
         """The row or badge under a point, if it stands for a session."""
         if not self._rows or (self.is_list and self._folded):
@@ -721,12 +766,18 @@ class TallyView(QWidget):
             self.fold_requested.emit(not self._folded)
             return
         index = self._item_at(point)
-        if index is not None:
-            self.selected.emit(self._rows[index].session, event.timestamp())
+        if index is None:
+            return
+        session = self._rows[index].session
+        if self._asks_at(index, point):
+            self.answer_requested.emit(session, event.globalPosition().toPoint())
+        else:
+            self.selected.emit(session, event.timestamp())
 
     def contextMenuEvent(self, event) -> None:
         self._press = self._grab = None
-        self.menu_requested.emit(event.globalPos())
+        index = self._item_at(QPointF(event.pos()))
+        self.menu_requested.emit(event.globalPos(), self._rows[index].session if index is not None else None)
 
     def leaveEvent(self, event) -> None:
         self._set_hovered(None)
@@ -735,17 +786,41 @@ class TallyView(QWidget):
 
     def event(self, event) -> bool:
         """Hovering over the usage limits spells them out: every limit, its reset, and how old
-        the numbers are."""
+        the numbers are. Hovering a session, everything about it."""
         if event.type() == QEvent.ToolTip:
+            point = QPointF(event.pos())
             area = self._usage_rect()
-            if self._usage is not None and area is not None and area.contains(QPointF(event.pos())):
+            index = self._item_at(point)
+            if self._usage is not None and area is not None and area.contains(point):
                 QToolTip.showText(event.globalPos(), "\n".join(describe(self._usage, time.time())), self,
                                   area.toAlignedRect())
+            elif index is not None:
+                QToolTip.showText(event.globalPos(), self.describe_row(self._rows[index]), self,
+                                  self._item_rect(index).toAlignedRect())
             else:
                 QToolTip.hideText()
                 event.ignore()
             return True
         return super().event(event)
+
+    @staticmethod
+    def describe_row(row: Row) -> str:
+        """A session in full, for hovering: its name and state, where it is, and what it asks."""
+        session = row.session
+        word = "stopped by the usage limit" if session.limited else session.state.value
+        lines = [f"{row.title or 'Claude'}: {word}"]
+        where = " · ".join(part for part in (row.path, row.tmux and f"tmux {row.tmux}") if part)
+        if where:
+            lines.append(where)
+        if session.ask:
+            lines += ["", session.ask.summary]
+            lines += [line for line in session.ask.detail.splitlines() if line.strip() and line != session.ask.summary]
+            lines.append("Click the amber line to answer from here." if row.tmux
+                         else "Click the session to answer in its terminal.")
+        if session.agents:
+            progress = session.agents.progress
+            lines += ["", row.agents + (f" ({progress} done)" if progress else "")]
+        return "\n".join(lines)
 
     # MARK: Motion
 
@@ -990,8 +1065,8 @@ class TallyView(QWidget):
 
     def _draw_caption(self, painter: QPainter, row: Row, rect: QRectF, highlighted: bool) -> None:
         """Which session this badge is: its name over its directory, on a card of their own so
-        they stay legible on any wallpaper."""
-        card = QRectF(rect.x() + 6, rect.height() - 8 - 38, rect.width() - 12, 38)
+        they stay legible on any wallpaper. Waiting on me, what for, in place of the directory."""
+        card = self._caption_rect(rect)
         painter.setPen(Qt.NoPen)
         painter.setBrush(white(0.2 if highlighted else 0.04, 0.55))
         painter.drawRoundedRect(card, 8, 8)
@@ -999,10 +1074,13 @@ class TallyView(QWidget):
         half = inner.height() / 2
         draw_text(painter, row.title, QRectF(inner.x(), inner.y(), inner.width(), half),
                   self.fonts.caption_title, white(0.95, 1), Qt.AlignHCenter)
+        lower = QRectF(inner.x(), inner.y() + half, inner.width(), half)
+        if row.ask:
+            draw_text(painter, row.ask, lower, self.fonts.caption_path, ACCENT[State.WAITING], Qt.AlignHCenter)
+            return
         # In tmux, where to find it there; otherwise where it runs.
         detail = row.path if not row.tmux else f"{row.tmux} · {row.path.rstrip('/').rsplit('/', 1)[-1]}"
-        draw_text(painter, detail, QRectF(inner.x(), inner.y() + half, inner.width(), half),
-                  self.fonts.caption_path, white(0.95, 0.6), Qt.AlignHCenter, Qt.ElideMiddle)
+        draw_text(painter, detail, lower, self.fonts.caption_path, white(0.95, 0.6), Qt.AlignHCenter, Qt.ElideMiddle)
 
     # The list
 
@@ -1140,8 +1218,14 @@ class TallyView(QWidget):
         if not self._needs(QRectF(left, rect.y(), width, rect.height())):
             return
 
-        if row.agents:
-            line = QRectF(left, rect.bottom() - 1 - TallyView.AGENT_LINE, width, TallyView.AGENT_LINE)
+        lines = self._lines(rect, row)
+        if "ask" in lines:
+            line = lines["ask"].adjusted(TallyView.TEXT_X, 0, 0, 0)
+            if row.tmux:            # in tmux, it can be answered from here
+                line.setWidth(line.width() - self._draw_answer_chip(painter, line.right(), line.center().y()) - 6)
+            draw_text(painter, row.ask, line, self.fonts.agent, ACCENT[State.WAITING])
+        if "agents" in lines:
+            line = lines["agents"].adjusted(TallyView.TEXT_X, 0, 0, 0)
             agents = row.session.agents
             if agents and agents.progress:
                 line.setWidth(line.width() - self._draw_progress(painter, agents.progress, agents.done,
@@ -1167,6 +1251,19 @@ class TallyView(QWidget):
                       self.fonts.tmux, white(0.95, 0.5), Qt.AlignRight)
             path_line.setWidth(path_line.width() - tmux_width - 10)
         draw_text(painter, row.path, path_line, self.fonts.path, white(0.95, 0.6), elide=Qt.ElideMiddle)
+
+    def _draw_answer_chip(self, painter: QPainter, right: float, mid_y: float) -> float:
+        """At the end of the line saying what a session asks: where to click to answer it.
+        Returns the width it took."""
+        text = "answer"
+        width = measure(text, self.fonts.tag) + 2 * TallyView.CHIP_PAD
+        chip = QRectF(right - width, mid_y - 6.5, width, 13)
+        accent = ACCENT[State.WAITING]
+        painter.setPen(QPen(faded(accent, 0.55), 1))
+        painter.setBrush(faded(accent, 0.12))
+        painter.drawRoundedRect(chip.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+        draw_text(painter, text, chip, self.fonts.tag, accent, Qt.AlignHCenter)
+        return width
 
     def _draw_progress(self, painter: QPainter, label: str, done: int, started: int,
                        right: float, mid_y: float) -> float:

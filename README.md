@@ -33,6 +33,9 @@ Every session gets a hexagon whose glyph and color say what it's doing:
 - **Sees subagents and workflows**: while a session's agents run, its row says how many and what they're up
   to (`4 agents · Verify`), with a progress bar for a workflow, and its badge carries the count.
   [More below.](#subagents-and-workflows)
+- **Answer without switching**: a session waiting on you says what for, a tool to allow
+  (`Allow Bash(npm publish)?`), a question or a plan, and in tmux you answer it from CTally with the
+  choices Claude Code shows. [More below.](#answering-from-ctally)
 - **Your plan's usage limits**: the session, the week, and each model's week, as bars with when each
   resets, kept fresh after every reply. [More below.](#usage-limits)
 - **Built for tmux**: every row shows its pane, a click switches to it, **prefix + J** jumps to the session
@@ -70,6 +73,25 @@ When a session hands work to subagents, or runs a whole workflow of them, CTally
 
 `ctally list` shows the count too. This needs the subagent hooks that `ctally setup` adds; if you set up
 CTally before they existed, run `ctally setup` again and restart your sessions.
+
+## Answering from CTally
+
+A session waiting on you says what for, on a line under its row (or on its caption, among the badges):
+
+- a tool to allow, the way Claude Code shows it: `Allow Bash(npm publish)?`, `Allow Write(src/db.py)?`
+- a question Claude asks you: `Which colour do you prefer?`
+- a plan to approve: `Approve the plan: Add a dark mode toggle`
+
+Hover over the session for more: the whole command, every question and its options, the plan's first lines.
+
+**In tmux you can answer it from CTally.** Click that line, or right-click the session, and pick from the
+choices Claude Code is showing: `1. Yes`, `2. Yes, and don't ask again…`, `3. No`. CTally reads them off the
+session's tmux pane, just as you'd see them, and types your pick there, after checking the same choices are
+still on screen, so a key never lands anywhere else. Choices that leave you something to type (`Type
+something`, `Tell Claude what to change`) bring the terminal forward for it. A form of several questions
+takes one answer at a time, then its review.
+
+Outside tmux, the menu shows what's asked and takes you to the terminal to answer it.
 
 ## Usage limits
 
@@ -222,6 +244,7 @@ ctally setup --tmux
 |---|---|
 | Move it | Drag it anywhere. It remembers the spot and grows left from there, and away from the nearer screen edge: up from the bottom half of the screen, down from the top half, where the list unfolds downward. |
 | Go to a session | Click its row (or its badge). |
+| Answer a session waiting on you | Click the amber line saying what it asks, or right-click the session, and pick a choice. In tmux. |
 | Jump to the session that needs you | In tmux, press prefix + J (set up by `ctally setup --tmux`). Again for the next one. |
 | Fold or unfold the list | Click the chevron on the count bar, or right-click → Fold List. |
 | Hide or show it | Use the hexagon in the menu bar (top bar on Ubuntu), or right-click → Hide CTally. |
@@ -252,7 +275,7 @@ Two pieces, connected by a folder:
    | `UserPromptSubmit` | `working` |
    | `PreToolUse` | `working` (a tool is about to run) |
    | `PostToolUse` / `PostToolUseFailure` | `working` (back to work after a permission prompt) |
-   | `PermissionRequest` | `waiting`, the moment a permission, a question or a plan to approve is on screen |
+   | `PermissionRequest` | `waiting`, the moment a permission, a question or a plan to approve is on screen; what's asked goes in `~/.claude/ctally.d/.asks/<session id>` until it's settled |
    | `Stop` | `done`, or still `working` if subagents or a workflow run on in the background |
    | `StopFailure` | `limited` when the usage limit stopped the turn; `waiting` for a login or billing problem; else `done` |
    | `Notification` | `waiting` (a permission prompt still open); idle input after a turn that never ended, as Esc leaves it, means `done` |
@@ -322,6 +345,10 @@ transcript in `~/.claude/projects/`, but only two parts:
 While agents run it also reads, beside the transcript, a running workflow's progress journal (for its phase
 and how many agents are done) and a lone subagent's one-line task description. It never reads your
 conversations otherwise.
+
+While a session waits on you, the hook keeps what it asked (the tool and its input, the questions, or the
+plan) in `~/.claude/ctally.d/.asks/`, and deletes it once that's settled. To answer from CTally, it reads the
+screen of that session's tmux pane when you open the menu, and types only the digit you pick.
 
 For the usage limits it reads what its status line saved, and from `~/.claude.json` only the cached `/usage`
 numbers and your account's id, to check they're yours. It never touches your credentials.

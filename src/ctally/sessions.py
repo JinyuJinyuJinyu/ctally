@@ -82,6 +82,16 @@ class Agents:
 
 
 @dataclass(frozen=True)
+class Ask:
+    """What a session waiting on me asks, as its PermissionRequest hook heard it: a tool to
+    allow, questions to answer, or a plan to approve."""
+    kind: str                       # "tool", "question" or "plan"
+    summary: str                    # one line: "Allow Bash(npm publish)?", "Which colour do you prefer?"
+    detail: str = ""                # more of it, for hovering
+    options: tuple[str, ...] = ()   # a question's choices, as Claude put them
+
+
+@dataclass(frozen=True)
 class Session:
     """One session as the indicator needs to see it."""
     id: str
@@ -93,6 +103,7 @@ class Session:
     tmux: str | None = None         # where it sits in tmux, "report:0.2", if it runs there
     agents: Agents | None = None    # its subagents, while any run
     limited: bool = False           # waiting on the plan's usage limit, not on me
+    ask: Ask | None = None          # what it's waiting on me for, when it's known
 
 
 # MARK: Stopping by hand
@@ -169,6 +180,111 @@ def cut_short(tail: bytes) -> bool:
         if kind == "user" and not record.get("isMeta"):
             return any(text.startswith(INTERRUPTED) for text in _texts(record))
     return False
+
+
+# MARK: What a session asks
+
+def _line(text, limit: int = 160, markdown: bool = False) -> str:
+    """The first line with anything on it, shortened past a limit; from prose, without
+    Markdown's marks."""
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if markdown:
+            line = line.lstrip("#>*-+• ").replace("**", "").replace("`", "").strip()
+        if line:
+            return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
+    return ""
+
+
+def _place(path: str, cwd: str) -> str:
+    """A file the way Claude Code names it: inside the session's folder, from there."""
+    if cwd and path.startswith(cwd.rstrip("/") + "/"):
+        return path[len(cwd.rstrip("/")) + 1:]
+    home = str(Path.home())
+    return "~" + path[len(home):] if path.startswith(home + "/") else path
+
+
+# The input that says best what each tool is about to do.
+ARGUMENT = {"Bash": "command", "Glob": "pattern", "Grep": "pattern", "WebFetch": "url", "WebSearch": "query",
+            "Task": "description", "Agent": "description"}
+PATHS = ("file_path", "notebook_path", "path")
+
+
+def ask_from(record: dict) -> Ask | None:
+    """What a PermissionRequest is about, in words: the tool and what it's given, as Claude
+    Code shows it ("Bash(npm publish)"); the first question; or the plan's first line."""
+    tool = record.get("tool_name")
+    given = record.get("tool_input")
+    if not isinstance(tool, str) or not tool:
+        return None
+    given = given if isinstance(given, dict) else {}
+    cwd = record.get("cwd") if isinstance(record.get("cwd"), str) else ""
+
+    if tool == "AskUserQuestion":
+        questions = [q for q in given.get("questions") or [] if isinstance(q, dict) and q.get("question")]
+        if not questions:
+            return None
+        lines = []
+        for question in questions:
+            labels = [str(o["label"]) for o in question.get("options") or [] if isinstance(o, dict) and o.get("label")]
+            lines.append(_line(question["question"], markdown=True) + ("\n    " + " · ".join(labels) if labels else ""))
+        first = questions[0]
+        more = f" (+{len(questions) - 1} more)" if len(questions) > 1 else ""
+        options = tuple(str(o["label"]) for o in first.get("options") or [] if isinstance(o, dict) and o.get("label"))
+        return Ask("question", _line(first["question"], markdown=True) + more, "\n".join(lines), options)
+
+    if tool == "ExitPlanMode":
+        plan = str(given.get("plan") or "")
+        lines = [line for line in (_line(text, 100, markdown=True) for text in plan.splitlines()) if line]
+        return Ask("plan", "Approve the plan: " + (lines[0] if lines else "…"), "\n".join(lines[:8]))
+
+    name = tool
+    if tool.startswith("mcp__") and tool.count("__") >= 2:
+        _, server, name = tool.split("__", 2)
+        name = f"{server} · {name}"
+    key = ARGUMENT.get(tool)
+    value = given.get(key) if key else next((given[k] for k in PATHS if isinstance(given.get(k), str)), None)
+    if not isinstance(value, str):
+        value = next((v for v in given.values() if isinstance(v, str) and v.strip()), "")
+    if key is None and any(isinstance(given.get(k), str) for k in PATHS):
+        value = _place(value, cwd)
+    argument = _line(value, 120)
+    detail = "\n".join(line for line in str(value).splitlines()[:8] if line.strip())
+    description = given.get("description") if tool == "Bash" else None
+    if isinstance(description, str) and description.strip():
+        detail = f"{_line(description)}\n{detail}"
+    return Ask("tool", f"Allow {name}({argument})?" if argument else f"Allow {name}?", detail)
+
+
+class AskReader:
+    """What each waiting session asks, as the hook keeps it in ~/.claude/ctally.d/.asks/<session
+    id>: the whole PermissionRequest. Each is read again only when it changes."""
+
+    def __init__(self, directory: Path):
+        self.dir = directory
+        self.cache: dict[str, tuple] = {}       # id -> ((modified, size), Ask or None)
+
+    def ask(self, sid: str) -> Ask | None:
+        path = self.dir / sid
+        try:
+            stat = path.stat()
+        except OSError:
+            self.cache.pop(sid, None)
+            return None
+        key = (stat.st_mtime, stat.st_size)
+        known = self.cache.get(sid)
+        if known and known[0] == key:
+            return known[1]
+        try:
+            record = json.loads(path.read_bytes())
+        except (OSError, ValueError):
+            record = None
+        found = ask_from(record) if isinstance(record, dict) else None
+        self.cache[sid] = (key, found)
+        return found
+
+    def forget(self, keep: set[str]) -> None:
+        self.cache = {k: v for k, v in self.cache.items() if k in keep}
 
 
 # MARK: Session names
@@ -694,6 +810,7 @@ class StateReader:
         self.names = Names(projects)
         self.locator = TmuxLocator()
         self.watcher = AgentWatcher(directory / ".agents")
+        self.asks = AskReader(directory / ".asks")
         self.registry = Registry(registry)
         self.cache: dict[str, StateReader.Entry] = {}
         self.unheard: dict[str, Running] = {}   # sessions only Claude Code's list knows of
@@ -743,6 +860,7 @@ class StateReader:
         self.names.forget(keep)
         self.locator.forget(keep)
         self.watcher.forget(keep)
+        self.asks.forget(keep)
 
         # Oldest session first, so rows never shuffle under me.
         def age(name: str) -> tuple:
@@ -765,11 +883,13 @@ class StateReader:
             state, limited = State.DONE, False      # the limit is over; the session just sits
         if busy and stopped_by_hand(self.names, self.watcher, name, entry.modified):
             state = State.DONE
+        # What it asked counts only while it's still waiting on me for it.
+        ask = self.asks.ask(name) if state is State.WAITING and not limited else None
         return Session(id=name, state=state, label=entry.label, pid=entry.pid,
                        title=title, path=path,
                        tmux=self.locator.location(name, entry.pid),
                        agents=self.watcher.activity(name, self.names.transcript(name)),
-                       limited=limited)
+                       limited=limited, ask=ask)
 
     def _listed(self, running: Running) -> Session:
         """A session only Claude Code's list knows of, in the state it gives, named after the
@@ -797,7 +917,7 @@ class StateReader:
 
     def _prune(self) -> None:
         """Sessions killed without a SessionEnd hook leave their file behind, and any
-        agents' folder."""
+        agents' folder or note of what they asked."""
         now = time.time()
         if now - self.last_prune < 60:
             return
@@ -810,19 +930,23 @@ class StateReader:
                     pass
                 self.cache.pop(name, None)
                 self.first_seen.pop(name, None)
-        agents = self.dir / ".agents"
-        try:
-            folders = os.listdir(agents)
-        except OSError:
-            return
-        for name in folders:
-            if name in self.cache:
-                continue
-            folder = agents / name
+        for kind in (".agents", ".asks"):
+            folder = self.dir / kind
             try:
-                if now - folder.stat().st_mtime > StateReader.STALE_AFTER:
-                    for item in folder.iterdir():
-                        item.unlink()
-                    folder.rmdir()
+                names = os.listdir(folder)
             except OSError:
-                pass
+                continue
+            for name in names:
+                if name in self.cache:
+                    continue
+                path = folder / name
+                try:
+                    if now - path.stat().st_mtime > StateReader.STALE_AFTER:
+                        if path.is_dir():
+                            for item in path.iterdir():
+                                item.unlink()
+                            path.rmdir()
+                        else:
+                            path.unlink()
+                except OSError:
+                    pass

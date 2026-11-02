@@ -5,6 +5,9 @@ state files CTally's hooks write.
 Switch it off and on from the tray icon, the settings window, or the indicator's right-click
 menu. Off is remembered, and while off the app sits dormant: only the tray icon stays, and no
 timers run. The tray icon's menu also lists your plan's usage limits, whenever they're known.
+
+A session waiting on me can be answered from a menu of the choices its tmux pane shows: see
+answer.py.
 """
 from __future__ import annotations
 
@@ -18,8 +21,8 @@ from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QPai
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from .. import focus, prefs, system
-from ..sessions import StateReader
+from .. import answer, focus, prefs, system
+from ..sessions import State, StateReader
 from ..usage import UsageReader, describe
 from . import mac
 from .settings import OPACITY_RANGE, SettingsWindow, app_icon, hexagon
@@ -134,6 +137,7 @@ class Controller:
         self.view.setWindowOpacity(self.opacity)
         self.view.fold_requested.connect(self.set_folded)
         self.view.selected.connect(lambda session, when: focus.focus(session.pid, when))
+        self.view.answer_requested.connect(self.show_answers)
         self.view.drag_finished.connect(self.settle_after_drag)
         self.view.menu_requested.connect(self.show_menu)
 
@@ -332,9 +336,13 @@ class Controller:
         else:
             self.show_settings()
 
-    def show_menu(self, at: QPoint) -> None:
-        """The indicator's right-click menu. Folding only means something while the list shows."""
+    def show_menu(self, at: QPoint, session=None) -> None:
+        """The indicator's right-click menu. Folding only means something while the list shows.
+        On a session waiting on me, it starts with the answers."""
         menu = QMenu()
+        if session is not None and session.state is State.WAITING and not session.limited:
+            self._add_answers(menu, session)
+            menu.addSeparator()
         hide = menu.addAction("Hide CTally")
         hide.setToolTip("Bring it back from the hexagon icon in the " + ("menu bar." if system.MAC else "top bar."))
         hide.triggered.connect(lambda: self.set_enabled(False))
@@ -347,6 +355,38 @@ class Controller:
         menu.addSeparator()
         menu.addAction("Quit CTally").triggered.connect(self.app.quit)
         menu.exec(at)
+
+    # MARK: Answering
+
+    def show_answers(self, session, at: QPoint) -> None:
+        """What a session asks was clicked: its choices, and the way to its terminal."""
+        menu = QMenu()
+        if self._add_answers(menu, session):
+            menu.addSeparator()
+            menu.addAction("Go to Terminal").triggered.connect(lambda: focus.focus(session.pid))
+        menu.exec(at)
+
+    def _add_answers(self, menu: QMenu, session) -> bool:
+        """What a session waiting on me asks, then the choices its tmux pane shows, which answer
+        it there. Outside tmux, or with no choices to be read on its screen, what's known of it,
+        and the way to its terminal instead. Says whether it found the choices."""
+        target = system.tmux_pane(session.pid) if session.pid > 0 else None
+        asked = answer.read(target) if target else None
+        ask = session.ask
+        # The tool or plan as asked says more than "Do you want to proceed?"; for questions, the
+        # screen says which one is up now, or that the answers are ready to send.
+        title = (ask.summary if ask and ask.kind != "question" else None) or (asked and asked.question) \
+            or (ask.summary if ask else "Waiting on you")
+        menu.addAction(_menu_text(title)).setEnabled(False)
+        if asked is not None:
+            for choice in asked.choices:
+                item = menu.addAction(_menu_text(f"{choice.number}. {choice.label}"))
+                item.triggered.connect(lambda _=False, c=choice: answer.answer(session.pid, target, asked, c))
+            return True
+        for option in ask.options if ask else ():
+            menu.addAction(_menu_text("· " + option)).setEnabled(False)
+        menu.addAction("Answer in Its Terminal").triggered.connect(lambda: focus.focus(session.pid))
+        return False
 
     # MARK: Placement
 
@@ -461,6 +501,15 @@ class Controller:
         self.server.close()             # takes the socket file with it
         if self.tray is not None:
             self.tray.hide()
+
+
+def _menu_text(text: str, limit: int = 72) -> str:
+    """Words as a menu item shows them as they are: one line, not too long, an & not taken for
+    a shortcut key."""
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + "…"
+    return text.replace("&", "&&")
 
 
 def _clamped(frame: QRect, area: QRect) -> tuple[int, int]:

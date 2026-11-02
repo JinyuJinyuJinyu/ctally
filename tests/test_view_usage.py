@@ -57,10 +57,12 @@ SCRIPT = textwrap.dedent('''
         over = tip(view, area.center())
         assert over.startswith("Current session: 64% used"), (mode, folded, over)
         assert "Current week (Fable): 12% used" in over and over.endswith("Updated just now"), over
-        assert tip(view, QPoint(2, 2)) == "", (mode, folded)
+        # Elsewhere, no usage: nothing, or over a session (the badge's corner), the session.
+        assert not tip(view, QPoint(2, 2)).startswith("Current session"), (mode, folded)
         assert click(view, area.center()) == [], (mode, folded)
         view.apply_usage(None)
-        assert view._usage_rect() is None and tip(view, area.center()) == ""
+        # Gone, and so is its tooltip (rows can slide into where it was).
+        assert view._usage_rect() is None and not tip(view, area.center()).startswith("Current session")
         view.hide()
     print("ok")
 ''')

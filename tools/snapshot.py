@@ -21,13 +21,14 @@ MODES = ("one", "three", "list", "folded")
 
 
 def demo_sessions():
-    from ctally.sessions import Agents, Session, State
+    from ctally.sessions import Agents, Ask, Session, State
 
     home = os.path.expanduser("~")         # shown as "~", so no real name appears
     return [
         Session("demo-1", State.WORKING, "api", 101, "Migrate to Postgres 16", f"{home}/code/api", "api:0.0",
                 Agents(4, started=16, done=12, detail="Verify")),
-        Session("demo-2", State.WAITING, "webapp", 102, "fix-flaky-tests", f"{home}/code/webapp", "webapp:0.0"),
+        Session("demo-2", State.WAITING, "webapp", 102, "fix-flaky-tests", f"{home}/code/webapp", "webapp:0.0",
+                ask=Ask("question", "Retry the flaky tests, or skip them?", options=("Retry", "Skip"))),
         Session("demo-3", State.DONE, "webapp", 103, "Add dark mode toggle", f"{home}/code/webapp", "webapp:0.1"),
         Session("demo-4", State.DONE, "docs", 104, "release-notes", f"{home}/code/docs", "docs:0.0"),
         Session("demo-5", State.WORKING, "api", 105, "Refactor auth middleware", f"{home}/code/api", "api:0.1",

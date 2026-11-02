@@ -12,6 +12,10 @@
 # limit in ~/.claude/ctally.d/.limit as "<Unix time it resets, or 0> <what Claude Code
 # said>". A prompt sent before then goes nowhere, so it leaves the session limited too.
 #
+# What a session waiting on me asks, a tool to allow, questions or a plan, is kept as
+# Claude Code put it in ~/.claude/ctally.d/.asks/<session id>, until that's settled: the
+# tool has run (or failed), the turn is over, or I've sent a new prompt.
+#
 # Subagents, a workflow's included, each get a file in ~/.claude/ctally.d/.agents/<session
 # id>/ while they run. A turn that ends with agents or a workflow still running in the
 # background isn't done: the session stays "working" until they finish and Claude has
@@ -29,10 +33,11 @@ input=""
 [ -t 0 ] || input=$(cat)
 
 # A string field of that JSON, by name. The first one: a tool's input, later in the same
-# JSON, can carry fields of its own by the same names ("session_id", say).
+# JSON, can carry fields of its own by the same names ("session_id", say). Given a file, the
+# field from the JSON in that instead.
 field() {
-  printf '%s\n' "$input" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 \
-    | sed 's/.*"\([^"]*\)"$/\1/'
+  if [ -n "${2:-}" ]; then cat "$2" 2>/dev/null; else printf '%s\n' "$input"; fi \
+    | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
 # A name that is safe to use as a file name, or nothing.
@@ -47,6 +52,7 @@ session=$(safe "${CLAUDE_CODE_SESSION_ID:-$(field session_id)}")
 session="${session:-default}"
 file="$dir/$session"
 agents="$dir/.agents/$session"
+ask="$dir/.asks/$session"
 limit="$dir/.limit"
 before=$(cat "$file" 2>/dev/null)
 
@@ -95,9 +101,29 @@ limit_holds() {
   [ "$resets" -eq 0 ] || [ "$resets" -gt "$(date +%s)" ]
 }
 
+# Keeps what's being asked, whole: a tool and its input, the questions and their options, or
+# the plan. CTally reads it as JSON, which this script can't.
+keep_ask() {
+  mkdir -p "$dir/.asks" 2>/dev/null
+  printf '%s\n' "$input" 2>/dev/null > "$dir/.asks/.$session.$$" \
+    && mv -f "$dir/.asks/.$session.$$" "$ask" 2>/dev/null || rm -f "$dir/.asks/.$session.$$" 2>/dev/null
+}
+
+# Whether Claude carrying on shows that what it asked is settled: a new prompt from me, or
+# the tool it asked about has now run, or failed. A different tool, or one of its agents,
+# can run while the question is still on screen.
+settled() {
+  case "$(field hook_event_name)" in
+    UserPromptSubmit) return 0 ;;
+    PostToolUse | PostToolUseFailure)
+      [ -z "$(field agent_id)" ] && [ "$(field tool_name)" = "$(field tool_name "$ask")" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 case "$state" in
   end)
-    rm -f "$file"
+    rm -f "$file" "$ask"
     rm -rf "$agents"
     redraw_tmux
     exit 0
@@ -117,6 +143,7 @@ case "$state" in
     ;;
   done)
     rm -f "$limit"               # a turn got through, so no limit is in the way now
+    rm -f "$ask"                 # and nothing it asked is still open
     if background_running; then
       # Not done yet: the marker says so to the idle notification that follows.
       state=working
@@ -127,6 +154,7 @@ case "$state" in
     ;;
   failed)
     # Claude Code gave up on the turn, and says why.
+    rm -f "$ask"
     case "$(field error)" in
       rate_limit)
         state=limited
@@ -162,13 +190,17 @@ case "$state" in
       *) case "$before" in done* | limited*) exit 0 ;; esac ;;
     esac
     ;;
-  asking) state=waiting ;;
+  asking)
+    state=waiting
+    keep_ask
+    ;;
   working)
     # A prompt sent while the limit holds goes nowhere. Anything Claude does shows it has
     # got through: a tool, a permission, the end of the turn.
     case "$before" in
       limited*) [ "$(field hook_event_name)" = UserPromptSubmit ] && limit_holds && exit 0 ;;
     esac
+    [ -f "$ask" ] && settled && rm -f "$ask"
     # Claude itself at work again, not just one of its agents.
     [ -z "$(field agent_id)" ] && rm -f "$agents/.background" 2>/dev/null
     ;;

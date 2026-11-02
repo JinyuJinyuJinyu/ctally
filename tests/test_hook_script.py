@@ -6,6 +6,8 @@ import os
 import threading
 import time
 
+import pytest
+
 from conftest import DATA, HOOK
 
 from ctally.claude_hooks import EVENTS
@@ -460,3 +462,48 @@ def test_status_line_keeps_a_limit_it_cant_place(tmp_path):
         done = status_line(tmp_path, later)
         assert (done.returncode, done.stderr) == (0, "")
         assert (state / ".limit").exists(), note
+
+
+# MARK: What a session asks
+
+ASK = payload(hook_event_name="PermissionRequest", tool_name="Bash",
+              tool_input={"command": 'npm publish --tag "next"', "description": "Publish"})
+
+
+def asked(hook) -> dict | None:
+    path = hook.dir / ".asks" / SID
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def test_a_permission_request_is_kept_whole(hook):
+    hook("asking", ASK)
+    assert hook.state(SID) == "waiting"
+    assert asked(hook) == ASK
+    assert not [n for n in os.listdir(hook.dir / ".asks") if n.startswith(".")]     # no temporary left
+    hook("waiting", payload(hook_event_name="Notification", notification_type="permission_prompt"))
+    assert asked(hook) == ASK
+
+
+def test_other_tools_and_agents_running_meanwhile_leave_it(hook):
+    hook("asking", ASK)
+    hook("working", payload(hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": "ls"}))
+    hook("working", payload(hook_event_name="PostToolUse", tool_name="Read", tool_input={"file_path": "/x"}))
+    hook("working", payload(hook_event_name="PostToolUse", tool_name="Bash", agent_id="a1"))
+    assert asked(hook) == ASK
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+def test_the_tool_running_settles_it(hook, event):
+    hook("asking", ASK)
+    hook("working", payload(hook_event_name=event, tool_name="Bash", tool_input={"command": "npm publish"}))
+    assert asked(hook) is None and hook.state(SID) == "working"
+
+
+@pytest.mark.parametrize("state, fields", [("working", {"hook_event_name": "UserPromptSubmit", "prompt": "no"}),
+                                           ("done", {"hook_event_name": "Stop"}),
+                                           ("failed", {"hook_event_name": "StopFailure", "error": "server_error"}),
+                                           ("end", {"hook_event_name": "SessionEnd"})])
+def test_a_new_prompt_or_the_end_of_the_turn_settles_it(hook, state, fields):
+    hook("asking", ASK)
+    hook(state, payload(**fields))
+    assert asked(hook) is None
