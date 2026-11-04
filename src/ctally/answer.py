@@ -104,10 +104,11 @@ def choose(target: system.TmuxPane, asked: Prompt, choice: Choice) -> bool:
                        str(choice.number)], timeout=2) is not None
 
 
-def answer(pid: int, target: system.TmuxPane, asked: Prompt, choice: Choice) -> None:
+def answer(pid: int, target: system.TmuxPane, asked: Prompt, choice: Choice, when: int = 0) -> None:
     """Off the main thread, like everything else that runs tmux on a click. A choice that
-    leaves me something to type brings the terminal forward for it."""
+    leaves me something to type brings the terminal forward for it, `when` being the click
+    that picked it (focus.focus)."""
     def go() -> None:
         if choose(target, asked, choice) and choice.types:
-            focus.focus(pid)
+            focus.focus(pid, when)
     threading.Thread(target=go, daemon=True).start()

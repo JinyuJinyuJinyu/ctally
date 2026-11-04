@@ -340,7 +340,7 @@ class Controller:
     def show_menu(self, at: QPoint, session=None) -> None:
         """The indicator's right-click menu. Folding only means something while the list shows.
         On a session waiting on me, it starts with the answers."""
-        menu = QMenu()
+        menu = _Menu()
         if session is not None and session.state is State.WAITING and not session.limited:
             self._add_answers(menu, session)
             menu.addSeparator()
@@ -361,13 +361,13 @@ class Controller:
 
     def show_answers(self, session, at: QPoint) -> None:
         """What a session asks was clicked: its choices, and the way to its terminal."""
-        menu = QMenu()
+        menu = _Menu()
         if self._add_answers(menu, session):
             menu.addSeparator()
-            menu.addAction("Go to Terminal").triggered.connect(lambda: focus.focus(session.pid))
+            menu.addAction("Go to Terminal").triggered.connect(lambda: focus.focus(session.pid, menu.when))
         menu.exec(at)
 
-    def _add_answers(self, menu: QMenu, session) -> bool:
+    def _add_answers(self, menu: _Menu, session) -> bool:
         """What a session waiting on me asks, then the choices its tmux pane shows, which answer
         it there. Outside tmux, or with no choices to be read on its screen, what's known of it,
         and the way to its terminal instead. Says whether it found the choices."""
@@ -382,11 +382,11 @@ class Controller:
         if asked is not None:
             for choice in asked.choices:
                 item = menu.addAction(_menu_text(f"{choice.number}. {choice.label}"))
-                item.triggered.connect(lambda _=False, c=choice: answer.answer(session.pid, target, asked, c))
+                item.triggered.connect(lambda _=False, c=choice: answer.answer(session.pid, target, asked, c, menu.when))
             return True
         for option in ask.options if ask else ():
             menu.addAction(_menu_text("· " + option)).setEnabled(False)
-        menu.addAction("Answer in Its Terminal").triggered.connect(lambda: focus.focus(session.pid))
+        menu.addAction("Answer in Its Terminal").triggered.connect(lambda: focus.focus(session.pid, menu.when))
         return False
 
     # MARK: Placement
@@ -502,6 +502,20 @@ class Controller:
         self.server.close()             # takes the socket file with it
         if self.tray is not None:
             self.tray.hide()
+
+
+class _Menu(QMenu):
+    """A menu that keeps the time an item was picked, by the window system's clock: on X11 an
+    item that brings a terminal forward needs it, as a click on a row does (focus.focus)."""
+    when = 0
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.when = event.timestamp()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        self.when = event.timestamp()
+        super().keyPressEvent(event)
 
 
 def _menu_text(text: str, limit: int = 72) -> str:

@@ -232,21 +232,21 @@ def test_the_controller_menu_answers_the_pane(dialog):
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         sys.path[:0] = [sys.argv[1] + "/src"]
         from PySide6.QtNetwork import QLocalServer
-        from PySide6.QtWidgets import QApplication, QMenu
+        from PySide6.QtWidgets import QApplication
         app = QApplication([])
-        from ctally.gui.app import Controller, _menu_text
+        from ctally.gui.app import Controller, _Menu, _menu_text
         from ctally.sessions import Ask, Session, State
         c = Controller(app, QLocalServer())
         ask = Ask("tool", "Allow Write(probe.txt)?")
         session = Session("s", State.WAITING, "work", int(sys.argv[2]), ask=ask)
-        menu = QMenu()
+        menu = _Menu()
         assert c._add_answers(menu, session)
         texts = [a.text() for a in menu.actions()]
         assert texts[0] == "Allow Write(probe.txt)?" and not menu.actions()[0].isEnabled(), texts
         assert texts[1] == "1. Yes" and texts[3] == "3. No", texts
         menu.actions()[3].trigger()
         # Outside tmux: what's known, and the terminal.
-        menu = QMenu()
+        menu = _Menu()
         quiet = Session("q", State.WAITING, "work", 0, ask=Ask("question", "Red or blue?", options=("Red", "Blue")))
         assert not c._add_answers(menu, quiet)
         assert [a.text() for a in menu.actions()] == ["Red or blue?", "· Red", "· Blue", "Answer in Its Terminal"]
@@ -258,3 +258,77 @@ def test_the_controller_menu_answers_the_pane(dialog):
                           timeout=60, env={**os.environ, "CTALLY_STATE_DIR": str(out.parent)})
     assert done.returncode == 0 and done.stdout.strip().endswith("ok"), done.stderr
     assert wait_for(lambda: out.exists() and out.read_text()) == "3"
+
+
+# MARK: Bringing the terminal forward
+
+def test_a_choice_left_to_type_brings_the_terminal_forward_for_the_click(monkeypatch):
+    """What's typed there needs the terminal in front, which X11 allows only for the time of
+    the click that picked the choice."""
+    raised = []
+    monkeypatch.setattr(answer, "choose", lambda target, asked, choice: True)
+    monkeypatch.setattr(answer.focus, "focus", lambda pid, when=0: raised.append((pid, when)))
+    asked = parse(QUESTION)
+    answer.answer(4242, None, asked, asked.choices[2], 4294967290)
+    assert wait_for(lambda: raised) == [(4242, 4294967290)]
+    raised.clear()
+    answer.answer(4242, None, asked, asked.choices[0], 4294967290)     # "Small": nothing to type
+    time.sleep(0.3)
+    assert raised == []
+
+
+MENU_CLICK = textwrap.dedent('''
+    import os, sys
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    sys.path[:0] = [sys.argv[1] + "/src"]
+    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtGui import QKeyEvent, QMouseEvent
+    from PySide6.QtNetwork import QLocalServer
+    from PySide6.QtWidgets import QApplication
+    app = QApplication([])
+    from ctally import focus
+    from ctally.gui.app import Controller, _Menu
+    from ctally.sessions import Ask, Session, State
+    raised = []
+    focus.focus = lambda pid, when=0: raised.append((pid, when))
+    c = Controller(app, QLocalServer())
+    # Not in tmux (no pid to look for), so the menu offers the terminal.
+    session = Session("q", State.WAITING, "work", 0, ask=Ask("question", "Red or blue?", options=("Red", "Blue")))
+
+    def menu_with_the_way_to_the_terminal():
+        menu = _Menu()
+        c._add_answers(menu, session)
+        item = menu.actions()[-1]
+        assert item.text() == "Answer in Its Terminal", item.text()
+        menu.popup(QPoint(0, 0))
+        app.processEvents()
+        return menu, item
+
+    # Past what a 32-bit signed int holds: the X server's clock gets there after 25 days.
+    PRESS, RELEASE, KEY = 4294967000, 4294967290, 4294967295
+    menu, item = menu_with_the_way_to_the_terminal()
+    point = menu.actionGeometry(item).center()
+    for kind, time, buttons in ((QEvent.MouseButtonPress, PRESS, Qt.LeftButton),
+                                (QEvent.MouseButtonRelease, RELEASE, Qt.NoButton)):
+        event = QMouseEvent(kind, point, menu.mapToGlobal(point), Qt.LeftButton, buttons, Qt.NoModifier)
+        event.setTimestamp(time)
+        app.sendEvent(menu, event)
+    assert raised == [(0, RELEASE)], raised
+
+    menu, item = menu_with_the_way_to_the_terminal()
+    menu.setActiveAction(item)
+    event = QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier)
+    event.setTimestamp(KEY)
+    app.sendEvent(menu, event)
+    assert raised == [(0, RELEASE), (0, KEY)], raised
+    print("ok")
+''')
+
+
+def test_a_menu_brings_the_terminal_forward_for_the_click(tmp_path):
+    """Picked with the mouse or the keyboard, a menu item that goes to the terminal passes on
+    the time it was picked, as a click on a row does."""
+    pytest.importorskip("PySide6")
+    done = subprocess.run([sys.executable, "-c", MENU_CLICK, str(ROOT)], capture_output=True, text=True,
+                          timeout=60, env={**os.environ, "CTALLY_STATE_DIR": str(tmp_path)})
+    assert done.returncode == 0 and done.stdout.strip().endswith("ok"), done.stderr
