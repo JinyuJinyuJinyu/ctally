@@ -5,8 +5,9 @@ into, day by day.
 The hook keeps the history in ~/.claude/ctally.d/.history/<date>: a line "<Unix time>
 <session id> <state>" whenever a session's state changes, for each prompt ("... working
 prompt"), every five minutes or so while a state lasts and Claude Code keeps calling, and
-"end" when the session ends. A session is in a state from one of its lines to its next. After
-its last line, a session still running stays in that state until now; one that has gone
+"end" when the session ends. A session is in a state from one of its lines to its next, for no
+longer than a state is taken to last with nothing heard. After its last line, a session still
+running stays in that state until now, for no longer than that either; one that has gone
 without a word, a few minutes at most. Nothing in it but times, session ids and states.
 """
 from __future__ import annotations
@@ -166,8 +167,10 @@ def prune(directory: Path | None = None, now: float | None = None) -> None:
 def stretches(lines: list[Line], now: float, running: dict[str, str]) -> list[Stretch]:
     """Each session's states, one after another. Working, waiting or stopped by the limit last
     no longer than LONGEST from one line to the next; after its last line, a session that's
-    still running in that state stays in it until now, and one that isn't, BEAT at most. Lines
-    that only repeat the state, every few minutes, join what they continue."""
+    still running in that state stays in it until now, for no longer than LONGEST either (its
+    file can say working for hours after I've stopped it by hand, and what counts now mustn't
+    shrink once its next line comes), and one that isn't, BEAT at most. Lines that only repeat
+    the state, every few minutes, join what they continue."""
     by_session: dict[str, list[Line]] = defaultdict(list)
     for line in lines:
         by_session[line.session].append(line)
@@ -181,7 +184,7 @@ def stretches(lines: list[Line], now: float, running: dict[str, str]) -> list[St
             if after is not None:
                 end, settled = min(after.when, here.when + longest), after.state != here.state
             elif running.get(sid) == here.state:
-                end, settled = max(now, here.when), False
+                end, settled = min(max(now, here.when), here.when + longest), False
             else:
                 end, settled = min(now, here.when + BEAT), False
             last = mine[-1] if mine else None

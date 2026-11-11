@@ -76,6 +76,16 @@ def test_after_the_last_line(tmp_path):
     assert found.answered is None                         # still waiting: not answered yet
 
 
+def test_a_session_left_working_counts_the_same_before_its_next_line_as_after(tmp_path):
+    """Stopped by hand with its agents killed, a session's file says working until its next
+    prompt: ten hours, here."""
+    write(tmp_path, [Line(at(1), "stuck", "working", True), Line(at(1), "asks", "waiting")])
+    still = stats(1, at(11), tmp_path, running={"stuck": "working", "asks": "waiting"}).days[0]
+    assert (still.working, still.waiting) == (3600, 10 * 3600)         # waiting on me can last half a day
+    write(tmp_path, [Line(at(11), "stuck", "working", True)])
+    assert stats(1, at(11, 1), tmp_path, running={"stuck": "working"}).days[0].working == 3600 + 60
+
+
 def test_a_long_silence_is_capped(tmp_path):
     # Working at 9, then nothing until 1 pm: the computer slept; an hour at most is counted.
     write(tmp_path, [Line(at(9), "s", "working", True), Line(at(13), "s", "done")])

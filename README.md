@@ -198,6 +198,10 @@ History since Oct 22.
 - **waiting on you** is time a session sat on a permission, a question or a plan. Time after a finished
   turn isn't counted there: that's your turn, not Claude being stuck. How soon you got back to it is the
   median at the bottom (only within two hours; longer, and you'd moved on).
+- **With nothing heard from a session**, a stretch counts for so long and no more: an hour working, half a
+  day waiting on you. Longer than that the computer was asleep, or the session's turn was stopped with
+  nothing to tell the hook. That goes for a session still running, too, so a day's numbers don't shrink
+  later.
 - `--json` gives the same, with times in seconds.
 
 The history starts once the hook from 0.3.3 is set up (`ctally setup`, then restart your sessions), and keeps
