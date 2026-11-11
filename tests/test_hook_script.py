@@ -577,6 +577,29 @@ def test_a_window_running_out_is_no_news(tmp_path):
     assert json.loads((notes / "idle").read_text()) == usage_line(None, (89, OTHER_WEEK), "idle")
 
 
+def test_status_line_stopped_halfway_leaves_nothing_half_made(tmp_path):
+    """Claude Code stops a status line still running when the next is due."""
+    import signal
+    import subprocess
+    state = tmp_path / ".claude" / "ctally.d"
+    for folder in (state / ".usage", state / ".status"):
+        folder.mkdir(parents=True)
+    env = {**{k: v for k, v in os.environ.items() if k != "CTALLY_STATE_DIR"}, "HOME": str(tmp_path)}
+    running = subprocess.Popen(["sh", str(STATUS_LINE_SCRIPT)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=env)
+    # What it would have been in the middle of writing, and others' that are none of its business.
+    mine = [state / f".statusline.{running.pid}", state / ".usage" / f".acct-a.{running.pid}",
+            state / ".status" / f".s1.{running.pid}"]
+    theirs = [state / ".statusline", state / ".usage" / "acct-a", state / ".status" / ".s1.1", state / ".limit"]
+    for path in mine + theirs:
+        path.write_text("{}")
+    time.sleep(0.3)                                 # reading its input by now
+    running.send_signal(signal.SIGTERM)
+    out, err = running.communicate(timeout=10)      # its input ends, and it gets to the signal
+    assert (running.returncode, out, err) == (0, b"", b"")
+    assert not [p for p in mine if p.exists()] and all(p.exists() for p in theirs)
+
+
 # Accounts
 
 def test_each_account_keeps_its_own(tmp_path):

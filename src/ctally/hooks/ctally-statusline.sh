@@ -32,8 +32,13 @@
 # A usage limit the hook noted as hit (.limit) is over once its window has moved on: a limit
 # reset early starts a new window, which ends later than the one that was used up.
 
-input=$(cat)
 dir="$HOME/.claude/ctally.d"
+
+# Claude Code stops a status line still running when the next is due. Stopped between writing
+# a file and renaming it into place, this leaves nothing half-made behind.
+trap 'rm -f "$dir"/.statusline.$$ "$dir"/.usage/.*.$$ "$dir"/.status/.*.$$ 2>/dev/null; exit 0' HUP INT TERM
+
+input=$(cat)
 
 # The accounts kept so far.
 kept=""
@@ -185,4 +190,5 @@ fi
 [ "$note" = 1 ] && save "$dir/.status" "$session"
 
 [ -n "$1" ] || exit 0
+trap - HUP INT TERM
 printf '%s\n' "$input" | sh -c "$1"

@@ -903,6 +903,18 @@ def test_a_session_still_running_keeps_its_status_however_long_it_sits(dirs, reg
     assert sorted(os.listdir(state / ".status")) == ["heard", "only-listed"]
 
 
+def test_files_left_half_made_are_cleared_away(dirs):
+    state, projects = dirs
+    (state / ".usage").mkdir()
+    long_ago = time.time() - StateReader.STALE_AFTER - 60
+    left = [state / ".statusline.4305", state / ".0f1e2d3c-aaaa.97188", state / ".limit.12", state / ".usage" / ".acct-a.77"]
+    kept = [state / ".statusline", state / ".limit", state / ".usage" / "acct-a", state / ".statusline.555"]
+    for path in left + kept:
+        write(path.parent, path.name, "{}", mtime=None if path.name.endswith(".555") else long_ago)
+    StateReader(state, projects).poll()
+    assert not [p.name for p in left if p.exists()] and all(p.exists() for p in kept)
+
+
 def test_the_limit_note_says_whose_it_was(dirs):
     from ctally.sessions import read_limit
     state, _ = dirs

@@ -974,6 +974,9 @@ class StateReader:
     Claude Code's list of running sessions, for those the hooks haven't heard from."""
 
     STALE_AFTER = 24 * 60 * 60
+    # What a hook or status line stopped halfway leaves: the file it was writing, named
+    # ".<what it's for>.<its pid>" until renamed into place.
+    HALF_MADE = re.compile(r"\..+\.\d+")
 
     @dataclass(frozen=True)
     class Entry:
@@ -1117,7 +1120,8 @@ class StateReader:
 
     def _prune(self) -> None:
         """Sessions killed without a SessionEnd hook leave their file behind, and any
-        agents' folder or notes: what they asked, what their status line said. A session
+        agents' folder or notes: what they asked, what their status line said; a hook or a
+        status line stopped halfway, the file it was writing. A session
         still running keeps its notes however long it sits: the status line tells what's
         news by what each session said last."""
         now = time.time()
@@ -1134,6 +1138,18 @@ class StateReader:
                 self.first_seen.pop(name, None)
         from . import history                   # it reads this module
         history.prune(self.dir / ".history", now)
+        for folder in (self.dir, self.dir / ".usage"):
+            try:
+                names = [n for n in os.listdir(folder) if StateReader.HALF_MADE.fullmatch(n)]
+            except OSError:
+                continue
+            for name in names:
+                path = folder / name
+                try:
+                    if path.is_file() and now - path.stat().st_mtime > StateReader.STALE_AFTER:
+                        path.unlink()
+                except OSError:
+                    pass
         for kind in (".agents", ".asks", ".status"):
             folder = self.dir / kind
             try:
