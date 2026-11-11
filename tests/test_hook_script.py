@@ -259,7 +259,7 @@ def test_asking_says_waiting_at_once_even_after_done(hook):
     hook("working", payload())
     hook("asking", payload(hook_event_name="PermissionRequest", tool_name="AskUserQuestion"))
     assert hook.state(SID) == "waiting"
-    hook("working", payload(hook_event_name="PostToolUseFailure"))
+    hook("working", payload(hook_event_name="PostToolUseFailure", tool_name="AskUserQuestion"))
     assert hook.state(SID) == "working"
     hook("done", payload())
     hook("asking", payload(tool_name="Bash"))      # a background agent wants a permission
@@ -486,11 +486,42 @@ def test_a_permission_request_is_kept_whole(hook):
 
 
 def test_other_tools_and_agents_running_meanwhile_leave_it(hook):
+    """The question is still on screen, so the session still waits on me."""
     hook("asking", ASK)
-    hook("working", payload(hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": "ls"}))
-    hook("working", payload(hook_event_name="PostToolUse", tool_name="Read", tool_input={"file_path": "/x"}))
+    for event in (payload(hook_event_name="PostToolUse", tool_name="Read", tool_input={"file_path": "/x"}),    # started alongside
+                  payload(hook_event_name="PreToolUse", tool_name="Grep", agent_id="a1", agent_type="Explore"),
+                  payload(hook_event_name="PostToolUse", tool_name="Bash", agent_id="a1", agent_type="Explore"),
+                  payload(hook_event_name="PostToolUseFailure", tool_name="Bash", agent_id="a1")):
+        hook("working", event)
+        assert (asked(hook), hook.state(SID)) == (ASK, "waiting"), event
+
+
+def test_whoever_asked_going_on_to_another_tool_settles_it(hook):
+    """Told "no, do this instead", Claude carries on, and the tool it asked about never runs."""
+    hook("asking", ASK)
+    hook("working", payload(hook_event_name="PreToolUse", tool_name="Read", tool_input={"file_path": "/x"}))
+    assert asked(hook) is None and hook.state(SID) == "working"
+
+
+def test_what_an_agent_asks_is_settled_by_that_agent(hook):
+    ask = payload(agent_id="a1", agent_type="general-purpose", hook_event_name="PermissionRequest", tool_name="Bash",
+                  tool_input={"command": "rm -rf build"})
+    hook("asking", ask)
+    hook("working", payload(hook_event_name="PreToolUse", tool_name="Read"))                # Claude itself
+    hook("working", payload(hook_event_name="PostToolUse", tool_name="Bash"))
+    hook("working", payload(hook_event_name="PostToolUse", tool_name="Bash", agent_id="a2"))    # another agent
+    assert (asked(hook), hook.state(SID)) == (ask, "waiting")
     hook("working", payload(hook_event_name="PostToolUse", tool_name="Bash", agent_id="a1"))
-    assert asked(hook) == ASK
+    assert asked(hook) is None and hook.state(SID) == "working"
+
+
+def test_an_agent_at_work_leaves_the_background_marker_while_a_question_is_up(hook):
+    hook("agent-start", payload(agent_id="a1", agent_type="Explore"))
+    marker = hook.dir / ".agents" / SID / ".background"
+    marker.write_text("")
+    hook("asking", ASK)
+    hook("working", payload(hook_event_name="PostToolUse", tool_name="Read"))
+    assert marker.exists() and hook.state(SID) == "waiting"
 
 
 @pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])

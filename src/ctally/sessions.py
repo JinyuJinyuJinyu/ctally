@@ -931,8 +931,13 @@ def stopped_by_hand(names: Names, watcher: AgentWatcher, sid: str, modified: flo
     name first, which reads its transcript."""
     if watcher.activity(sid, names.transcript(sid)) is not None:
         return False                    # agents still at work, so the session is too
-    if watcher.abandoned(sid):
-        return True
+    return watcher.abandoned(sid) or put_aside(names, sid, modified)
+
+
+def put_aside(names: Names, sid: str, modified: float) -> bool:
+    """Whether I pressed Esc after the hooks last wrote (modified, give or take the moment
+    between a hook and the transcript): on a turn, or on what a session asked me. One that
+    asked and still has agents at work isn't waiting on me any more, and isn't done either."""
     stopped = names.stopped(sid)
     return stopped is not None and stopped >= modified - 2
 
@@ -1066,6 +1071,8 @@ class StateReader:
         elif state is State.WORKING and not limited and \
                 gone_idle(self.names, self.watcher, name, entry.modified, self.listed.get((name, entry.pid))):
             state = State.DONE
+        elif state is State.WAITING and not limited and put_aside(self.names, name, entry.modified):
+            state = State.WORKING       # what it asked is dismissed, and its agents work on
         # What it asked counts only while it's still waiting on me for it.
         ask = self.asks.get(name) if state is State.WAITING and not limited else None
         # A background job is wherever its terminal is.

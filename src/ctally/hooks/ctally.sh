@@ -14,7 +14,9 @@
 #
 # What a session waiting on me asks, a tool to allow, questions or a plan, is kept as
 # Claude Code put it in ~/.claude/ctally.d/.asks/<session id>, until that's settled: the
-# tool has run (or failed), the turn is over, or I've sent a new prompt.
+# tool has run (or failed), whoever asked has gone on to another, the turn is over, or I've
+# sent a new prompt. Until then the session stays waiting, whatever else of it carries on:
+# its agents, or a tool started alongside the one it asked about.
 #
 # Subagents, a workflow's included, each get a file in ~/.claude/ctally.d/.agents/<session
 # id>/ while they run. A turn that ends with agents or a workflow still running in the
@@ -126,14 +128,18 @@ keep_ask() {
     && mv -f "$dir/.asks/.$session.$$" "$ask" 2>/dev/null || rm -f "$dir/.asks/.$session.$$" 2>/dev/null
 }
 
-# Whether Claude carrying on shows that what it asked is settled: a new prompt from me, or
-# the tool it asked about has now run, or failed. A different tool, or one of its agents,
-# can run while the question is still on screen.
+# Whether Claude carrying on shows that what it asked is settled: a new prompt from me; or,
+# from whoever asked (Claude itself, or the agent of its that did), the tool it asked about
+# having run or failed, or its next tool starting, which is what "no, do this instead"
+# leads to. The rest of the session settles nothing: another of its agents at work, or a
+# tool started alongside the one asked about and finishing while the question is still up.
 settled() {
-  case "$(field hook_event_name)" in
-    UserPromptSubmit) return 0 ;;
-    PostToolUse | PostToolUseFailure)
-      [ -z "$(field agent_id)" ] && [ "$(field tool_name)" = "$(field tool_name "$ask")" ] ;;
+  event=$(field hook_event_name)
+  [ "$event" = UserPromptSubmit ] && return 0
+  [ "$(field agent_id)" = "$(field agent_id "$ask")" ] || return 1
+  case "$event" in
+    PreToolUse) return 0 ;;
+    PostToolUse | PostToolUseFailure) [ "$(field tool_name)" = "$(field tool_name "$ask")" ] ;;
     *) return 1 ;;
   esac
 }
@@ -219,7 +225,11 @@ case "$state" in
     case "$before" in
       limited*) [ "$(field hook_event_name)" = UserPromptSubmit ] && limit_holds && exit 0 ;;
     esac
-    [ -f "$ask" ] && settled && rm -f "$ask"
+    # What it asked is on screen until that's settled, and it waits on me till then.
+    if [ -f "$ask" ]; then
+      settled || exit 0
+      rm -f "$ask"
+    fi
     # Claude itself at work again, not just one of its agents.
     [ -z "$(field agent_id)" ] && rm -f "$agents/.background" 2>/dev/null
     ;;

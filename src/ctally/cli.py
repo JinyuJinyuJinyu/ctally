@@ -34,7 +34,7 @@ from typing import NamedTuple
 from . import __version__, system
 from . import usage as limits
 from .sessions import (PROJECTS_DIR, STATE_DIR, AgentWatcher, Names, Notes, Registry, context_from, fronts,
-                       gone_idle, read_limit, reconcile, stopped_by_hand)
+                       gone_idle, put_aside, read_limit, reconcile, stopped_by_hand)
 
 GLYPH = {"waiting": "!", "working": "▶", "done": "✓", "idle": "·"}
 COLOUR = {"waiting": "#ffb329", "working": "#4accf2", "done": "#45e087", "idle": "#99a6bd"}
@@ -86,6 +86,8 @@ def live_sessions() -> list[Live]:
             if stopped_by_hand(transcripts, watcher, name, modified) or \
                     (state == "working" and gone_idle(transcripts, watcher, name, modified, listed.get((name, pid)))):
                 state = "done"
+            elif state == "waiting" and put_aside(transcripts, name, modified):
+                state = "working"           # what it asked is dismissed, and its agents work on
         found.append(Live(RANK[state], modified, state, pid, name, " ".join(fields[2:]) or "?"))
     unheard, left = reconcile(running, {s.id: (s.pid, s.modified) for s in found})
     found = [s for s in found if s.id not in left]

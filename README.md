@@ -80,7 +80,8 @@ When a session hands work to subagents, or runs a whole workflow of them, CTally
   then.
 - **Stopping by hand counts.** Press Esc, dismiss a question, or kill agents or a workflow, and Claude Code
   runs no hook to say so. CTally reads it from the transcripts instead: the session shows **done** within a
-  couple of seconds, and the agents you stopped leave the agents line.
+  couple of seconds (or **working** again, if you dismissed a question while its agents were still at it),
+  and the agents you stopped leave the agents line.
 
 `ctally list` shows the count too. This needs the subagent hooks that `ctally setup` adds; if you set up
 CTally before they existed, run `ctally setup` again and restart your sessions.
@@ -94,6 +95,8 @@ A session waiting on you says what for, on a line under its row (or on its capti
 - a plan to approve: `Approve the plan: Add a dark mode toggle`
 
 Hover over the session for more: the whole command, every question and its options, the plan's first lines.
+The session stays waiting for as long as that's on screen, even while its subagents or a workflow work on
+behind it.
 
 **In tmux you can answer it from CTally.** Click that line, or right-click the session, and pick from the
 choices Claude Code is showing: `1. Yes`, `2. Yes, and don't ask again…`, `3. No`. CTally reads them off the
@@ -337,8 +340,8 @@ Two pieces, connected by a folder:
    | Event | State written |
    |---|---|
    | `UserPromptSubmit` | `working` |
-   | `PreToolUse` | `working` (a tool is about to run) |
-   | `PostToolUse` / `PostToolUseFailure` | `working` (back to work after a permission prompt) |
+   | `PreToolUse` | `working` (a tool is about to run); not while another part of the session has a question up |
+   | `PostToolUse` / `PostToolUseFailure` | `working` (back to work after a permission prompt), once it's the tool that was asked about |
    | `PermissionRequest` | `waiting`, the moment a permission, a question or a plan to approve is on screen; what's asked goes in `~/.claude/ctally.d/.asks/<session id>` until it's settled |
    | `Stop` | `done`, or still `working` if subagents or a workflow run on in the background |
    | `StopFailure` | `limited` when the usage limit stopped the turn; `waiting` for a login or billing problem; else `done` |
@@ -348,6 +351,10 @@ Two pieces, connected by a folder:
 
    A `waiting` never overwrites `done`: Claude Code also sends its idle notification after a turn ends. Nor
    does the idle notification count while the session's agents are still out.
+   A session with a permission, a question or a plan on screen stays `waiting` until that's settled: the tool
+   asked about has run or failed, whoever asked (Claude, or the agent of its that did) has gone on to another
+   tool, the turn is over, or you've sent a new prompt. Its other agents carrying on meanwhile, and tools
+   started alongside the one asked about, change nothing.
    A usage limit hit is also noted in `~/.claude/ctally.d/.limit`: what Claude Code said, and when the limit
    resets, from the status line. Until then a new prompt leaves the session `limited`, and the limit shows
    as used up. The note goes once a turn gets through, Claude Code says the limit has reset, or the status

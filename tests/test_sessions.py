@@ -623,6 +623,28 @@ def test_a_question_dismissed_with_esc_is_done(dirs):
     assert session.state is State.DONE
 
 
+def test_a_question_dismissed_with_agents_still_at_work_is_working(dirs):
+    now = time.time()
+    # The hook leaves a session with a question up waiting, whatever its agents do meanwhile.
+    state, projects, path = stuck(dirs, "waiting", [answered(now - 30), tool_result(now - 20), said(ESC_IN_TOOL, now - 20)],
+                                  hooked=now - 21, agents={"bg": "Explore"})
+    agent_transcript(path, "bg", [said("Find", now - 40), answered(now - 1)])
+    (state / ".asks").mkdir()
+    (state / ".asks" / "s").write_text(json.dumps({"tool_name": "AskUserQuestion", "tool_input": {
+        "questions": [{"question": "Which database?"}]}}))
+    [session] = StateReader(state, projects).poll()
+    assert (session.state, session.ask, core(session.agents)) == (State.WORKING, None, core(Agents(1, detail="Explore")))
+
+
+def test_a_question_still_up_keeps_waiting_while_agents_work(dirs):
+    now = time.time()
+    state, projects, path = stuck(dirs, "waiting", [said("go", now - 60), answered(now - 30)], hooked=now - 29,
+                                  agents={"bg": "Explore"})
+    agent_transcript(path, "bg", [said("Find", now - 40), answered(now - 1)])
+    [session] = StateReader(state, projects).poll()
+    assert session.state is State.WAITING
+
+
 def test_a_hook_after_the_stop_wins(dirs):
     now = time.time()
     state, projects, _ = stuck(dirs, "working", [answered(now - 30), said(ESC, now - 20)], hooked=now - 5)
