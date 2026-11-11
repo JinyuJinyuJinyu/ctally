@@ -374,6 +374,42 @@ def test_a_finished_turn_or_claude_carrying_on_ends_the_limit(hook):
     assert hook.state(SID) == "waiting" and noted(hook) is None
 
 
+def aged(path, seconds: float) -> None:
+    """As if written that long ago."""
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_a_reply_already_on_its_way_doesnt_end_the_limit(hook):
+    """Another session's turn, begun before the limit was hit and ending after, got through
+    nothing since. Its next turn does."""
+    other = {"session_id": "s2"}
+    hook("working", {**other, "hook_event_name": "PreToolUse"})
+    aged(hook.dir / "s2", 30)
+    failed(hook)                                                    # s1 runs into the limit
+    aged(hook.dir / ".limit", 20)
+    hook("done", {**other, "hook_event_name": "Stop"})
+    assert hook.state("s2") == "done" and noted(hook) is not None and hook.state(SID) == "limited"
+    hook("working", {**other, "hook_event_name": "UserPromptSubmit", "prompt": "next"})
+    hook("done", {**other, "hook_event_name": "Stop"})
+    assert noted(hook) is None
+
+
+def test_a_turn_on_another_account_doesnt_end_the_limit(hook):
+    claude_json(hook, "acct-a")
+    failed(hook)
+    aged(hook.dir / ".limit", 20)
+    claude_json(hook, "acct-b")                                     # swapped, and working on
+    other = {"session_id": "s2"}
+    hook("working", {**other, "hook_event_name": "UserPromptSubmit", "prompt": "go"})
+    hook("done", {**other, "hook_event_name": "Stop"})
+    assert noted(hook) is not None
+    claude_json(hook, "acct-a")                                     # back, and a turn gets through there
+    hook("working", {**other, "hook_event_name": "UserPromptSubmit", "prompt": "go"})
+    hook("done", {**other, "hook_event_name": "Stop"})
+    assert noted(hook) is None
+
+
 def test_other_failures(hook):
     for error, state in [("authentication_failed", "waiting"), ("billing_error", "waiting"),
                          ("overloaded", "done"), ("server_error", "done"), ("", "done")]:

@@ -128,6 +128,22 @@ limit_holds() {
   [ "$resets" -eq 0 ] || [ "$resets" -gt "$(date +%s)" ]
 }
 
+# Whether this session's turn ending shows that limit is over. Stopped by it itself, it does.
+# So does a session that has done anything since the limit was hit: its last reply was then
+# asked for after. One that was already on its way when another session ran into the limit
+# shows nothing; nor does a turn on another account than the one the limit was hit on.
+got_through() {
+  case "$before" in
+    limited*) ;;
+    *) [ "$file" -nt "$limit" ] || return 1 ;;
+  esac
+  whose=""
+  { read -r _; read -r _ whose; } < "$limit" 2>/dev/null
+  [ -n "$whose" ] || return 0
+  account=$(signed_in)
+  [ -z "$account" ] || [ "$account" = "$whose" ]
+}
+
 # Notes in the history what just happened: the state, and "prompt" for a prompt. Beside it,
 # .<session id> holds when the session's last line was written, and how many calls since.
 history="$dir/.history"
@@ -187,7 +203,8 @@ case "$state" in
     exit 0
     ;;
   done)
-    rm -f "$limit"               # a turn got through, so no limit is in the way now
+    # A turn got through, so no limit is in the way now, if it shows that much.
+    [ -f "$limit" ] && got_through && rm -f "$limit"
     rm -f "$ask"                 # and nothing it asked is still open
     if background_running; then
       # Not done yet: the marker says so to the idle notification that follows.

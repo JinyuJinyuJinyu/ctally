@@ -367,7 +367,9 @@ Two pieces, connected by a folder:
    A usage limit hit is also noted in `~/.claude/ctally.d/.limit`: what Claude Code said, when the limit
    resets, from the status line, and the account it was hit on. Until then a new prompt leaves the session
    `limited`, and the limit shows as used up, unless you've changed accounts since. The note goes once a
-   turn gets through, Claude Code says the limit has reset, or the status line shows a new window.
+   turn gets through on that account (the session's own, or another session's that has done something since
+   the limit was hit: a reply already on its way then shows nothing), Claude Code says the limit has reset,
+   or the status line shows a new window.
    Esc and killed agents get no hook, so CTally also reads the end of each busy session's transcript, and of
    its agents' transcripts: a stop there with nothing after it means the turn is over, and an agent whose
    transcript ends interrupted (or that Claude Code marks `stoppedByUser`) is gone.
