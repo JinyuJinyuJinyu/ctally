@@ -311,8 +311,9 @@ ctally setup --tmux
 
 - **Wayland** (Ubuntu's default) lets no app keep itself on top or choose where its window goes, so CTally
   runs through XWayland, which allows both. That happens on its own; you don't need to switch sessions.
-- **The top-bar icon** uses Ubuntu's AppIndicator support, which is on by default. On a desktop without a
-  tray, right-click the indicator itself for the menu.
+- **The top-bar icon** uses Ubuntu's AppIndicator support, which is on by default. A click opens its menu; a
+  double click opens Settings, and another closes it. On a desktop without a tray, right-click the indicator
+  itself for the menu.
 - **Clicking a session** switches tmux to its pane, and opens a terminal on that tmux session if none shows
   it. Raising the terminal's window works on X11 with `xdotool` installed (`sudo apt install xdotool`);
   under Wayland no app may raise another's window, so bring the terminal up yourself. prefix + J needs

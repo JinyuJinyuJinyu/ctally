@@ -329,7 +329,8 @@ class Controller:
         self.tray_menu.insertActions(first, self.usage_actions)
 
     def _tray_activated(self, reason) -> None:
-        # macOS opens the menu on a click by itself; on Linux a plain click brings up settings.
+        # macOS opens the menu on a click by itself. On Linux a click the tray passes on brings up
+        # settings: Ubuntu's own tray opens the menu on a single click and passes on a double one.
         if system.MAC or reason != QSystemTrayIcon.Trigger:
             return
         if self.settings is not None and self.settings.isVisible():
