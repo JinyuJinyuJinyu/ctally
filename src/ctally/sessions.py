@@ -366,7 +366,11 @@ def _tokens(count: int) -> str:
 
 def context_from(record: dict) -> Context | None:
     """From the JSON Claude Code hands its status line: "context_window", with the window's
-    size, what's in it now, and the share used. Before the first reply nothing's in it yet."""
+    size, what's in it now, and the share used. Before the first reply nothing's in it yet.
+
+    Nor is nothing a reading: Claude Code counts from the replies it has had, so a session
+    just started on a conversation it resumed says 0% with no tokens, whatever that
+    conversation holds, until its next reply."""
     window = record.get("context_window")
     if not isinstance(window, dict):
         return None
@@ -383,6 +387,8 @@ def context_from(record: dict) -> Context | None:
         if not tokens:
             return None
         percent = 100 * tokens / size
+    if not tokens and not percent:
+        return None
     return Context(float(percent), int(size), int(tokens))
 
 

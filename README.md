@@ -124,6 +124,10 @@ session in `~/.claude/ctally.d/.status/`. A session shows its gauge from its nex
 line is in place: after upgrading from 0.3.2 or earlier, run `ctally setup` again (sessions already running
 pick it up without a restart). With `--no-statusline` there's no gauge.
 
+Claude Code counts from the replies it has had, so a session you've just reopened on an earlier conversation
+(`claude --resume`, `--continue`) reports nothing in its window until its next reply. CTally shows no gauge
+for it till then, rather than a `0%` that isn't so.
+
 ## Usage limits
 
 CTally shows your plan's usage limits the way Claude Code's `/usage` does: the current session (the
@@ -460,7 +464,8 @@ tmux settings are left as they are. The second removes the command and its Qt.
   running: run `ctally run`. Its log is `~/Library/Logs/ctally.log` on macOS and
   `~/.local/state/ctally/ctally.log` on Linux.
 - **No context gauge.** It needs CTally's status line (not with `--no-statusline`), a version of it from 0.3.3
-  on (run `ctally setup` again after upgrading), and a reply in that session since.
+  on (run `ctally setup` again after upgrading), and a reply in that session since: since it was reopened,
+  too, if it's a conversation you resumed.
 - **No usage limits.** They need a Pro, Max or Team plan, and a reply in some session since CTally's setup
   (restart sessions that were running then). `ctally usage` shows what CTally has.
 - **Ubuntu: "Could not load the Qt platform plugin xcb".** Install the library it names, usually

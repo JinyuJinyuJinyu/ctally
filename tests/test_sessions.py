@@ -819,6 +819,18 @@ def test_no_context_yet_or_nothing_sensible():
     assert context_from(window(context_window_size=200_000, used_percentage="5")) is None
 
 
+def test_no_tokens_counted_is_no_reading():
+    """What Claude Code says of a session it has had no reply in yet, a resumed one included."""
+    nothing = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+    assert context_from(window(context_window_size=1_000_000, used_percentage=0, remaining_percentage=100,
+                               total_input_tokens=0, current_usage=nothing)) is None
+    assert context_from(window(context_window_size=1_000_000, used_percentage=0)) is None
+    # A little in it still rounds down to 0%, and a share given without the count stands.
+    assert context_from(window(context_window_size=1_000_000, used_percentage=0,
+                               current_usage={**nothing, "input_tokens": 2100})).text == "0%"
+    assert context_from(window(context_window_size=200_000, used_percentage=62)).text == "62%"
+
+
 def test_context_levels_and_words():
     assert [Context(p, 200_000, 0).level for p in (10, 74.9, 75, 89, 90, 120)] == [0, 0, 1, 1, 2, 2]
     assert [Context(p, 200_000, 0).text for p in (0.4, 61.6, 140, -3)] == ["0%", "62%", "100%", "0%"]
