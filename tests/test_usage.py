@@ -266,6 +266,82 @@ def test_reader_looks_only_every_so_often(tmp_path):
     assert reader.poll() is not None
 
 
+# MARK: One account's limits, then another's
+
+OTHER = "00000000-0000-4000-8000-000000000002"
+
+
+def signed_in(path, who: str | None) -> None:
+    """~/.claude.json with no /usage numbers in it, just who is signed in."""
+    path.write_text(json.dumps({"numStartups": 80, "oauthAccount": who and {"accountUuid": who}}))
+
+
+def keep(folder, who: str, **numbers) -> None:
+    """What CTally's status line keeps for an account."""
+    (folder / ".usage").mkdir(exist_ok=True)
+    (folder / ".usage" / who).write_text(json.dumps(status_line(**numbers)))
+
+
+def test_only_the_account_signed_in_shows(tmp_path):
+    claude_json, live = tmp_path / ".claude.json", tmp_path / ".statusline"
+    keep(tmp_path, ACCOUNT, five=92, week=89)
+    keep(tmp_path, OTHER, five=12, week=30)
+    live.write_text(json.dumps(status_line(five=92, week=89)))      # the latest of any, as it used to be kept
+    signed_in(claude_json, ACCOUNT)
+    assert [l.percent for l in usage.read(claude_json, live).limits] == [92, 89]
+    signed_in(claude_json, OTHER)                                   # swapped, under the sessions running
+    assert [l.percent for l in usage.read(claude_json, live).limits] == [12, 30]
+    signed_in(claude_json, "00000000-0000-4000-8000-000000000003")  # one not seen yet: no numbers of another's
+    assert usage.read(claude_json, live) is None
+    signed_in(claude_json, None)
+    assert usage.read(claude_json, live) is None
+    keep(tmp_path, "-", five=40, week=41)                           # kept with nobody signed in
+    assert [l.percent for l in usage.read(claude_json, live).limits] == [40, 41]
+    assert [l.percent for l in usage.read(tmp_path / "missing.json", live).limits] == [40, 41]
+
+
+def test_an_account_id_is_never_a_path(tmp_path):
+    claude_json, live = tmp_path / ".claude.json", tmp_path / "state" / ".statusline"
+    live.parent.mkdir()
+    (live.parent / ".usage").mkdir()
+    (tmp_path / "elsewhere").write_text(json.dumps(status_line(five=66)))
+    signed_in(claude_json, "../../elsewhere")
+    assert usage.account(json.loads(claude_json.read_text())) is None
+    assert usage.read(claude_json, live) is None
+
+
+def test_the_reader_follows_the_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(UsageReader, "EVERY", 0)
+    claude_json, live = tmp_path / ".claude.json", tmp_path / ".statusline"
+    reader = UsageReader(claude_json, live)
+    live.write_text(json.dumps(status_line(five=77)))
+    signed_in(claude_json, ACCOUNT)
+    assert reader.poll().limits[0].percent == 77                    # a status line from before accounts
+    keep(tmp_path, ACCOUNT, five=92)
+    assert reader.poll().limits[0].percent == 92
+    signed_in(claude_json, OTHER)
+    assert reader.poll() is None                                    # nothing seen of that account yet
+    keep(tmp_path, OTHER, five=12)
+    assert reader.poll().limits[0].percent == 12
+    keep(tmp_path, OTHER, five=13)
+    stamp = time.time() + 5
+    os.utime(tmp_path / ".usage" / OTHER, (stamp, stamp))
+    assert reader.poll().limits[0].percent == 13
+    signed_in(claude_json, ACCOUNT)
+    assert reader.poll().limits[0].percent == 92                    # back, to where it was left
+
+
+def test_the_cache_and_the_status_line_of_the_same_account_merge(tmp_path):
+    claude_json, live = tmp_path / ".claude.json", tmp_path / ".statusline"
+    claude_json.write_text(json.dumps(cached()))
+    keep(tmp_path, ACCOUNT, five=83)
+    keep(tmp_path, OTHER, five=5, week=6)
+    stamp = FETCHED / 1000 + 60
+    os.utime(tmp_path / ".usage" / ACCOUNT, (stamp, stamp))
+    os.utime(tmp_path / ".usage" / OTHER, (stamp + 60, stamp + 60))
+    assert [l.percent for l in usage.read(claude_json, live).limits] == [83, 50, 0]
+
+
 # MARK: A limit hit
 
 def hit(resets_at=None, message="You've hit your session limit · resets 7:30pm (Australia/Sydney)", noted=1791360000):
@@ -286,6 +362,32 @@ def test_a_hit_limit_is_used_up_whatever_the_numbers_said():
     assert [l.percent for l in weekly.limits] == [99.4, 100]
     assert with_hit(live, hit(1791361800, "You've hit your Fable limit"), now) == live
     assert with_hit(live, None, now) == live
+
+
+def test_a_limit_hit_on_another_account_says_nothing_of_this_one():
+    from ctally.sessions import LimitHit
+    live = parse_live(status_line(five=12), 1791359000)
+    theirs = LimitHit(1791361800, "You've hit your session limit", 1791360000, OTHER)
+    now = 1791360100
+    assert with_hit(live, theirs, now, ACCOUNT) == live
+    assert with_hit(live, theirs, now, OTHER).limits[0].percent == 100
+    assert with_hit(live, theirs, now).limits[0].percent == 100             # nobody known to be signed in
+    assert with_hit(live, hit(1791361800), now, ACCOUNT).limits[0].percent == 100   # nor whose it was
+
+
+def test_read_goes_by_whose_limit_it_was(tmp_path):
+    claude_json, live = tmp_path / ".claude.json", tmp_path / ".statusline"
+    reset = int(time.time()) + 3600
+    for who, used in ((ACCOUNT, 99), (OTHER, 12)):
+        data = status_line(five=used)
+        data["rate_limits"]["five_hour"]["resets_at"] = reset if who == ACCOUNT else reset - 1800
+        (tmp_path / ".usage").mkdir(exist_ok=True)
+        (tmp_path / ".usage" / who).write_text(json.dumps(data))
+    (tmp_path / ".limit").write_text(f"{reset} You've hit your session limit · resets 7:30pm\naccount {ACCOUNT}\n")
+    signed_in(claude_json, ACCOUNT)
+    assert usage.read(claude_json, live).limits[0].percent == 100
+    signed_in(claude_json, OTHER)
+    assert usage.read(claude_json, live).limits[0].percent == 12
 
 
 def test_a_hit_without_a_reset_time_borrows_the_window_it_was_hit_in():

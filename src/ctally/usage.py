@@ -9,8 +9,12 @@ Two places, both written by Claude Code, both only read here: no network, no cre
   own cache rather than a documented interface, so this expects to find nothing, or something
   new, and copes.
 - CTally's status line saves what Claude Code hands every status line after each reply: the
-  session and the week, nothing else (~/.claude/ctally.d/.statusline), never older than what
-  it saved before. Where it's newer, it wins for those two.
+  session and the week, nothing else, the latest for each account you use
+  (~/.claude/ctally.d/.usage/<account id>). Where it's newer, it wins for those two.
+
+Both are an account's. ~/.claude.json names the one signed in, and only its numbers are shown:
+sign in to another, or swap accounts under the sessions that are running, and the limits are
+that account's from then on, as last seen on it, or none until it has been.
 
 Neither moves when a request is refused for the limit, so the hook's note of a limit hit
 (~/.claude/ctally.d/.limit) marks that one used up until it resets.
@@ -92,11 +96,27 @@ def read(path: Path | None = None, live: Path | None = None) -> Usage | None:
     """The limits as Claude Code last saw them, or None if it hasn't said (an API key rather
     than a plan, or no session since signing in)."""
     try:
-        cached = parse(json.loads((path or CLAUDE_JSON).read_text()))
+        config = json.loads((path or CLAUDE_JSON).read_text())
     except (OSError, ValueError):
-        cached = None
+        config = None
     live = live or STATUS_LINE
-    return with_hit(merge(cached, read_live(live)), read_limit(live.parent), time.time())
+    who = account(config)
+    return with_hit(merge(parse(config), read_live(live_file(live, who))), read_limit(live.parent), time.time(), who)
+
+
+def account(config) -> str | None:
+    """The account signed in, as ~/.claude.json names it: the one whose limits these are."""
+    found = config.get("oauthAccount") if isinstance(config, dict) else None
+    uuid = found.get("accountUuid") if isinstance(found, dict) else None
+    return uuid if isinstance(uuid, str) and re.fullmatch(r"[A-Za-z0-9_-]+", uuid) else None
+
+
+def live_file(status_line: Path, who: str | None) -> Path:
+    """Where CTally's status line keeps the latest for an account: .usage/<account id> beside
+    .statusline ("-" with nobody signed in), which may not be there yet. A status line from
+    before it told accounts apart kept only .statusline, the latest from any."""
+    store = status_line.parent / ".usage"
+    return store / (who or "-") if store.is_dir() else status_line
 
 
 def read_live(path: Path | None = None) -> Usage | None:
@@ -134,11 +154,12 @@ def merge(cached: Usage | None, live: Usage | None) -> Usage | None:
     return Usage(_ordered(limits), live.fetched_at)
 
 
-def with_hit(usage: Usage | None, hit: LimitHit | None, now: float) -> Usage | None:
+def with_hit(usage: Usage | None, hit: LimitHit | None, now: float, who: str | None = None) -> Usage | None:
     """The limit a turn just ran into, used up whatever the numbers said: the refused request
-    doesn't update them, so they'd sit at 99%, say, until Claude Code next fetched /usage."""
+    doesn't update them, so they'd sit at 99%, say, until Claude Code next fetched /usage.
+    Not one hit on another account than the one signed in (who), when both are known."""
     key = hit.key if hit else None
-    if key is None:
+    if key is None or (who and hit.account and hit.account != who):
         return usage
     current = next((limit for limit in usage.limits if limit.key == key), None) if usage else None
     resets = hit.resets_at
@@ -327,9 +348,10 @@ class UsageReader:
     EVERY = 2.0
 
     def __init__(self, path: Path | None = None, live: Path | None = None):
-        self._cache = _Watched(path or CLAUDE_JSON, lambda data, _: parse(data))
-        self._live = _Watched(live or STATUS_LINE, parse_live)
-        self._hits = self._live.path.parent        # the hook's .limit sits beside it
+        self._cache = _Watched(path or CLAUDE_JSON, lambda data, _: (parse(data), account(data)))
+        self._status_line = live or STATUS_LINE
+        self._live = _Watched(self._status_line, parse_live)
+        self._hits = self._status_line.parent       # the hook's .limit sits beside it
         self._checked = -math.inf
         self._usage: Usage | None = None
 
@@ -337,7 +359,12 @@ class UsageReader:
         now = time.monotonic()
         if now - self._checked >= UsageReader.EVERY:
             self._checked = now
-            self._usage = with_hit(merge(self._cache.poll(), self._live.poll()), read_limit(self._hits), time.time())
+            cached, who = self._cache.poll() or (None, None)
+            # The account signed in can change under me, and with it the file to watch.
+            path = live_file(self._status_line, who)
+            if path != self._live.path:
+                self._live = _Watched(path, parse_live)
+            self._usage = with_hit(merge(cached, self._live.poll()), read_limit(self._hits), time.time(), who)
         return self._usage
 
 
@@ -345,10 +372,10 @@ class _Watched:
     def __init__(self, path: Path, parse_):
         self.path = path
         self.parse = parse_
-        self.value: Usage | None = None
+        self.value = None
         self.stamp: tuple | None = None
 
-    def poll(self) -> Usage | None:
+    def poll(self):
         try:
             info = os.stat(self.path)
         except OSError:

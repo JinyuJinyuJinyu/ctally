@@ -146,6 +146,10 @@ you've switched them on.
 - **Hitting a limit** shows it at 100% at once, and the sessions it stopped as **limit**. A prompt you send
   before it resets doesn't make them look busy, because it can't get through. A limit reset early starts a new
   window, and the meter follows it from the next reply.
+- **More than one account**: the limits are the account's you're signed in to. Sign in to another, or swap
+  accounts under the sessions that are running (with a tool like `claude-swap`), and within a couple of
+  seconds the meters are that account's, as CTally last saw them: nothing to wait for if you've used it
+  before, and its first reply if you haven't. Switch back and the first one's are there again.
 - **tmux's status line** gets `5h 71% 7d 49%` after the counts, coloured the same way, and `ctally usage`
   prints the lot:
 
@@ -162,6 +166,11 @@ reply, so `ctally setup` adds a status line that hands them to CTally and shows 
 line you already had keeps showing; CTally's runs it). Everything else comes from the copy of the `/usage`
 numbers Claude Code keeps in `~/.claude.json`, which it refreshes only now and then. Limits apply to Pro,
 Max and Team plans; with an API key there are none to show.
+
+Claude Code doesn't say which account a session's numbers are for, and a session keeps handing over the
+ones from its last reply, hours later and accounts later. So CTally keeps the latest for each account
+apart, and tells them by their week: every account's week ends at its own time. Numbers from a session
+that hasn't replied since you changed accounts go with the account they came from, not the one you're on.
 
 Turn the limits off with the switch in Settings, or right-click → Hide Usage Limits. That hides them from tmux
 too. `ctally setup --no-statusline` leaves the status line out; the limits then refresh only when Claude Code
@@ -328,7 +337,7 @@ control Terminal. Allow it so CTally can bring the right tab forward. You can ch
 
 ```
 Claude Code ──hooks──▶ ~/.claude/ctally.d/<session id> ──read 2×/s──▶ ctally run
-            ──status line──▶ ~/.claude/ctally.d/.statusline ─┤
+            ──status line──▶ ~/.claude/ctally.d/.usage/…  ───┤
             ──its own list──▶ ~/.claude/sessions/<pid>.json ─┘
 ```
 
@@ -355,10 +364,10 @@ Two pieces, connected by a folder:
    asked about has run or failed, whoever asked (Claude, or the agent of its that did) has gone on to another
    tool, the turn is over, or you've sent a new prompt. Its other agents carrying on meanwhile, and tools
    started alongside the one asked about, change nothing.
-   A usage limit hit is also noted in `~/.claude/ctally.d/.limit`: what Claude Code said, and when the limit
-   resets, from the status line. Until then a new prompt leaves the session `limited`, and the limit shows
-   as used up. The note goes once a turn gets through, Claude Code says the limit has reset, or the status
-   line shows a new window.
+   A usage limit hit is also noted in `~/.claude/ctally.d/.limit`: what Claude Code said, when the limit
+   resets, from the status line, and the account it was hit on. Until then a new prompt leaves the session
+   `limited`, and the limit shows as used up, unless you've changed accounts since. The note goes once a
+   turn gets through, Claude Code says the limit has reset, or the status line shows a new window.
    Esc and killed agents get no hook, so CTally also reads the end of each busy session's transcript, and of
    its agents' transcripts: a stop there with nothing after it means the turn is over, and an agent whose
    transcript ends interrupted (or that Claude Code marks `stoppedByUser`) is gone.
@@ -366,13 +375,17 @@ Two pieces, connected by a folder:
    For `ctally stats`, each change of state, each prompt, and every five minutes of a lasting one, gets a
    line in `~/.claude/ctally.d/.history/<date>`: the time, the session id and the state.
 
-   **The status line.** `ctally-statusline.sh` saves what Claude Code hands its status line, the latest from
-   any session, to `~/.claude/ctally.d/.statusline` whenever it includes the usage limits. Each session hands
-   over the numbers from its own last reply, and an idle one redraws its line now and then with numbers hours
-   old, so a reading is kept only if it isn't older than the saved one: usage only grows within a window, and
-   a later reset time is a later window. It also saves each session's latest to
-   `~/.claude/ctally.d/.status/<session id>`, for how full that session's context is. It prints nothing, or
-   runs the status line you had before and prints what that prints.
+   **The status line.** `ctally-statusline.sh` saves what Claude Code hands its status line whenever it
+   includes the usage limits: the latest for each account, in `~/.claude/ctally.d/.usage/<account id>` (the
+   id `~/.claude.json` gives the account signed in), and the latest for the one signed in also in
+   `~/.claude/ctally.d/.statusline`, where the hook looks up when a limit resets. Each session hands over the
+   numbers from its own last reply, on whichever account that was, and an idle one redraws its line now and
+   then with numbers hours old. So a reading goes by its week: for a week already kept, it belongs to that
+   account, and replaces what's kept only if it's newer (more used in the same session window, or a session
+   window where the kept one has ended). For a week not seen before it's the account signed in's, if it's
+   news, which is to say not what that session said last time. It also saves each session's latest to
+   `~/.claude/ctally.d/.status/<session id>`, for how full that session's context is and to tell its news
+   by. It prints nothing, or runs the status line you had before and prints what that prints.
 
 2. **The app.** It polls the folder twice a second, checking modification times first so unchanged files
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
@@ -430,7 +443,8 @@ screen of that session's tmux pane when you open the menu, and types only the di
 For how full each session's context is, it reads the latest its status line was handed for that session
 (which also holds the model, the session's cost so far and its folder; CTally uses only the context numbers).
 For the usage limits it reads what its status line saved, and from `~/.claude.json` only the cached `/usage`
-numbers and your account's id, to check they're yours. It never touches your credentials.
+numbers and your account's id, to show the numbers that are that account's (the status line and the hook
+read the id there too, and name files by it). It never touches your credentials.
 
 The history behind `ctally stats` holds nothing but times, session ids and states, and is kept for 90 days.
 
@@ -474,7 +488,10 @@ tmux settings are left as they are. The second removes the command and its Qt.
   on (run `ctally setup` again after upgrading), and a reply in that session since: since it was reopened,
   too, if it's a conversation you resumed.
 - **No usage limits.** They need a Pro, Max or Team plan, and a reply in some session since CTally's setup
-  (restart sessions that were running then). `ctally usage` shows what CTally has.
+  (restart sessions that were running then). `ctally usage` shows what CTally has. Just after changing to
+  an account CTally hasn't seen, there are none until its first reply.
+- **The limits look like another account's.** After upgrading from 0.3.4 or earlier, run `ctally setup`
+  again: it's the newer status line script that tells accounts apart.
 - **Ubuntu: "Could not load the Qt platform plugin xcb".** Install the library it names, usually
   `sudo apt install libxcb-cursor0`.
 

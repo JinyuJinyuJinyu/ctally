@@ -318,6 +318,42 @@ def test_a_prompt_while_the_limit_holds_stays_limited(hook):
     assert hook.state(SID) == "working"
 
 
+def claude_json(hook, account: str | None) -> None:
+    """~/.claude.json, the way Claude Code writes it, saying who is signed in."""
+    config = {"numStartups": 7, "cachedUsageUtilization": {"accountUuid": "someone-else"},
+              "oauthAccount": account and {"accountUuid": account, "emailAddress": "me@example.com"}}
+    (hook.home / ".claude.json").write_text(json.dumps(config, indent=2))
+
+
+def test_the_limit_is_noted_for_the_account_signed_in(hook):
+    soon, later, week = int(time.time()) + 1800, int(time.time()) + 3600, int(time.time()) + 4 * 86400
+    seen_limits(hook, later, week)                                  # the latest of any account
+    (hook.dir / ".usage").mkdir()
+    (hook.dir / ".usage" / "acct-b").write_text(json.dumps({"rate_limits": {
+        "five_hour": {"used_percentage": 99, "resets_at": soon}, "seven_day": {"used_percentage": 9, "resets_at": week}}}))
+    claude_json(hook, "acct-b")
+    failed(hook)
+    assert noted(hook) == f"{soon} {SESSION_HIT}\naccount acct-b\n"         # its own window, not the other's
+    claude_json(hook, "acct-c")                                     # one the status line hasn't seen
+    failed(hook)
+    assert noted(hook) == f"0 {SESSION_HIT}\naccount acct-c\n"
+    claude_json(hook, None)
+    failed(hook)
+    assert noted(hook) == f"0 {SESSION_HIT}\n"
+
+
+def test_a_prompt_after_changing_accounts_is_working(hook):
+    """The limit was the other account's: on this one the prompt goes through."""
+    seen_limits(hook, int(time.time()) + 3600, int(time.time()) + 86400)
+    claude_json(hook, "acct-a")
+    failed(hook)
+    hook("working", payload(hook_event_name="UserPromptSubmit", prompt="go on"))
+    assert hook.state(SID) == "limited"
+    claude_json(hook, "acct-b")
+    hook("working", payload(hook_event_name="UserPromptSubmit", prompt="go on"))
+    assert hook.state(SID) == "working"
+
+
 def test_a_prompt_once_the_limit_has_reset_is_working(hook):
     seen_limits(hook, int(time.time()) + 3600, int(time.time()) + 86400)
     failed(hook)
@@ -357,6 +393,8 @@ def test_more_news_notifications_are_ignored(hook):
 # MARK: The status line script
 
 STATUS_LINE_SCRIPT = HOOK.with_name("ctally-statusline.sh")
+HOUR, WEEK = int(time.time()) + 3 * 3600, int(time.time()) + 4 * 86400     # windows still going
+OTHER_WEEK = WEEK + 2 * 86400                                                # another account's
 
 
 def status_line(home, payload, *args):
@@ -367,18 +405,59 @@ def status_line(home, payload, *args):
                           capture_output=True, env=env, timeout=10)
 
 
-LIMITS = {"session_id": "s1", "rate_limits": {"five_hour": {"used_percentage": 79, "resets_at": 1791361800}}}
+def started(home, *names) -> None:
+    """A session's first status line, as it starts: its context window, and no limits before
+    its first reply."""
+    for name in names:
+        status_line(home, {"session_id": name, "context_window": {"context_window_size": 200000}})
+
+
+def usage_line(session: tuple | None, week: tuple | None = None, name: str = "s1") -> dict:
+    """What one session hands its status line: (used, resets at) for the session and the week."""
+    limits = {}
+    if session:
+        limits["five_hour"] = {"used_percentage": session[0], "resets_at": session[1]}
+    if week:
+        limits["seven_day"] = {"used_percentage": week[0], "resets_at": week[1]}
+    return {"session_id": name, "rate_limits": limits}
+
+
+def kept(home, account: str = "-") -> dict | None:
+    """What's kept for an account; "-" with nobody signed in."""
+    path = home / ".claude" / "ctally.d" / ".usage" / account
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def saved_usage(home, account: str = "-") -> tuple | None:
+    found = kept(home, account)
+    limits = found["rate_limits"] if found else None
+    return limits and tuple(limits.get(window, {}).get("used_percentage") for window in ("five_hour", "seven_day"))
+
+
+def sign_in(home, account: str | None, indent: int | None = 2) -> None:
+    """~/.claude.json as Claude Code keeps it: much else in it, other accounts' ids among it."""
+    config = {"numStartups": 7, "cachedUsageUtilization": {"accountUuid": "someone-else", "utilization": {}},
+              "oauthAccount": account and {"accountUuid": account, "emailAddress": "me@example.com",
+                                           "ccOnboardingFlags": {"seen": True}, "organizationUuid": "org-1"},
+              "projects": {"/work": {"accountUuid": "not-this-one"}}}
+    (home / ".claude.json").write_text(json.dumps(config, indent=indent))
+
+
+LIMITS = usage_line((79, HOUR))
 
 
 def test_status_line_saves_the_limits_and_prints_nothing(tmp_path):
+    started(tmp_path, "s1")
     done = status_line(tmp_path, LIMITS)
     assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
-    saved = tmp_path / ".claude" / "ctally.d" / ".statusline"
-    assert json.loads(saved.read_text()) == LIMITS
-    assert sorted(os.listdir(saved.parent)) == [".statusline"]          # no temporary file left
+    state = tmp_path / ".claude" / "ctally.d"
+    assert json.loads((state / ".statusline").read_text()) == LIMITS == kept(tmp_path)
+    assert sorted(os.listdir(state)) == [".status", ".statusline", ".usage"]        # no temporary file left
+    assert (os.listdir(state / ".status"), os.listdir(state / ".usage")) == (["s1"], ["-"])
 
 
 def test_status_line_without_limits_keeps_the_last_ones(tmp_path):
+    started(tmp_path, "s1")
     status_line(tmp_path, LIMITS)
     status_line(tmp_path, {"session_id": "s2", "model": {"id": "x"}})   # before the first reply
     saved = tmp_path / ".claude" / "ctally.d" / ".statusline"
@@ -386,6 +465,7 @@ def test_status_line_without_limits_keeps_the_last_ones(tmp_path):
 
 
 def test_status_line_runs_the_one_you_had(tmp_path):
+    started(tmp_path, "s1")
     theirs = "read line; printf 'mine: %s' \"$(printf '%s' \"$line\" | cut -c1-14)\"; exit 3"
     done = status_line(tmp_path, LIMITS, theirs)
     assert (done.returncode, done.stdout) == (3, 'mine: {"session_id":')
@@ -398,57 +478,145 @@ def test_status_line_writes_nothing_where_it_cant(tmp_path):
     assert (done.returncode, done.stdout, done.stderr) == (0, "still here\n", "")
 
 
-def usage_line(session: tuple, week: tuple, name: str = "s1") -> dict:
-    """What one session hands its status line: (used, resets at) for the session and the week."""
-    return {"session_id": name, "rate_limits": {
-        "five_hour": {"used_percentage": session[0], "resets_at": session[1]},
-        "seven_day": {"used_percentage": week[0], "resets_at": week[1]}}}
-
-
-def saved_usage(home) -> tuple:
-    limits = json.loads((home / ".claude" / "ctally.d" / ".statusline").read_text())["rate_limits"]
-    return limits["five_hour"]["used_percentage"], limits["seven_day"]["used_percentage"]
+def test_status_line_waits_for_news_from_a_session_it_never_heard(tmp_path):
+    """A session running since before CTally's status line: what it hands over first could be
+    hours old, and there's nothing it said before to tell."""
+    status_line(tmp_path, usage_line((60, HOUR), (8, WEEK)))
+    status_line(tmp_path, usage_line((60, HOUR), (8, WEEK)))            # and again, redrawing
+    assert kept(tmp_path) is None
+    status_line(tmp_path, usage_line((61, HOUR), (8, WEEK)))            # a reply: it moved
+    assert saved_usage(tmp_path) == (61, 8)
 
 
 def test_status_line_never_steps_back_within_a_window(tmp_path):
-    hour, week = int(time.time()) + 3 * 3600, int(time.time()) + 4 * 86400
-    status_line(tmp_path, usage_line((60, hour), (8, week), "busy"))
-    status_line(tmp_path, usage_line((34, hour), (5, week), "idle"))       # an idle session redraws, hours old
+    started(tmp_path, "busy", "idle")
+    status_line(tmp_path, usage_line((60, HOUR), (8, WEEK), "busy"))
+    status_line(tmp_path, usage_line((34, HOUR), (5, WEEK), "idle"))       # an idle session redraws, hours old
     assert saved_usage(tmp_path) == (60, 8)
-    status_line(tmp_path, usage_line((60, hour + 30), (7, week), "idle"))  # same session use, older week
+    status_line(tmp_path, usage_line((60, HOUR + 30), (7, WEEK), "idle"))  # same session use, older week
     assert saved_usage(tmp_path) == (60, 8)
-    status_line(tmp_path, usage_line((64.5, hour), (8, week), "busy"))
+    status_line(tmp_path, usage_line((64.5, HOUR), (8, WEEK), "busy"))
     assert saved_usage(tmp_path) == (64.5, 8)
-    status_line(tmp_path, usage_line((64.5, hour), (9, week), "busy"))     # the week moved, the session not
+    status_line(tmp_path, usage_line((64.5, HOUR), (9, WEEK), "busy"))     # the week moved, the session not
     assert saved_usage(tmp_path) == (64.5, 9)
 
 
 def test_status_line_takes_a_new_window(tmp_path):
-    hour, week = int(time.time()) + 3 * 3600, int(time.time()) + 4 * 86400
-    status_line(tmp_path, usage_line((92, hour), (52, week)))
-    status_line(tmp_path, usage_line((2, hour + 7200), (0, week)))         # reset early: a later window
+    started(tmp_path, "s1", "idle")
+    status_line(tmp_path, usage_line((90, HOUR), (50, WEEK), "idle"))
+    status_line(tmp_path, usage_line((92, HOUR), (52, WEEK)))
+    status_line(tmp_path, usage_line((2, HOUR + 7200), (0, WEEK)))         # reset early: a later window
+    assert saved_usage(tmp_path) == (2, 0)
+    status_line(tmp_path, usage_line((90, HOUR), (50, WEEK), "idle"))      # the window that was, redrawn
     assert saved_usage(tmp_path) == (2, 0)
 
 
-def test_status_line_takes_anything_once_the_saved_window_is_over(tmp_path):
-    over, week = int(time.time()) - 60, int(time.time()) + 4 * 86400
-    status_line(tmp_path, usage_line((80, over), (50, week)))
-    status_line(tmp_path, usage_line((10, over - 3600), (40, week)))
-    assert saved_usage(tmp_path) == (10, 40)
+def test_status_line_takes_no_older_week_once_the_session_window_is_over(tmp_path):
+    """An idle session's window has run out, and Claude Code leaves it out: the week it still
+    hands over is as old as its last reply."""
+    started(tmp_path, "s1", "idle")
+    over = int(time.time()) - 60
+    status_line(tmp_path, usage_line((80, over), (50, WEEK)))              # that window is over: only the week counts
+    assert saved_usage(tmp_path) == (80, 50)
+    status_line(tmp_path, usage_line((10, over - 3600), (40, WEEK), "idle"))
+    status_line(tmp_path, usage_line(None, (40, WEEK), "idle"))
+    assert saved_usage(tmp_path) == (80, 50)
+    status_line(tmp_path, usage_line(None, (51, WEEK), "idle"))            # further on in the same week
+    assert saved_usage(tmp_path) == (None, 51)
+    status_line(tmp_path, usage_line((3, HOUR), (51, WEEK)))               # a new session window
+    assert saved_usage(tmp_path) == (3, 51)
+    status_line(tmp_path, usage_line(None, (60, WEEK), "idle"))            # none, while one is going: older
+    assert saved_usage(tmp_path) == (3, 51)
+
+
+def test_a_window_running_out_is_no_news(tmp_path):
+    """What an idle session hands over changes when its session window ends. For a week that
+    isn't kept, on the account signed in before, that mustn't pass for a reply."""
+    started(tmp_path, "s1")
+    status_line(tmp_path, usage_line((12, HOUR), (30, WEEK)))
+    notes = tmp_path / ".claude" / "ctally.d" / ".status"
+    (notes / "idle").write_text(json.dumps(usage_line((90, int(time.time()) - 60), (89, OTHER_WEEK), "idle")))
+    status_line(tmp_path, usage_line(None, (89, OTHER_WEEK), "idle"))
+    assert saved_usage(tmp_path) == (12, 30)
+    assert json.loads((notes / "idle").read_text()) == usage_line(None, (89, OTHER_WEEK), "idle")
+
+
+# Accounts
+
+def test_each_account_keeps_its_own(tmp_path):
+    sign_in(tmp_path, "acct-a")
+    started(tmp_path, "s1", "s2")
+    status_line(tmp_path, usage_line((55, HOUR), (88, WEEK), "s2"))
+    status_line(tmp_path, usage_line((92, HOUR), (89, WEEK)))
+    latest = tmp_path / ".claude" / "ctally.d" / ".statusline"
+    assert saved_usage(tmp_path, "acct-a") == (92, 89) and kept(tmp_path) is None
+    assert json.loads(latest.read_text()) == kept(tmp_path, "acct-a")
+
+    # Nearly out: I swap to my other account, under the sessions that are running.
+    sign_in(tmp_path, "acct-b")
+    fresh = usage_line((12, HOUR - 3600), (30, OTHER_WEEK))                # its session window ends sooner
+    status_line(tmp_path, fresh)
+    assert saved_usage(tmp_path, "acct-b") == (12, 30) and saved_usage(tmp_path, "acct-a") == (92, 89)
+    assert json.loads(latest.read_text()) == fresh
+    status_line(tmp_path, usage_line((55, HOUR), (88, WEEK), "s2"))        # an idle session, still on the first
+    assert saved_usage(tmp_path, "acct-b") == (12, 30) and saved_usage(tmp_path, "acct-a") == (92, 89)
+    assert json.loads(latest.read_text()) == fresh
+
+    # A reply that was on its way as I swapped: the first account's, by its week.
+    late = usage_line((93, HOUR), (89, WEEK), "s2")
+    status_line(tmp_path, late)
+    assert kept(tmp_path, "acct-a") == late and saved_usage(tmp_path, "acct-b") == (12, 30)
+    assert json.loads(latest.read_text()) == fresh                         # not the one signed in
+
+    # Back again, and a reply there.
+    sign_in(tmp_path, "acct-a")
+    back = usage_line((94, HOUR), (89, WEEK))
+    status_line(tmp_path, back)
+    assert kept(tmp_path, "acct-a") == back == json.loads(latest.read_text())
+    assert sorted(os.listdir(latest.parent / ".usage")) == ["acct-a", "acct-b"]
+
+
+@pytest.mark.parametrize("indent", [2, None])
+def test_the_account_is_the_one_signed_in_however_the_config_is_written(tmp_path, indent):
+    sign_in(tmp_path, "0f1e2d3c-aaaa-bbbb-cccc-1234567890ab", indent)
+    started(tmp_path, "s1")
+    status_line(tmp_path, usage_line((12, HOUR), (30, WEEK)))
+    assert os.listdir(tmp_path / ".claude" / "ctally.d" / ".usage") == ["0f1e2d3c-aaaa-bbbb-cccc-1234567890ab"]
+
+
+@pytest.mark.parametrize("config", ['{"oauthAccount": null, "other": {"accountUuid": "x"}}', "not json", None,
+                                    '{"oauthAccount": {"accountUuid": "../../escape"}}'])
+def test_with_nobody_signed_in_the_limits_are_just_kept(tmp_path, config):
+    if config is not None:
+        (tmp_path / ".claude.json").write_text(config)
+    started(tmp_path, "s1")
+    status_line(tmp_path, usage_line((12, HOUR), (30, WEEK)))
+    assert saved_usage(tmp_path) == (12, 30)
+    assert os.listdir(tmp_path / ".claude" / "ctally.d" / ".usage") == ["-"]
+
+
+def test_two_accounts_with_the_same_week_go_by_who_is_signed_in(tmp_path):
+    sign_in(tmp_path, "acct-a")
+    started(tmp_path, "s1", "s2")
+    status_line(tmp_path, usage_line((92, HOUR), (89, WEEK)))
+    sign_in(tmp_path, "acct-b")
+    status_line(tmp_path, usage_line((12, HOUR + 3600), (30, WEEK)))       # another session window in that week
+    assert (saved_usage(tmp_path, "acct-a"), saved_usage(tmp_path, "acct-b")) == ((92, 89), (12, 30))
+    status_line(tmp_path, usage_line((13, HOUR + 3600), (30, WEEK)))
+    assert (saved_usage(tmp_path, "acct-a"), saved_usage(tmp_path, "acct-b")) == ((92, 89), (13, 30))
 
 
 def test_status_line_ends_a_limit_reset_early(tmp_path):
     state = tmp_path / ".claude" / "ctally.d"
     state.mkdir(parents=True)
     limit = state / ".limit"
-    limit.write_text(f"1791361800 {SESSION_HIT}\n")
+    limit.write_text(f"{HOUR} {SESSION_HIT}\n")
+    started(tmp_path, "s1")
     status_line(tmp_path, LIMITS)                                           # the same window
     assert limit.exists()
-    week = {"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791361800 + 30},
-                            "seven_day": {"used_percentage": 0, "resets_at": 1791630000}}}
-    status_line(tmp_path, week)                                             # a clock's slack, no more
-    assert limit.exists()
-    later = {"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791378000}}}
+    status_line(tmp_path, usage_line((2, HOUR + 30), (0, WEEK)))            # a clock's slack, no more
+    assert limit.exists() and saved_usage(tmp_path) == (2, 0)
+    later = usage_line((2, HOUR + 7200), (0, WEEK))
     done = status_line(tmp_path, json.dumps(later, separators=(" , ", " : ")))   # a new window, however spaced
     assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
     assert not limit.exists()
@@ -457,12 +625,19 @@ def test_status_line_ends_a_limit_reset_early(tmp_path):
 def test_status_line_keeps_a_limit_it_cant_place(tmp_path):
     state = tmp_path / ".claude" / "ctally.d"
     state.mkdir(parents=True)
-    for note in (f"0 {SESSION_HIT}", "1791361800 You've hit your Fable limit", "junk"):
+    started(tmp_path, "s1")
+    notes = (f"0 {SESSION_HIT}", f"{HOUR} You've hit your Fable limit", "junk",
+             f"{HOUR} {SESSION_HIT}\naccount acct-a")                       # hit on the account I've left
+    sign_in(tmp_path, "acct-b")
+    for used, note in enumerate(notes, start=2):
         (state / ".limit").write_text(note + "\n")
-        later = {"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791378000}}}
-        done = status_line(tmp_path, later)
+        done = status_line(tmp_path, usage_line((used, HOUR + 7200)))
         assert (done.returncode, done.stderr) == (0, "")
+        assert saved_usage(tmp_path, "acct-b") == (used, None)
         assert (state / ".limit").exists(), note
+    (state / ".limit").write_text(f"{HOUR} {SESSION_HIT}\naccount acct-b\n")
+    status_line(tmp_path, usage_line((9, HOUR + 7200)))
+    assert not (state / ".limit").exists()
 
 
 # MARK: What a session asks
@@ -547,7 +722,7 @@ CONTEXT = {"session_id": "s1", "context_window": {
     "total_input_tokens": 195019, "context_window_size": 1000000, "used_percentage": 20,
     "current_usage": {"input_tokens": 2, "output_tokens": 11996, "cache_creation_input_tokens": 7878,
                       "cache_read_input_tokens": 187139}},
-    "rate_limits": {"five_hour": {"used_percentage": 17, "resets_at": 1793592000}}}
+    "rate_limits": {"five_hour": {"used_percentage": 17, "resets_at": HOUR}}}
 
 
 def test_status_line_keeps_each_sessions_own(tmp_path):
@@ -560,11 +735,14 @@ def test_status_line_keeps_each_sessions_own(tmp_path):
 
 
 def test_status_line_keeps_no_context_it_wasnt_given_or_cant_name(tmp_path):
-    status_line(tmp_path, LIMITS)
-    for bad in ("../escape", ".hidden", ""):
-        status_line(tmp_path, {**CONTEXT, "session_id": bad})
+    from ctally.sessions import context_from
+    status_line(tmp_path, LIMITS)                   # the limits it said, to tell its next from; no context in it
     status = tmp_path / ".claude" / "ctally.d" / ".status"
-    assert not status.exists() or os.listdir(status) == []
+    assert context_from(json.loads((status / "s1").read_text())) is None
+    status_line(tmp_path, {"session_id": "s3", "model": {"id": "x"}})
+    for bad in ("../escape", ".hidden", "", "two words"):
+        status_line(tmp_path, {**CONTEXT, "session_id": bad})
+    assert os.listdir(status) == ["s1"]
     assert not (tmp_path / ".claude" / "escape").exists()
 
 

@@ -10,7 +10,9 @@
 #
 # A turn stopped by the plan's usage limit leaves the session "limited", and notes the
 # limit in ~/.claude/ctally.d/.limit as "<Unix time it resets, or 0> <what Claude Code
-# said>". A prompt sent before then goes nowhere, so it leaves the session limited too.
+# said>", and under it "account <id>", the one signed in, when ~/.claude.json names one. A
+# prompt sent before then goes nowhere, so it leaves the session limited too, unless I've
+# changed accounts since: the limit was the other one's.
 #
 # What a session waiting on me asks, a tool to allow, questions or a plan, is kept as
 # Claude Code put it in ~/.claude/ctally.d/.asks/<session id>, until that's settled: the
@@ -78,9 +80,16 @@ background_running() {
     | grep -qE '"type" *: *"(subagent|workflow)"'
 }
 
+# The account signed in, as ~/.claude.json names it ("accountUuid" in "oauthAccount"), or
+# nothing. The limits are an account's, and I may have more than one.
+signed_in() {
+  tr -d '\n' 2>/dev/null < "$HOME/.claude.json" | grep -o '"oauthAccount"[[:space:]]*:[[:space:]]*{[^}]*' \
+    | grep -o '"accountUuid"[[:space:]]*:[[:space:]]*"[A-Za-z0-9_-]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
 # Notes the usage limit a turn just ran into: which one, as Claude Code put it ("You've hit
-# your session limit · resets 7:30pm (Australia/Sydney)"), and when that window resets, from
-# what CTally's status line saw last. 0 when that's not known.
+# your session limit · resets 7:30pm (Australia/Sydney)"), when that window resets, from what
+# CTally's status line saw last of this account (0 when that's not known), and whose it is.
 note_limit() {
   message=$(field last_assistant_message)
   case "$message" in
@@ -88,23 +97,34 @@ note_limit() {
     *"weekly limit"*) window=seven_day ;;
     *) window="" ;;
   esac
+  account=$(signed_in)
+  # The status line keeps each account's latest; one from before it did, only the latest of any.
+  seen="$dir/.statusline"
+  [ -d "$dir/.usage" ] && seen="$dir/.usage/${account:--}"
   resets=0
   if [ -n "$window" ]; then
-    resets=$(grep -o "\"$window\":{[^}]*}" "$dir/.statusline" 2>/dev/null | grep -o '"resets_at":[0-9]*' \
-      | head -n 1 | sed 's/.*://')
+    resets=$(grep -o "\"$window\"[[:space:]]*:[[:space:]]*{[^}]*}" "$seen" 2>/dev/null \
+      | grep -o '"resets_at"[[:space:]]*:[[:space:]]*[0-9]*' | head -n 1 | sed 's/.*:[[:space:]]*//')
     [ "${resets:-0}" -gt "$(date +%s)" ] 2>/dev/null || resets=0
   fi
   mkdir -p "$dir" 2>/dev/null
-  printf '%s %s\n' "$resets" "$message" 2>/dev/null > "$limit.$$" && mv -f "$limit.$$" "$limit" 2>/dev/null \
-    || rm -f "$limit.$$" 2>/dev/null
+  {
+    printf '%s %s\n' "$resets" "$message"
+    if [ -n "$account" ]; then printf 'account %s\n' "$account"; fi
+  } 2>/dev/null > "$limit.$$" && mv -f "$limit.$$" "$limit" 2>/dev/null || rm -f "$limit.$$" 2>/dev/null
 }
 
 # Whether that limit still holds: until it resets, or, not knowing when, until something
-# shows it has.
+# shows it has. Hit on another account than the one signed in now, it holds nothing up.
 limit_holds() {
   [ -f "$limit" ] || return 1
-  read -r resets _ < "$limit" 2>/dev/null
+  resets="" whose=""
+  { read -r resets _; read -r _ whose; } < "$limit" 2>/dev/null
   case "$resets" in "" | *[!0-9]*) resets=0 ;; esac
+  if [ -n "$whose" ]; then
+    account=$(signed_in)
+    [ -n "$account" ] && [ "$account" != "$whose" ] && return 1
+  fi
   [ "$resets" -eq 0 ] || [ "$resets" -gt "$(date +%s)" ]
 }
 

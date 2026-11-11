@@ -907,10 +907,12 @@ def fronts(running: list[Running]) -> dict[str, Running]:
 
 class LimitHit(NamedTuple):
     """The usage limit a turn last ran into, as the hook noted it in .limit: what Claude Code
-    said, and when the limit resets if the status line knew."""
+    said, when the limit resets if the status line knew, and on which account, if any was
+    signed in."""
     resets_at: float | None
     message: str            # "You've hit your session limit · resets 7:30pm (Australia/Sydney)"
     noted: float            # when it was hit
+    account: str | None = None
 
     @property
     def key(self) -> tuple | None:
@@ -953,14 +955,18 @@ def gone_idle(names: Names, watcher: AgentWatcher, sid: str, modified: float, li
 
 
 def read_limit(directory: Path = STATE_DIR) -> LimitHit | None:
+    """".limit": "<Unix time it resets, or 0> <what Claude Code said>", then, from a hook that
+    knew, a line "account <its id>"."""
     path = directory / ".limit"
     try:
         noted = path.stat().st_mtime
-        resets, _, message = path.read_text(errors="replace").strip().partition(" ")
+        first, *rest = path.read_text(errors="replace").strip().splitlines() or [""]
     except OSError:
         return None
+    resets, _, message = first.partition(" ")
     seconds = int(resets) if resets.isdigit() else 0
-    return LimitHit(float(seconds) if seconds else None, message, noted)
+    whose = next((line.split()[1] for line in rest if line.startswith("account ") and len(line.split()) == 2), None)
+    return LimitHit(float(seconds) if seconds else None, message, noted, whose)
 
 
 class StateReader:
@@ -1111,7 +1117,9 @@ class StateReader:
 
     def _prune(self) -> None:
         """Sessions killed without a SessionEnd hook leave their file behind, and any
-        agents' folder or notes: what they asked, what their status line said."""
+        agents' folder or notes: what they asked, what their status line said. A session
+        still running keeps its notes however long it sits: the status line tells what's
+        news by what each session said last."""
         now = time.time()
         if now - self.last_prune < 60:
             return
@@ -1133,7 +1141,7 @@ class StateReader:
             except OSError:
                 continue
             for name in names:
-                if name in self.cache:
+                if name in self.cache or name in self.unheard:
                     continue
                 path = folder / name
                 try:

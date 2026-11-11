@@ -889,6 +889,36 @@ def test_a_dead_sessions_status_is_pruned(dirs):
     assert sorted(os.listdir(state / ".status")) == ["fresh"]
 
 
+def test_a_session_still_running_keeps_its_status_however_long_it_sits(dirs, registry, processes):
+    """Heard from by the hooks or only in Claude Code's list: the status line tells its news
+    by what it said last."""
+    state, projects = dirs
+    long_ago = time.time() - StateReader.STALE_AFTER - 60
+    write(state, "heard", f"done {LIVE} api\n", mtime=long_ago)
+    listed(registry, processes(), "only-listed", "/work/docs")
+    for sid in ("heard", "only-listed", "gone"):
+        keep_status(state, sid, 62, mtime=long_ago)
+    reader = StateReader(state, projects, registry)
+    assert {s.id: s.context.text for s in reader.poll()} == {"heard": "62%", "only-listed": "62%"}
+    assert sorted(os.listdir(state / ".status")) == ["heard", "only-listed"]
+
+
+def test_the_limit_note_says_whose_it_was(dirs):
+    from ctally.sessions import read_limit
+    state, _ = dirs
+    assert read_limit(state) is None
+    (state / ".limit").write_text("1791361800 You've hit your session limit · resets 7:30pm\n")
+    found = read_limit(state)
+    assert (found.resets_at, found.message, found.account, found.key) == (
+        1791361800, "You've hit your session limit · resets 7:30pm", None, ("session",))
+    (state / ".limit").write_text("0 You've hit your weekly limit\naccount 0f1e-2d3c\n")
+    found = read_limit(state)
+    assert (found.resets_at, found.message, found.account, found.key) == (
+        None, "You've hit your weekly limit", "0f1e-2d3c", ("week",))
+    (state / ".limit").write_text("")
+    assert read_limit(state).message == ""
+
+
 # MARK: A closer look at the agents
 
 def test_a_workflow_up_close(dirs):
