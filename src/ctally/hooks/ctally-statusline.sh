@@ -18,13 +18,17 @@
 # account signed in now, which ~/.claude.json names. Sign in to another, or swap accounts
 # under the sessions that are running, and its own numbers are there to show.
 #
-# Whose a reading is, its week says: every account's week ends at its own time. A reading for
-# a week already kept belongs with it, whoever is signed in by now: a reply that was on its
-# way as I changed accounts, or an idle session redrawing its status line (when its prompt
-# cache goes cold, say) with numbers hours old. It replaces what's kept only if it's newer:
-# more used in the same session window, or a session window where none was still going. One
-# for a week not seen before belongs to the account signed in, if it's news: not what its
-# session said last time.
+# A reading counts only when its session has had a reply since it last drew its status line:
+# that's the one time its numbers are new, and Claude Code's count of what the session has
+# had from the API so far, which comes in the same JSON, moves with every reply. An idle
+# session redraws now and then (when its prompt cache goes cold, say) with the numbers of
+# hours ago, for whichever account it was on then: those change nothing. The latest reply's
+# numbers are kept as they are, more used than before or less (a limit reset where it stood).
+#
+# Whose they are, the week says: every account's week ends at its own time. Numbers for a
+# week already kept go to the account it's kept for, whoever is signed in by now (a reply
+# that was on its way as I changed accounts). For a week not seen before, they're the account
+# signed in's.
 #
 # ~/.claude/ctally.d/.statusline holds the latest for the account signed in, as before: the
 # hook reads it for when a limit resets.
@@ -57,16 +61,18 @@ verdict=$(printf '%s\n' "$input" | CTALLY_DIR="$dir" CTALLY_KEPT="$kept" CTALLY_
     close(file)
     return text
   }
-  # In some JSON: the object a name is given, as far as its first closing brace; a number; a string.
+  # In some JSON: the object a name is given, as far as its first closing brace; a number, digit
+  # for digit and as a number; a string.
   function object(text, name) {
     return match(text, "\"" name "\"[ \t]*:[ \t]*[{][^}]*") ? substr(text, RSTART, RLENGTH) : ""
   }
-  function number(text, name,    found) {
-    if (!match(text, "\"" name "\"[ \t]*:[ \t]*[0-9.]+")) return 0
+  function digits(text, name,    found) {
+    if (!match(text, "\"" name "\"[ \t]*:[ \t]*[0-9.]+")) return ""
     found = substr(text, RSTART, RLENGTH)
     sub(/^[^:]*:[ \t]*/, "", found)
-    return found + 0
+    return found
   }
+  function number(text, name) { return digits(text, name) + 0 }
   function string(text, name,    found) {
     if (!match(text, "\"" name "\"[ \t]*:[ \t]*\"[^\"]*\"")) return ""
     found = substr(text, RSTART, RLENGTH)
@@ -103,16 +109,17 @@ verdict=$(printf '%s\n' "$input" | CTALLY_DIR="$dir" CTALLY_KEPT="$kept" CTALLY_
     close(file)
     return id ~ /^[A-Za-z0-9_-]+$/ ? id : "-"
   }
-  # Whether the reading is newer than the one kept for its week (M): more used in the session
-  # window still going, or a session window where the one kept has ended.
-  function newer() {
-    if (M[1]) return R[1] && (R[2] > M[2] || (R[2] == M[2] && R[4] > M[4]))
-    return R[1] > 0 || R[4] > M[4]
+  # What the session has had from the API so far, as Claude Code counts it.
+  function spent(text) {
+    return digits(text, "total_api_duration_ms") "/" digits(text, "total_input_tokens") "/" digits(text, "total_output_tokens")
   }
-  # Whether it differs from what the session said last. Its windows running out, which Claude
-  # Code then leaves out, is no news; nor is a session with nothing said before to go by.
-  function news(    text) {
+  # Whether the session has had a reply since it last drew its status line, going by its note
+  # of that. With nothing noted yet there is no telling. A Claude Code that keeps no such
+  # count: whether the limits themselves have moved, their windows running out aside, which
+  # it then leaves out.
+  function replied(    text) {
     if (session == "-" || (text = slurp(dir "/.status/" session)) == "") return 0
+    if (spent(input) != "//") return spent(input) != spent(text)
     reading(text, P)
     return (R[1] && (R[1] != P[1] || R[2] != P[2])) || (R[3] && (R[3] != P[3] || R[4] != P[4]))
   }
@@ -127,8 +134,8 @@ verdict=$(printf '%s\n' "$input" | CTALLY_DIR="$dir" CTALLY_KEPT="$kept" CTALLY_
     reading(input, R)
     current = signed_in(ENVIRON["CTALLY_CONFIG"])
     account = current
-    keep = 0
-    if (R[1] || R[3]) {
+    keep = (R[1] || R[3]) && replied()
+    if (keep) {
       count = split(ENVIRON["CTALLY_KEPT"], names, " ")
       matches = 0
       for (i = 1; i <= count; i++) {
@@ -141,13 +148,8 @@ verdict=$(printf '%s\n' "$input" | CTALLY_DIR="$dir" CTALLY_KEPT="$kept" CTALLY_
         }
       }
       # One week kept for one account, and no two session windows going at once in it, which
-      # an account never has: that account. Otherwise the one signed in, on news alone.
-      if (matches == 1 && !(R[1] && M[1] && !near(R[1], M[1]))) {
-        keep = newer()
-      } else {
-        account = current
-        keep = news()
-      }
+      # an account never has: that account. Otherwise the one signed in.
+      if (matches != 1 || (R[1] && M[1] && !near(R[1], M[1]))) account = current
     }
     printf "%s %d %d %s %d %d %d\n", session, note, keep, account, (account == current), R[1], R[3]
   }' 2>/dev/null)
@@ -186,7 +188,7 @@ if [ "$keep" = 1 ]; then
   fi
 fi
 
-# Last, so that a run cut short before the limits were kept finds them news again next time.
+# Last, so that a run cut short before the limits were kept finds its reply news again next time.
 [ "$note" = 1 ] && save "$dir/.status" "$session"
 
 [ -n "$1" ] || exit 0

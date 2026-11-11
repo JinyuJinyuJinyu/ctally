@@ -431,6 +431,7 @@ def test_more_news_notifications_are_ignored(hook):
 STATUS_LINE_SCRIPT = HOOK.with_name("ctally-statusline.sh")
 HOUR, WEEK = int(time.time()) + 3 * 3600, int(time.time()) + 4 * 86400     # windows still going
 OTHER_WEEK = WEEK + 2 * 86400                                                # another account's
+SPENT: dict = {}        # what each session has had from the API so far, in ms, by home and session
 
 
 def status_line(home, payload, *args):
@@ -441,21 +442,41 @@ def status_line(home, payload, *args):
                           capture_output=True, env=env, timeout=10)
 
 
-def started(home, *names) -> None:
-    """A session's first status line, as it starts: its context window, and no limits before
-    its first reply."""
-    for name in names:
-        status_line(home, {"session_id": name, "context_window": {"context_window_size": 200000}})
-
-
-def usage_line(session: tuple | None, week: tuple | None = None, name: str = "s1") -> dict:
-    """What one session hands its status line: (used, resets at) for the session and the week."""
+def usage_line(session: tuple | None, week: tuple | None = None, name: str = "s1", spent: int | None = None) -> dict:
+    """What one session hands its status line: (used, resets at) for the session and the week,
+    and, as Claude Code counts it, what the session has had from the API so far."""
     limits = {}
     if session:
         limits["five_hour"] = {"used_percentage": session[0], "resets_at": session[1]}
     if week:
         limits["seven_day"] = {"used_percentage": week[0], "resets_at": week[1]}
-    return {"session_id": name, "rate_limits": limits}
+    counted = {} if spent is None else {"cost": {"total_cost_usd": spent / 4000, "total_duration_ms": spent * 9,
+                                                 "total_api_duration_ms": spent}}
+    return {"session_id": name, **counted, "rate_limits": limits}
+
+
+def started(home, *names) -> None:
+    """A session's first status line, as it starts: its context window, nothing had from the
+    API yet, and no limits before its first reply."""
+    for name in names:
+        SPENT[home, name] = 0
+        status_line(home, {"session_id": name, "context_window": {"context_window_size": 200000},
+                           "cost": {"total_cost_usd": 0, "total_duration_ms": 40, "total_api_duration_ms": 0}})
+
+
+def reply(home, session: tuple | None, week: tuple | None = None, name: str = "s1") -> dict:
+    """The session's status line after a reply; what it was handed."""
+    SPENT[home, name] = SPENT.get((home, name), 0) + 1500
+    line = usage_line(session, week, name, SPENT[home, name])
+    status_line(home, line)
+    return line
+
+
+def redraw(home, session: tuple | None, week: tuple | None = None, name: str = "s1") -> dict:
+    """Its status line drawn again with no reply since: an idle session's, hours on."""
+    line = usage_line(session, week, name, SPENT.get((home, name), 0))
+    status_line(home, line)
+    return line
 
 
 def kept(home, account: str = "-") -> dict | None:
@@ -479,7 +500,7 @@ def sign_in(home, account: str | None, indent: int | None = 2) -> None:
     (home / ".claude.json").write_text(json.dumps(config, indent=indent))
 
 
-LIMITS = usage_line((79, HOUR))
+LIMITS = usage_line((79, HOUR), spent=2500)
 
 
 def test_status_line_saves_the_limits_and_prints_nothing(tmp_path):
@@ -514,67 +535,83 @@ def test_status_line_writes_nothing_where_it_cant(tmp_path):
     assert (done.returncode, done.stdout, done.stderr) == (0, "still here\n", "")
 
 
-def test_status_line_waits_for_news_from_a_session_it_never_heard(tmp_path):
+def test_status_line_waits_for_a_reply_from_a_session_it_never_heard(tmp_path):
     """A session running since before CTally's status line: what it hands over first could be
-    hours old, and there's nothing it said before to tell."""
-    status_line(tmp_path, usage_line((60, HOUR), (8, WEEK)))
-    status_line(tmp_path, usage_line((60, HOUR), (8, WEEK)))            # and again, redrawing
+    hours old, and there's no note of it to tell by."""
+    reply(tmp_path, (60, HOUR), (8, WEEK))
+    redraw(tmp_path, (60, HOUR), (8, WEEK))
     assert kept(tmp_path) is None
-    status_line(tmp_path, usage_line((61, HOUR), (8, WEEK)))            # a reply: it moved
-    assert saved_usage(tmp_path) == (61, 8)
+    reply(tmp_path, (60, HOUR), (8, WEEK))                              # a reply, the numbers where they were
+    assert saved_usage(tmp_path) == (60, 8)
 
 
-def test_status_line_never_steps_back_within_a_window(tmp_path):
+def test_an_idle_sessions_old_numbers_change_nothing(tmp_path):
     started(tmp_path, "busy", "idle")
-    status_line(tmp_path, usage_line((60, HOUR), (8, WEEK), "busy"))
-    status_line(tmp_path, usage_line((34, HOUR), (5, WEEK), "idle"))       # an idle session redraws, hours old
+    reply(tmp_path, (34, HOUR), (5, WEEK), "idle")
+    reply(tmp_path, (60, HOUR), (8, WEEK), "busy")
     assert saved_usage(tmp_path) == (60, 8)
-    status_line(tmp_path, usage_line((60, HOUR + 30), (7, WEEK), "idle"))  # same session use, older week
+    redraw(tmp_path, (34, HOUR), (5, WEEK), "idle")                     # its prompt cache went cold, say
+    redraw(tmp_path, None, (5, WEEK), "idle")                           # its session window over, and left out
     assert saved_usage(tmp_path) == (60, 8)
-    status_line(tmp_path, usage_line((64.5, HOUR), (8, WEEK), "busy"))
+    reply(tmp_path, (64.5, HOUR), (8, WEEK), "busy")
     assert saved_usage(tmp_path) == (64.5, 8)
-    status_line(tmp_path, usage_line((64.5, HOUR), (9, WEEK), "busy"))     # the week moved, the session not
-    assert saved_usage(tmp_path) == (64.5, 9)
+    reply(tmp_path, (65, HOUR), (8, WEEK), "idle")                      # at work again: the latest reply's
+    assert saved_usage(tmp_path) == (65, 8)
 
 
-def test_status_line_takes_a_new_window(tmp_path):
-    started(tmp_path, "s1", "idle")
-    status_line(tmp_path, usage_line((90, HOUR), (50, WEEK), "idle"))
-    status_line(tmp_path, usage_line((92, HOUR), (52, WEEK)))
-    status_line(tmp_path, usage_line((2, HOUR + 7200), (0, WEEK)))         # reset early: a later window
-    assert saved_usage(tmp_path) == (2, 0)
-    status_line(tmp_path, usage_line((90, HOUR), (50, WEEK), "idle"))      # the window that was, redrawn
-    assert saved_usage(tmp_path) == (2, 0)
+def test_the_latest_reply_is_kept_more_used_or_less(tmp_path):
+    """A limit reset where it stood gives usage back, the week from 91% to 1%, say, and ends when
+    it did. The sessions that sat through it go on handing over 91%."""
+    started(tmp_path, "busy", "idle")
+    reply(tmp_path, (55, HOUR), (90, WEEK), "idle")
+    reply(tmp_path, (60, HOUR), (91, WEEK), "busy")
+    reply(tmp_path, (61, HOUR), (1, WEEK), "busy")                      # the week, reset
+    assert saved_usage(tmp_path) == (61, 1)
+    reply(tmp_path, (0, HOUR), (1, WEEK), "busy")                       # the session, too
+    redraw(tmp_path, (55, HOUR), (90, WEEK), "idle")
+    redraw(tmp_path, None, (90, WEEK), "idle")
+    assert saved_usage(tmp_path) == (0, 1)
+    reply(tmp_path, (2, HOUR + 7200), (1, WEEK), "busy")                # reset early: a later window
+    redraw(tmp_path, (55, HOUR), (90, WEEK), "idle")
+    assert saved_usage(tmp_path) == (2, 1)
 
 
-def test_status_line_takes_no_older_week_once_the_session_window_is_over(tmp_path):
-    """An idle session's window has run out, and Claude Code leaves it out: the week it still
-    hands over is as old as its last reply."""
-    started(tmp_path, "s1", "idle")
-    over = int(time.time()) - 60
-    status_line(tmp_path, usage_line((80, over), (50, WEEK)))              # that window is over: only the week counts
-    assert saved_usage(tmp_path) == (80, 50)
-    status_line(tmp_path, usage_line((10, over - 3600), (40, WEEK), "idle"))
-    status_line(tmp_path, usage_line(None, (40, WEEK), "idle"))
-    assert saved_usage(tmp_path) == (80, 50)
-    status_line(tmp_path, usage_line(None, (51, WEEK), "idle"))            # further on in the same week
-    assert saved_usage(tmp_path) == (None, 51)
-    status_line(tmp_path, usage_line((3, HOUR), (51, WEEK)))               # a new session window
-    assert saved_usage(tmp_path) == (3, 51)
-    status_line(tmp_path, usage_line(None, (60, WEEK), "idle"))            # none, while one is going: older
-    assert saved_usage(tmp_path) == (3, 51)
-
-
-def test_a_window_running_out_is_no_news(tmp_path):
-    """What an idle session hands over changes when its session window ends. For a week that
-    isn't kept, on the account signed in before, that mustn't pass for a reply."""
+def test_a_reply_keeps_the_numbers_fresh_though_they_havent_moved(tmp_path):
     started(tmp_path, "s1")
-    status_line(tmp_path, usage_line((12, HOUR), (30, WEEK)))
+    reply(tmp_path, (12, HOUR), (30, WEEK))
+    saved = tmp_path / ".claude" / "ctally.d" / ".usage" / "-"
+    os.utime(saved, (time.time() - 7200, time.time() - 7200))
+    redraw(tmp_path, (12, HOUR), (30, WEEK))
+    assert time.time() - saved.stat().st_mtime > 7000
+    reply(tmp_path, (12, HOUR), (30, WEEK))
+    assert time.time() - saved.stat().st_mtime < 60
+
+
+def test_a_window_that_is_over_counts_for_nothing(tmp_path):
+    started(tmp_path, "s1")
+    over = int(time.time()) - 60
+    reply(tmp_path, (80, over))                                         # nothing in it still going
+    assert kept(tmp_path) is None
+    reply(tmp_path, (80, over), (50, WEEK))                             # the week is
+    assert saved_usage(tmp_path) == (80, 50)
+
+
+def test_a_claude_code_that_keeps_no_count_goes_by_the_limits_moving(tmp_path):
+    """Without what a session has had from the API: a reading is a reply's when it differs
+    from the session's last, its windows running out aside."""
+    status_line(tmp_path, {"session_id": "s1", "context_window": {"context_window_size": 200000}})
+    status_line(tmp_path, {"session_id": "idle", "context_window": {"context_window_size": 200000}})
+    status_line(tmp_path, usage_line((60, HOUR), (8, WEEK)))
+    assert saved_usage(tmp_path) == (60, 8)
+    status_line(tmp_path, usage_line((34, HOUR), (5, WEEK), "idle"))
+    status_line(tmp_path, usage_line((61, HOUR), (8, WEEK)))
+    assert saved_usage(tmp_path) == (61, 8)
+    status_line(tmp_path, usage_line((34, HOUR), (5, WEEK), "idle"))       # redrawn: as it said before
     notes = tmp_path / ".claude" / "ctally.d" / ".status"
-    (notes / "idle").write_text(json.dumps(usage_line((90, int(time.time()) - 60), (89, OTHER_WEEK), "idle")))
-    status_line(tmp_path, usage_line(None, (89, OTHER_WEEK), "idle"))
-    assert saved_usage(tmp_path) == (12, 30)
-    assert json.loads((notes / "idle").read_text()) == usage_line(None, (89, OTHER_WEEK), "idle")
+    (notes / "idle").write_text(json.dumps(usage_line((34, int(time.time()) - 60), (5, WEEK), "idle")))
+    status_line(tmp_path, usage_line(None, (5, WEEK), "idle"))             # its session window over, and left out
+    assert saved_usage(tmp_path) == (61, 8)
+    assert json.loads((notes / "idle").read_text()) == usage_line(None, (5, WEEK), "idle")
 
 
 def test_status_line_stopped_halfway_leaves_nothing_half_made(tmp_path):
@@ -605,32 +642,28 @@ def test_status_line_stopped_halfway_leaves_nothing_half_made(tmp_path):
 def test_each_account_keeps_its_own(tmp_path):
     sign_in(tmp_path, "acct-a")
     started(tmp_path, "s1", "s2")
-    status_line(tmp_path, usage_line((55, HOUR), (88, WEEK), "s2"))
-    status_line(tmp_path, usage_line((92, HOUR), (89, WEEK)))
+    reply(tmp_path, (55, HOUR), (88, WEEK), "s2")
+    first = reply(tmp_path, (92, HOUR), (89, WEEK))
     latest = tmp_path / ".claude" / "ctally.d" / ".statusline"
-    assert saved_usage(tmp_path, "acct-a") == (92, 89) and kept(tmp_path) is None
-    assert json.loads(latest.read_text()) == kept(tmp_path, "acct-a")
+    assert kept(tmp_path, "acct-a") == first == json.loads(latest.read_text()) and kept(tmp_path) is None
 
     # Nearly out: I swap to my other account, under the sessions that are running.
     sign_in(tmp_path, "acct-b")
-    fresh = usage_line((12, HOUR - 3600), (30, OTHER_WEEK))                # its session window ends sooner
-    status_line(tmp_path, fresh)
+    fresh = reply(tmp_path, (12, HOUR - 3600), (30, OTHER_WEEK))           # its session window ends sooner
     assert saved_usage(tmp_path, "acct-b") == (12, 30) and saved_usage(tmp_path, "acct-a") == (92, 89)
     assert json.loads(latest.read_text()) == fresh
-    status_line(tmp_path, usage_line((55, HOUR), (88, WEEK), "s2"))        # an idle session, still on the first
+    redraw(tmp_path, (55, HOUR), (88, WEEK), "s2")                          # an idle session, still on the first
     assert saved_usage(tmp_path, "acct-b") == (12, 30) and saved_usage(tmp_path, "acct-a") == (92, 89)
     assert json.loads(latest.read_text()) == fresh
 
     # A reply that was on its way as I swapped: the first account's, by its week.
-    late = usage_line((93, HOUR), (89, WEEK), "s2")
-    status_line(tmp_path, late)
+    late = reply(tmp_path, (93, HOUR), (89, WEEK), "s2")
     assert kept(tmp_path, "acct-a") == late and saved_usage(tmp_path, "acct-b") == (12, 30)
     assert json.loads(latest.read_text()) == fresh                         # not the one signed in
 
     # Back again, and a reply there.
     sign_in(tmp_path, "acct-a")
-    back = usage_line((94, HOUR), (89, WEEK))
-    status_line(tmp_path, back)
+    back = reply(tmp_path, (94, HOUR), (89, WEEK))
     assert kept(tmp_path, "acct-a") == back == json.loads(latest.read_text())
     assert sorted(os.listdir(latest.parent / ".usage")) == ["acct-a", "acct-b"]
 
@@ -639,7 +672,7 @@ def test_each_account_keeps_its_own(tmp_path):
 def test_the_account_is_the_one_signed_in_however_the_config_is_written(tmp_path, indent):
     sign_in(tmp_path, "0f1e2d3c-aaaa-bbbb-cccc-1234567890ab", indent)
     started(tmp_path, "s1")
-    status_line(tmp_path, usage_line((12, HOUR), (30, WEEK)))
+    reply(tmp_path, (12, HOUR), (30, WEEK))
     assert os.listdir(tmp_path / ".claude" / "ctally.d" / ".usage") == ["0f1e2d3c-aaaa-bbbb-cccc-1234567890ab"]
 
 
@@ -649,7 +682,7 @@ def test_with_nobody_signed_in_the_limits_are_just_kept(tmp_path, config):
     if config is not None:
         (tmp_path / ".claude.json").write_text(config)
     started(tmp_path, "s1")
-    status_line(tmp_path, usage_line((12, HOUR), (30, WEEK)))
+    reply(tmp_path, (12, HOUR), (30, WEEK))
     assert saved_usage(tmp_path) == (12, 30)
     assert os.listdir(tmp_path / ".claude" / "ctally.d" / ".usage") == ["-"]
 
@@ -657,11 +690,11 @@ def test_with_nobody_signed_in_the_limits_are_just_kept(tmp_path, config):
 def test_two_accounts_with_the_same_week_go_by_who_is_signed_in(tmp_path):
     sign_in(tmp_path, "acct-a")
     started(tmp_path, "s1", "s2")
-    status_line(tmp_path, usage_line((92, HOUR), (89, WEEK)))
+    reply(tmp_path, (92, HOUR), (89, WEEK))
     sign_in(tmp_path, "acct-b")
-    status_line(tmp_path, usage_line((12, HOUR + 3600), (30, WEEK)))       # another session window in that week
+    reply(tmp_path, (12, HOUR + 3600), (30, WEEK))                         # another session window in that week
     assert (saved_usage(tmp_path, "acct-a"), saved_usage(tmp_path, "acct-b")) == ((92, 89), (12, 30))
-    status_line(tmp_path, usage_line((13, HOUR + 3600), (30, WEEK)))
+    reply(tmp_path, (13, HOUR + 3600), (30, WEEK))
     assert (saved_usage(tmp_path, "acct-a"), saved_usage(tmp_path, "acct-b")) == ((92, 89), (13, 30))
 
 
@@ -673,9 +706,9 @@ def test_status_line_ends_a_limit_reset_early(tmp_path):
     started(tmp_path, "s1")
     status_line(tmp_path, LIMITS)                                           # the same window
     assert limit.exists()
-    status_line(tmp_path, usage_line((2, HOUR + 30), (0, WEEK)))            # a clock's slack, no more
+    reply(tmp_path, (2, HOUR + 30), (0, WEEK))                              # a clock's slack, no more
     assert limit.exists() and saved_usage(tmp_path) == (2, 0)
-    later = usage_line((2, HOUR + 7200), (0, WEEK))
+    later = usage_line((2, HOUR + 7200), (0, WEEK), spent=99000)
     done = status_line(tmp_path, json.dumps(later, separators=(" , ", " : ")))   # a new window, however spaced
     assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
     assert not limit.exists()
@@ -690,12 +723,11 @@ def test_status_line_keeps_a_limit_it_cant_place(tmp_path):
     sign_in(tmp_path, "acct-b")
     for used, note in enumerate(notes, start=2):
         (state / ".limit").write_text(note + "\n")
-        done = status_line(tmp_path, usage_line((used, HOUR + 7200)))
-        assert (done.returncode, done.stderr) == (0, "")
+        reply(tmp_path, (used, HOUR + 7200))
         assert saved_usage(tmp_path, "acct-b") == (used, None)
         assert (state / ".limit").exists(), note
     (state / ".limit").write_text(f"{HOUR} {SESSION_HIT}\naccount acct-b\n")
-    status_line(tmp_path, usage_line((9, HOUR + 7200)))
+    reply(tmp_path, (9, HOUR + 7200))
     assert not (state / ".limit").exists()
 
 

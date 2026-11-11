@@ -9,7 +9,7 @@ Two places, both written by Claude Code, both only read here: no network, no cre
   own cache rather than a documented interface, so this expects to find nothing, or something
   new, and copes.
 - CTally's status line saves what Claude Code hands every status line after each reply: the
-  session and the week, nothing else, the latest for each account you use
+  session and the week, nothing else, the latest reply's for each account you use
   (~/.claude/ctally.d/.usage/<account id>). Where it's newer, it wins for those two.
 
 Both are an account's. ~/.claude.json names the one signed in, and only its numbers are shown:

@@ -168,9 +168,10 @@ numbers Claude Code keeps in `~/.claude.json`, which it refreshes only now and t
 Max and Team plans; with an API key there are none to show.
 
 Claude Code doesn't say which account a session's numbers are for, and a session keeps handing over the
-ones from its last reply, hours later and accounts later. So CTally keeps the latest for each account
-apart, and tells them by their week: every account's week ends at its own time. Numbers from a session
-that hasn't replied since you changed accounts go with the account they came from, not the one you're on.
+ones from its last reply, hours later and accounts later. So CTally takes a session's numbers only when
+it has just had a reply, keeps the latest for each account apart, and tells the accounts by their week:
+every account's week ends at its own time. Numbers from a session that hasn't replied since you changed
+accounts, or since a limit was reset, change nothing.
 
 Turn the limits off with the switch in Settings, or right-click → Hide Usage Limits. That hides them from tmux
 too. `ctally setup --no-statusline` leaves the status line out; the limits then refresh only when Claude Code
@@ -386,12 +387,13 @@ Two pieces, connected by a folder:
    id `~/.claude.json` gives the account signed in), and the latest for the one signed in also in
    `~/.claude/ctally.d/.statusline`, where the hook looks up when a limit resets. Each session hands over the
    numbers from its own last reply, on whichever account that was, and an idle one redraws its line now and
-   then with numbers hours old. So a reading goes by its week: for a week already kept, it belongs to that
-   account, and replaces what's kept only if it's newer (more used in the same session window, or a session
-   window where the kept one has ended). For a week not seen before it's the account signed in's, if it's
-   news, which is to say not what that session said last time. It also saves each session's latest to
-   `~/.claude/ctally.d/.status/<session id>`, for how full that session's context is and to tell its news
-   by. It prints nothing, or runs the status line you had before and prints what that prints.
+   then with numbers hours old. So a session's numbers count only when it has had a reply since it last drew
+   its status line, which the same JSON tells: Claude Code's count of the time the session has spent on the
+   API moves with every reply. The latest reply's numbers are kept as they are, more used than before or
+   less (a limit reset where it stood). Whose they are, the week says: for a week already kept they're that
+   account's, and for one not seen before, the account signed in's. It also saves each session's latest to
+   `~/.claude/ctally.d/.status/<session id>`, for how full that session's context is and to tell its next
+   reply by. It prints nothing, or runs the status line you had before and prints what that prints.
 
 2. **The app.** It polls the folder twice a second, checking modification times first so unchanged files
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
