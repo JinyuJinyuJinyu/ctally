@@ -1,6 +1,6 @@
 """Your plan's usage limits, as Claude Code's /usage shows them: the current session (the
-five-hour window), the week across all models, any per-model weekly limits, and usage credits
-when they're switched on. Each is the share used and when it resets.
+five-hour window, on a plan that has one), the week across all models, any per-model weekly
+limits, and usage credits when they're switched on. Each is the share used and when it resets.
 
 Two places, both written by Claude Code, both only read here: no network, no credentials.
 
@@ -10,7 +10,9 @@ Two places, both written by Claude Code, both only read here: no network, no cre
   new, and copes.
 - CTally's status line saves what Claude Code hands every status line after each reply: the
   session and the week, nothing else, the latest reply's for each account you use
-  (~/.claude/ctally.d/.usage/<account id>). Where it's newer, it wins for those two.
+  (~/.claude/ctally.d/.usage/<account id>). Where it's newer, it wins for those two. One of
+  the two it says nothing of, which the cache lists with nothing used, isn't a limit of the
+  plan's any more, and isn't shown.
 
 Both are an account's. ~/.claude.json names the one signed in, and only its numbers are shown:
 sign in to another, or swap accounts under the sessions that are running, and the limits are
@@ -101,7 +103,9 @@ def read(path: Path | None = None, live: Path | None = None) -> Usage | None:
         config = None
     live = live or STATUS_LINE
     who = account(config)
-    return with_hit(merge(parse(config), read_live(live_file(live, who))), read_limit(live.parent), time.time(), who)
+    now = time.time()
+    latest = read_live(live_file(live, who))
+    return with_hit(merge(in_force(parse(config), latest, now), latest), read_limit(live.parent), now, who)
 
 
 def account(config) -> str | None:
@@ -141,6 +145,19 @@ def parse_live(status, modified: float) -> Usage | None:
         if percent is not None:
             found.append(Limit(key, title, short, tag, percent, _seconds(window.get("resets_at"))))
     return Usage(tuple(found), modified) if found else None
+
+
+def in_force(cached: Usage | None, live: Usage | None, now: float) -> Usage | None:
+    """The cache's limits, less a session or a week the plan no longer has: one the account's
+    latest reply said nothing of, with nothing used in it by now. A reply gives each window it
+    counts toward, and the cache can go on listing an empty one after a plan drops its
+    five-hour limit, say. One with some of it used stays until it runs out."""
+    if cached is None or live is None:
+        return cached
+    said = {limit.key for limit in live.limits}
+    kept = tuple(limit for limit in cached.limits if limit.key not in SPANS or limit.key in said
+                 or (limit.percent > 0 and (limit.resets_at is None or limit.resets_at > now)))
+    return cached._replace(limits=kept) if kept else None
 
 
 def merge(cached: Usage | None, live: Usage | None) -> Usage | None:
@@ -364,7 +381,8 @@ class UsageReader:
             path = live_file(self._status_line, who)
             if path != self._live.path:
                 self._live = _Watched(path, parse_live)
-            self._usage = with_hit(merge(cached, self._live.poll()), read_limit(self._hits), time.time(), who)
+            latest, at = self._live.poll(), time.time()
+            self._usage = with_hit(merge(in_force(cached, latest, at), latest), read_limit(self._hits), at, who)
         return self._usage
 
 

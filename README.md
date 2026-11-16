@@ -134,12 +134,14 @@ for it till then, rather than a `0%` that isn't so.
 ## Usage limits
 
 CTally shows your plan's usage limits the way Claude Code's `/usage` does: the current session (the
-five-hour window), the week across all models, any per-model weekly limit (Fable, say), and usage credits if
-you've switched them on.
+five-hour window, on a plan that has one), the week across all models, any per-model weekly limit (Fable,
+say), and usage credits if you've switched them on.
 
 - **The list** gives every limit a line between the sessions and the count bar: a bar, the share used, and
   when it resets (`in 1h 48m`, `Sat 10 pm`).
 - **The folded bar and the badges** carry two small meters, the session (`5h`) and the week (`7d`).
+- **A plan with no session limit** shows the week alone. Once Claude Code's replies stop giving a five-hour
+  window, an empty one it still has on file isn't shown.
 - **Hover over any of them** for the details, and how fresh they are. The menu bar (top bar) icon's menu
   lists them too.
 - **Colours**: a bar turns amber at 75% and red at 90%. Numbers more than an hour old are dimmed.

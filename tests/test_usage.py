@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ctally import usage
-from ctally.usage import Limit, Usage, UsageReader, merge, parse, parse_live, with_hit
+from ctally.usage import Limit, Usage, UsageReader, in_force, merge, parse, parse_live, with_hit
 
 ACCOUNT = "00000000-0000-4000-8000-000000000001"
 FETCHED = 1_791_352_784_726            # ms
@@ -223,6 +223,51 @@ def test_newer_status_line_wins_for_session_and_week():
     assert merge(None, parse_live(status_line(), 5)).limits[0].percent == 79
     assert merge(cache, None) == cache
     assert merge(None, None) is None
+
+
+def week_only(week=35) -> dict:
+    """A status line on a plan with no five-hour limit: the week, and nothing of a session."""
+    return {"session_id": "abc", "rate_limits": {"seven_day": {"used_percentage": week, "resets_at": 1791630000}}}
+
+
+def test_an_empty_window_the_latest_reply_left_out_is_no_limit_of_the_plan():
+    def shown(found):
+        return [(limit.title, limit.percent) for limit in found.limits]
+
+    over = epoch(SESSION_RESET) + 60
+    cache = parse(cached())                                             # a session at 71%, until SESSION_RESET
+    live = parse_live(week_only(), over)
+    # With some of it used and still running, it stays. Run out, it's gone, the other limits not.
+    assert in_force(cache, live, over - 120) == cache
+    assert shown(in_force(cache, live, over)) == [("Current week (all models)", 49), ("Current week (Fable)", 0)]
+    assert shown(merge(in_force(cache, live, over), live)) == [
+        ("Current week (all models)", 35), ("Current week (Fable)", 0)]
+    # Listed with nothing used and hours to run: gone as well, whichever of the two is newer.
+    data = cached()
+    data["cachedUsageUtilization"]["utilization"]["limits"][0]["percent"] = 0
+    empty = parse(data)
+    for at in (empty.fetched_at - 600, empty.fetched_at + 600):
+        assert shown(in_force(empty, parse_live(week_only(), at), empty.fetched_at))[0][0] == "Current week (all models)"
+    # A reply that gave the session: the cache's stays, empty or over.
+    assert in_force(empty, parse_live(status_line(), over), over) == empty
+    assert in_force(cache, parse_live(status_line(), over), over) == cache
+    # A week the reply left out, with half of it used: that stays too.
+    session_only = parse_live({"rate_limits": {"five_hour": {"used_percentage": 2, "resets_at": 1791378000}}}, over)
+    assert in_force(cache, session_only, over) == cache
+    assert in_force(cache, None, over) == cache and in_force(None, live, over) is None
+
+
+def test_read_and_the_reader_drop_a_session_limit_the_plan_no_longer_has(tmp_path, monkeypatch):
+    monkeypatch.setattr(UsageReader, "EVERY", 0)
+    claude_json, live = tmp_path / ".claude.json", tmp_path / ".statusline"
+    claude_json.write_text(json.dumps(cached()))                        # its session window is long over
+    (tmp_path / ".usage").mkdir()
+    (tmp_path / ".usage" / ACCOUNT).write_text(json.dumps(week_only()))
+    for found in (usage.read(claude_json, live), UsageReader(claude_json, live).poll()):
+        assert [(limit.short, limit.percent) for limit in found.limits] == [("Week", 35), ("Week · Fable", 0)]
+        assert [limit.tag for limit in found.compact] == ["7d"]
+    (tmp_path / ".usage" / ACCOUNT).write_text(json.dumps(status_line(five=3)))
+    assert [limit.short for limit in usage.read(claude_json, live).limits] == ["Session", "Week", "Week · Fable"]
 
 
 def test_read_merges_both_files(tmp_path):
