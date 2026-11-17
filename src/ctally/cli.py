@@ -207,20 +207,23 @@ def jump(current: str | None, client: str | None, here: str | None) -> int:
         else:
             print(message)
 
-    # Sessions that need me, in tmux, in order.
+    # Sessions that need me, in tmux, in order; one stop per pane.
     queue = []
+    seen = set()
     for session in live_sessions():
         if session.rank > 1:
             continue
         target = system.tmux_pane(session.pid)
-        if target:
+        if target and (target.socket, target.pane) not in seen:
             queue.append((target, session))
+            seen.add((target.socket, target.pane))
     if not queue:
         say("CTally: nothing needs you")
         return 0
 
     # The one after the pane I'm on, so pressing again moves along the queue.
-    at = next((i for i, (target, _) in enumerate(queue) if target.pane == current), None)
+    at = next((i for i, (target, _) in enumerate(queue)
+               if target.socket == here and target.pane == current), None)
     target, session = queue[at + 1] if at is not None and at + 1 < len(queue) else queue[0]
 
     if not here:

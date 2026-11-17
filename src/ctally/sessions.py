@@ -134,7 +134,7 @@ class Session:
     label: str                      # project folder name, from the hook or Claude Code's list
     pid: int = 0                    # the claude process I see it in, from the same: for a
                                     # background job, the terminal showing it
-    title: str | None = None        # session name, from the transcript
+    title: str | None = None        # session name, from the transcript or session index
     path: str | None = None         # directory the session started in, from the transcript (or the list)
     tmux: str | None = None         # where it sits in tmux, "report:0.2", if it runs there
     agents: Agents | None = None    # its subagents, while any run

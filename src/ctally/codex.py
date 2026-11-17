@@ -60,7 +60,11 @@ def _process() -> tuple[int, int]:
 
 
 def _tool_key(payload: dict) -> str:
-    data = [payload.get("agent_id"), payload.get("tool_name"), payload.get("tool_input")]
+    inputs = payload.get("tool_input")
+    if isinstance(inputs, dict) and ("command" in inputs or "cmd" in inputs):
+        # Command approvals may add a display-only description.
+        inputs = {key: value for key, value in inputs.items() if key != "description"}
+    data = [payload.get("agent_id"), payload.get("tool_name"), payload.get("cwd"), inputs]
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
@@ -104,21 +108,36 @@ def record(payload: dict, directory: Path) -> None:
                  "started": previous.get("started", now), "updated": now}
         pending = value.setdefault("pending", {})
         state = previous.get("state", "idle")
+        tool = str(payload.get("tool_name", "")).rsplit(".", 1)[-1]
         if event == "SessionStart":
             if payload.get("source") != "compact":
                 state, pending = "idle", {}
-        elif event in ("UserPromptSubmit", "PreModelRequest"):
+        elif event == "UserPromptSubmit":
             state, pending = "working", {}
+        elif event == "PreModelRequest":
+            state = "working"
+            pending = {key: question for key, question in pending.items() if key.startswith("async:")}
         elif event in ("Stop", "Interrupt"):
             state, pending = "done", {}
         elif event == "PermissionRequest" or (event == "PreToolUse" and
-                str(payload.get("tool_name", "")).rsplit(".", 1)[-1] in
-                ("request_user_input", "request_user_input_async")):
-            pending[_tool_key(payload)] = _question(payload)
+                tool in ("request_user_input", "request_user_input_async")):
+            # Permission hooks have no call ID; keep each identical request.
+            base = key = _tool_key(payload)
+            index = 0
+            while key in pending or "async:" + key in pending:
+                index += 1
+                key = f"{base}:{index}"
+            pending[key] = _question(payload)
         else:
             state = "working"
             if event == "PostToolUse":
-                pending.pop(_tool_key(payload), None)
+                base = _tool_key(payload)
+                key = next((key for key in pending if key.split(":", 1)[0] == base), base)
+                question = pending.pop(key, None)
+                if tool == "request_user_input_async" and question is not None:
+                    # Only a successful submission gets PostToolUse. Failed calls
+                    # stay temporary and are cleared by the next model request.
+                    pending["async:" + key] = question
         value.update(state="waiting" if pending else state, pending=pending)
         fd, temp = tempfile.mkstemp(dir=directory, prefix=".state.")
         try:
@@ -207,8 +226,35 @@ class CodexReader:
         self.records: dict[str, tuple[tuple, dict]] = {}
         self.locator = TmuxLocator()
         self.updated: dict[str, float] = {}
+        self.titles: dict[str, str] = {}
+        self.title_stamp = None
+
+    def _read_titles(self) -> None:
+        """Codex's saved names, refreshed even when no lifecycle hook has fired."""
+        path = self.dir.parent / "session_index.jsonl"
+        try:
+            stat = path.stat()
+            stamp = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            if stamp == self.title_stamp:
+                return
+            titles = {}
+            with path.open("rb") as stream:
+                for line in stream:
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    sid, title = item.get("id"), item.get("thread_name")
+                    if isinstance(sid, str) and isinstance(title, str) and title.strip():
+                        titles[sid] = title.strip()   # a later entry is a rename
+        except OSError:
+            titles, stamp = {}, None
+        self.titles, self.title_stamp = titles, stamp
 
     def poll(self) -> list[Session]:
+        self._read_titles()
         found = []
         started = {}
         files = set()
@@ -228,12 +274,15 @@ class CodexReader:
             owner, pid = value.get("owner_pid"), value.get("pid")
             if any(type(p) is not int or p < 0 for p in (owner, pid)):
                 continue
+            if owner and (not system.is_alive(owner) or (value.get("owner_start") and
+                    system.started(owner) not in (None, value["owner_start"]))):
+                continue
+            # A closed or reused terminal only loses navigation; its daemon may
+            # still have a live task. Without an owner, the terminal is our fallback.
+            if pid and (not system.is_alive(pid) or (value.get("proc_start") and
+                    system.started(pid) not in (None, value["proc_start"]))):
+                pid = 0
             if not owner and not pid:
-                continue
-            if not system.is_alive(owner) or not system.is_alive(pid):
-                continue
-            if any(p and value.get(key) and system.started(p) not in (None, value[key])
-                   for p, key in ((owner, "owner_start"), (pid, "proc_start"))):
                 continue
             cwd = value.get("cwd")
             if not isinstance(cwd, str):
@@ -259,7 +308,8 @@ class CodexReader:
             self.updated[identity] = updated
             started[identity] = began
             found.append(Session(identity, state, Path(cwd).name or "Codex", pid=pid,
-                                 path=cwd, tmux=self.locator.location(identity, pid) if pid else None,
+                                 title=self.titles.get(sid), path=cwd,
+                                 tmux=self.locator.location(identity, pid) if pid else None,
                                  ask=ask, context=context, source="codex", owner_pid=owner))
         keep = {s.id for s in found}
         self.records = {k: v for k, v in self.records.items() if k in files}

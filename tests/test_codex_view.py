@@ -22,7 +22,11 @@ SCRIPT = textwrap.dedent('''
     view = TallyView()
     view.apply([Session("one", State.WORKING, "api"), session])
     assert [row.title for row in view._rows] == ["api", "Codex · api"]
+    session = replace(session, title="修复审批状态")
+    view.apply([Session("one", State.WORKING, "api"), session])
+    assert [row.title for row in view._rows] == ["api", "Codex · 修复审批状态"]
     description = view.describe_row(view._rows[1])
+    assert "修复审批状态" in description
     assert "Context 50% full" in description
     assert "answer from here" not in description
 

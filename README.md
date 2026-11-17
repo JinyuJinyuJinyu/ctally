@@ -317,6 +317,8 @@ alone; run `ctally setup` as well to use both. The indicator reads both automati
 
 - Codex sessions are marked **Codex** in the window and `[codex]` in `ctally list`. They contribute
   to `ctally status` and the tmux counts, and `ctally jump` includes them.
+- The window shows Codex's saved task titles and follows renames. Sessions without a title
+  use their project directory name.
 - The indicator follows idle, working, waiting for approval or a question, finished, and interrupted
   turns. Parallel tool activity does not clear another tool's outstanding approval.
 - The context gauge uses the latest request's token count and model window from the local rollout,
@@ -333,7 +335,8 @@ alone; run `ctally setup` as well to use both. The indicator reads both automati
 - Approvals and questions are answered in Codex's terminal. CTally's direct answer menu, subagent
   details, plan usage limits, and `ctally stats` remain Claude Code features in this first integration.
 
-Codex's observer records live in `$CODEX_HOME/ctally.d/`. CTally scans a bounded tail of the rollout
+Codex's observer records live in `$CODEX_HOME/ctally.d/`; task titles come from
+`$CODEX_HOME/session_index.jsonl`. CTally scans a bounded tail of the rollout
 for token counts and missed turn endings; it does not copy conversation messages into its records.
 Closing or archiving a session removes its record when Codex emits `SessionEnd`. With a shared
 daemon, switching away from a conversation can leave it loaded until Codex ends that session.

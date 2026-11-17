@@ -200,6 +200,46 @@ def test_jump_refuses_another_server(state, monkeypatch, capsys):
     assert "on another tmux server" in capsys.readouterr().out
 
 
+def test_jump_cycles_past_codex_tasks_sharing_a_pane(state, monkeypatch, capsys):
+    sessions = [cli.Live(0, 1, "waiting", 10, "codex:one", "first", "codex"),
+                cli.Live(0, 2, "waiting", 11, "codex:two", "second", "codex"),
+                cli.Live(1, 3, "done", 20, "claude", "third")]
+    monkeypatch.setattr(cli, "live_sessions", lambda: sessions)
+    monkeypatch.setattr(system, "tmux_pane", lambda pid: system.TmuxPane(
+        "tmux", "/sock", "%1" if pid in (10, 11) else "%2"))
+    switched = []
+
+    def run(args):
+        if "switch-client" in args:
+            switched.append(args[args.index("-t") + 1])
+        return ""
+
+    monkeypatch.setattr(system, "run", run)
+    current = "%9"
+    for _ in range(3):
+        assert cli.jump(current, None, "/sock") == 0
+        current = switched[-1]
+    assert switched == ["%1", "%2", "%1"]
+    assert capsys.readouterr().out.splitlines() == [
+        "CTally: first · waiting", "CTally: third · done", "CTally: first · waiting"]
+
+
+def test_jump_distinguishes_the_same_pane_id_on_different_servers(state, monkeypatch, capsys):
+    sessions = [cli.Live(0, 1, "waiting", 10, "codex:one", "other", "codex"),
+                cli.Live(0, 2, "waiting", 11, "codex:two", "current", "codex"),
+                cli.Live(1, 3, "done", 20, "claude", "next")]
+    targets = {10: system.TmuxPane("tmux", "/other", "%1"),
+               11: system.TmuxPane("tmux", "/here", "%1"),
+               20: system.TmuxPane("tmux", "/here", "%2")}
+    monkeypatch.setattr(cli, "live_sessions", lambda: sessions)
+    monkeypatch.setattr(system, "tmux_pane", targets.get)
+    calls = []
+    monkeypatch.setattr(system, "run", lambda args: calls.append(args) or "")
+    assert cli.jump("%1", None, "/here") == 0
+    assert calls[0] == [system.tmux_binary() or "tmux", "-S", "/here", "switch-client", "-t", "%2"]
+    assert capsys.readouterr().out == "CTally: next · done\n"
+
+
 def attach_client(server, session: str):
     """A real client attached to the private server, in a pseudo-terminal of its own."""
     command = [TMUX, "-L", server.name, "attach-session", "-t", session]
