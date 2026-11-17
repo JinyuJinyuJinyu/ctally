@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -548,7 +549,6 @@ class Keeper:
 
     def __init__(self, store: Snapshots | None = None, tmux: Tmux | None = None, places: Places = Places(),
                  log: Callable[[str], None] | None = None):
-        from concurrent.futures import ThreadPoolExecutor
         self.store = store or Snapshots()
         self.tmux = tmux or Tmux()
         self.places = places
