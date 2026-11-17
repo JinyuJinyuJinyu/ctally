@@ -106,9 +106,19 @@ def real_setup_untouched():
 def own_usage_and_prefs(tmp_path_factory, monkeypatch):
     """Usage limits, preferences, transcripts and running sessions come from each test's own
     files, never the real ~/.claude.json, status line, CTally settings, ~/.claude/projects or
-    ~/.claude/sessions."""
-    from ctally import cli, sessions, usage
+    ~/.claude/sessions. Nor is the real sign-in read, or Anthropic asked: only a test's own
+    server, on this machine, is reachable."""
+    from ctally import cli, fetch, sessions, usage
     home = tmp_path_factory.mktemp("usage")
+    monkeypatch.setattr(fetch, "CLAUDE_DIR", home / "claude")
+    monkeypatch.setattr(fetch, "_keychain", lambda: None)
+    real_urlopen = fetch.urllib.request.urlopen
+
+    def local_only(request, *args, **kwargs):
+        url = request.full_url if hasattr(request, "full_url") else str(request)
+        assert url.startswith("http://127.0.0.1:"), f"a test reached out to {url}"
+        return real_urlopen(request, *args, **kwargs)
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", local_only)
     # Nor real transcripts, nor Claude Code's list of the sessions running here.
     monkeypatch.setattr(sessions, "PROJECTS_DIR", home / "projects")
     monkeypatch.setattr(cli, "PROJECTS_DIR", home / "projects")

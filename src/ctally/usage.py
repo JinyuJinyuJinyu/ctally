@@ -2,20 +2,23 @@
 five-hour window, on a plan that has one), the week across all models, any per-model weekly
 limits, and usage credits when they're switched on. Each is the share used and when it resets.
 
-Two places, both written by Claude Code, both only read here: no network, no credentials.
+Three places, all only read here:
 
 - ~/.claude.json holds everything /usage last fetched. Claude Code fetches it now and then
-  (for /usage, say), not after every reply, so it can be some minutes old. It's Claude Code's
-  own cache rather than a documented interface, so this expects to find nothing, or something
+  (for /usage, say), not after every reply, so it can be hours old. It's Claude Code's own
+  cache rather than a documented interface, so this expects to find nothing, or something
   new, and copes.
+- CTally's own copy of the same, asked of Anthropic every few minutes while Claude Code is in
+  use (~/.claude/ctally.d/.fetched/<account id>): see fetch.py, which writes it. Of the two,
+  the newer wins.
 - CTally's status line saves what Claude Code hands every status line after each reply: the
   session and the week, nothing else, the latest reply's for each account you use
   (~/.claude/ctally.d/.usage/<account id>). Where it's newer, it wins for those two. One of
   the two it says nothing of, which the cache lists with nothing used, isn't a limit of the
-  plan's any more, and isn't shown. The rest, each model's week, stay as the cache had them,
-  and say how old they are once that's well behind the session and the week.
+  plan's any more, and isn't shown. The rest, each model's week, stay as last fetched, and
+  say how old they are once that's well behind the session and the week.
 
-Both are an account's. ~/.claude.json names the one signed in, and only its numbers are shown:
+All are an account's. ~/.claude.json names the one signed in, and only its numbers are shown:
 sign in to another, or swap accounts under the sessions that are running, and the limits are
 that account's from then on, as last seen on it, or none until it has been.
 
@@ -33,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+from . import fetch
 from .sessions import STATE_DIR, LimitHit, read_limit
 
 CLAUDE_JSON = Path(os.environ.get("CTALLY_CLAUDE_JSON") or Path.home() / ".claude.json")
@@ -102,17 +106,39 @@ class Usage(NamedTuple):
 # MARK: Reading
 
 def read(path: Path | None = None, live: Path | None = None) -> Usage | None:
-    """The limits as Claude Code last saw them, or None if it hasn't said (an API key rather
-    than a plan, or no session since signing in)."""
-    try:
-        config = json.loads((path or CLAUDE_JSON).read_text())
-    except (OSError, ValueError):
-        config = None
+    """The limits as last seen, or None if they haven't been (an API key rather than a plan,
+    or no session since signing in). Nothing is asked for here: the tmux status bar calls this
+    every few seconds."""
+    config = _load(path or CLAUDE_JSON)
     live = live or STATUS_LINE
     who = account(config)
     now = time.time()
     latest = read_live(live_file(live, who))
-    return with_hit(merge(in_force(parse(config), latest, now), latest), read_limit(live.parent), now, who)
+    cached = newest(parse(config), read_fetched(fetched_file(live, who)))
+    return with_hit(merge(in_force(cached, latest, now), latest), read_limit(live.parent), now, who)
+
+
+def refresh(path: Path | None = None, live: Path | None = None,
+            fetcher: fetch.Fetcher | None = None) -> str | None:
+    """`ctally usage`: asks Anthropic first, if the newest numbers are a few minutes old. Why
+    it couldn't, if it couldn't."""
+    config = _load(path or CLAUDE_JSON)
+    who = account(config)
+    target = fetched_file(live or STATUS_LINE, who)
+    if who is None or target is None:
+        return None
+    have = newest(parse(config), read_fetched(target))
+    if have is not None and time.time() - have.fetched_at < fetch.EVERY:
+        return None
+    fetcher = fetcher or fetch.Fetcher(log=lambda _: None)
+    return None if fetcher.once(who, target) else fetcher.problem
+
+
+def _load(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def account(config) -> str | None:
@@ -128,6 +154,21 @@ def live_file(status_line: Path, who: str | None) -> Path:
     before it told accounts apart kept only .statusline, the latest from any."""
     store = status_line.parent / ".usage"
     return store / (who or "-") if store.is_dir() else status_line
+
+
+def fetched_file(status_line: Path, who: str | None) -> Path | None:
+    """Where fetch.py keeps what it last heard for an account: .fetched/<account id> beside
+    .statusline; nowhere with nobody signed in."""
+    return status_line.parent / ".fetched" / who if who else None
+
+
+def read_fetched(path: Path | None) -> Usage | None:
+    """What fetch.py last heard, kept as ~/.claude.json keeps it."""
+    return from_cache(_load(path), None) if path is not None else None
+
+
+def newest(*found: Usage | None) -> Usage | None:
+    return max((usage for usage in found if usage is not None), key=lambda usage: usage.fetched_at, default=None)
 
 
 def read_live(path: Path | None = None) -> Usage | None:
@@ -207,13 +248,17 @@ def with_hit(usage: Usage | None, hit: LimitHit | None, now: float, who: str | N
 def parse(config) -> Usage | None:
     if not isinstance(config, dict):
         return None
-    cached = config.get("cachedUsageUtilization")
+    signed_in = config.get("oauthAccount")
+    return from_cache(config.get("cachedUsageUtilization"),
+                      signed_in.get("accountUuid") if isinstance(signed_in, dict) else None)
+
+
+def from_cache(cached, who: str | None) -> Usage | None:
+    """{"fetchedAtMs", "accountUuid", "utilization"}: ~/.claude.json's copy, or CTally's."""
     if not isinstance(cached, dict):
         return None
     # Numbers saved under another account, before a switch, aren't yours.
-    account = config.get("oauthAccount")
-    account = account.get("accountUuid") if isinstance(account, dict) else None
-    if account and cached.get("accountUuid") and cached["accountUuid"] != account:
+    if who and cached.get("accountUuid") and cached["accountUuid"] != who:
         return None
     utilization = cached.get("utilization")
     fetched = _number(cached.get("fetchedAtMs"))
@@ -298,6 +343,12 @@ def percent_text(limit: Limit) -> str:
     return f"{math.floor(limit.percent)}%"
 
 
+def _minute(moment: float) -> float:
+    """A reset time to the nearest minute: the server can put a window's end a moment before
+    the hour."""
+    return round(moment / 60) * 60
+
+
 def clock(moment: float) -> str:
     """"6:30 pm", or "6 pm" on the hour, in local time."""
     t = time.localtime(moment)
@@ -324,6 +375,7 @@ def when(moment: float | None, now: float) -> str:
         return ""
     if moment - now < 86400:
         return "in " + until(moment, now)
+    moment = _minute(moment)
     if moment - now < 6 * 86400:
         return time.strftime("%a ", time.localtime(moment)) + clock(moment)
     return time.strftime("%b %-d", time.localtime(moment))
@@ -334,7 +386,8 @@ def resets(moment: float | None, now: float) -> str:
     if moment is None:
         return ""
     if moment - now < 86400:
-        return f"resets {clock(moment)} (in {until(moment, now)})"
+        return f"resets {clock(_minute(moment))} (in {until(moment, now)})"
+    moment = _minute(moment)
     return f"resets {time.strftime('%a %b %-d', time.localtime(moment))}, {clock(moment)}"
 
 
@@ -384,28 +437,39 @@ def describe(usage: Usage, now: float) -> list[str]:
 
 class UsageReader:
     """Rereads each file only when it changes, and looks at most every couple of seconds. A
-    file caught halfway through being written keeps the last good reading."""
+    file caught halfway through being written keeps the last good reading. Given a fetcher, it
+    lets it know how old the numbers are as it looks, so it can ask Anthropic for new ones."""
 
     EVERY = 2.0
 
-    def __init__(self, path: Path | None = None, live: Path | None = None):
+    def __init__(self, path: Path | None = None, live: Path | None = None,
+                 fetcher: fetch.Fetcher | None = None):
         self._cache = _Watched(path or CLAUDE_JSON, lambda data, _: (parse(data), account(data)))
         self._status_line = live or STATUS_LINE
         self._live = _Watched(self._status_line, parse_live)
+        self._fetched: _Watched | None = None
         self._hits = self._status_line.parent       # the hook's .limit sits beside it
         self._checked = -math.inf
         self._usage: Usage | None = None
+        self.fetcher = fetcher
 
     def poll(self) -> Usage | None:
         now = time.monotonic()
         if now - self._checked >= UsageReader.EVERY:
             self._checked = now
             cached, who = self._cache.poll() or (None, None)
-            # The account signed in can change under me, and with it the file to watch.
+            # The account signed in can change under me, and with it the files to watch.
             path = live_file(self._status_line, who)
             if path != self._live.path:
                 self._live = _Watched(path, parse_live)
+            asked = fetched_file(self._status_line, who)
+            if asked != (self._fetched.path if self._fetched else None):
+                self._fetched = _Watched(asked, lambda data, _: from_cache(data, None)) if asked else None
             latest, at = self._live.poll(), time.time()
+            cached = newest(cached, self._fetched.poll() if self._fetched else None)
+            if self.fetcher is not None:
+                self.fetcher.poll(who, asked, cached.fetched_at if cached else None,
+                                  latest.fetched_at if latest else None)
             self._usage = with_hit(merge(in_force(cached, latest, at), latest), read_limit(self._hits), at, who)
         return self._usage
 

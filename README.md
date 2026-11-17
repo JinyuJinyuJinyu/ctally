@@ -40,7 +40,8 @@ red at 90%, so you see a session nearing compaction before it gets there. [More 
   (`Allow Bash(npm publish)?`), a question or a plan, and in tmux you answer it from CTally with the
   choices Claude Code shows. [More below.](#answering-from-ctally)
 - **Your plan's usage limits**: the session, the week, and each model's week, as bars with when each
-  resets, kept fresh after every reply. [More below.](#usage-limits)
+  resets, kept fresh after every reply and asked of Anthropic every few minutes, as `/usage` does.
+  [More below.](#usage-limits)
 - **How full each session's context window is**: a small gauge on every row and badge fills as the
   conversation grows, turning amber at 75% and red at 90%, before Claude Code compacts it. These are Claude
   Code's own numbers. [More below.](#context-window)
@@ -55,7 +56,7 @@ red at 90%, so you see a session nearing compaction before it gets there. [More 
 - **Menu bar (or top bar) icon** to show or hide CTally. Off stays off across restarts, and the app sits idle
   with no timers but the snapshots', if they're on.
 - **Settings window** with an on/off switch, an opacity slider (80% by default), and switches for the usage
-  limits and the snapshots.
+  limits, asking Anthropic for them, and the snapshots.
 - **Snapshots for after a restart**: every two minutes, your tmux sessions and the Claude Code sessions in
   them, and a **Restore Sessions** item in the menus to bring them back. [More below.](#snapshots-for-after-a-restart)
 - **Silent**: no sounds, no notifications, no Dock icon.
@@ -147,10 +148,12 @@ say), and usage credits if you've switched them on.
 - **Hover over any of them** for the details, and how fresh they are. The menu bar (top bar) icon's menu
   lists them too.
 - **Colours**: a bar turns amber at 75% and red at 90%. Numbers more than an hour old are dimmed.
-- **A model's week says how old it is.** Replies bring only the session and the week, so a per-model limit
-  stays as `/usage` last had it. Once that's more than an hour behind the rest, its line is dimmed and says
-  so (`13 h ago`, or `as of 9:33 am` in the menu and `ctally usage`). Run `/usage` in Claude Code to bring it
-  up to date.
+- **A model's week is asked for.** Replies bring only the session and the week, and Claude Code saves a
+  model's week (Fable's, say) only when you run `/usage`. So CTally asks Anthropic for all of them, the way
+  `/usage` does, every five minutes while Claude Code is in use: see [Privacy](#privacy). Switch that off
+  (**Exact usage** in Settings), or while it can't get through, and a model's week stays as `/usage` last had
+  it. Once that's more than an hour behind the rest, its line is dimmed and says so (`13 h ago`, or
+  `as of 9:33 am` in the menu and `ctally usage`).
 - **Hitting a limit** shows it at 100% at once, and the sessions it stopped as **limit**. A prompt you send
   before it resets doesn't make them look busy, because it can't get through. A limit reset early starts a new
   window, and the meter follows it from the next reply.
@@ -171,9 +174,11 @@ Updated just now
 
 Where the numbers come from: Claude Code passes the session and week limits to its status line after every
 reply, so `ctally setup` adds a status line that hands them to CTally and shows nothing itself (a status
-line you already had keeps showing; CTally's runs it). Everything else comes from the copy of the `/usage`
-numbers Claude Code keeps in `~/.claude.json`, which it refreshes only now and then. Limits apply to Pro,
-Max and Team plans; with an API key there are none to show.
+line you already had keeps showing; CTally's runs it). Everything else comes from asking Anthropic, as
+`/usage` does: the app asks every five minutes, while its limits are on screen and Claude Code has replied
+since the last answer (or that answer is an hour old), and `ctally usage` asks when what CTally has is five
+minutes old. The copy of the `/usage` numbers Claude Code keeps in `~/.claude.json` counts too, when it's the
+newer. Limits apply to Pro, Max and Team plans; with an API key there are none to show.
 
 Claude Code doesn't say which account a session's numbers are for, and a session keeps handing over the
 ones from its last reply, hours later and accounts later. So CTally takes a session's numbers only when
@@ -182,8 +187,9 @@ every account's week ends at its own time. Numbers from a session that hasn't re
 accounts, or since a limit was reset, change nothing.
 
 Turn the limits off with the switch in Settings, or right-click → Hide Usage Limits. That hides them from tmux
-too. `ctally setup --no-statusline` leaves the status line out; the limits then refresh only when Claude Code
-refreshes its copy.
+too, and the app stops asking for them. **Exact usage** in Settings stops the asking alone: then a model's
+week is as new as your last `/usage`. `ctally setup --no-statusline` leaves the status line out; the session
+and the week then refresh only as often as CTally asks, or Claude Code refreshes its copy.
 
 ## Your stats
 
@@ -438,7 +444,10 @@ Two pieces, connected by a folder:
 2. **The app.** It polls the folder twice a second, checking modification times first so unchanged files
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
    is running: a finished one stays so you can still see it. Leftover files are cleaned up after a day. The
-   usage limits it checks every two seconds, the same way.
+   usage limits it checks every two seconds, the same way, and asks Anthropic for them, on a thread of its
+   own, once they're five minutes old and Claude Code has replied since. The answer goes in
+   `~/.claude/ctally.d/.fetched/<account id>`, the way `~/.claude.json` keeps its copy, and the newer of the
+   two counts.
 
    The hooks hear of a session only once it does something, so the app also reads Claude Code's own list of
    its running sessions, `~/.claude/sessions/`. A session the hooks haven't heard from yet, idle since setup or
@@ -477,8 +486,15 @@ CTally's as one quoted argument: `"\"$HOME/.claude/hooks/ctally-statusline.sh\" 
 
 ### Privacy
 
-Everything stays on your machine. The app makes no network requests. To show session names it reads each
-transcript in `~/.claude/projects/`, but only two parts:
+Everything stays on your machine. The one network request CTally makes is for your usage limits: it asks
+`https://api.anthropic.com/api/oauth/usage`, the place Claude Code's `/usage` asks, as your Claude Code
+sign-in, and keeps the answer (the limits, nothing else) in `~/.claude/ctally.d/.fetched/<account id>`. For
+that it reads Claude Code's access token each time it asks, from `~/.claude/.credentials.json`, or on macOS
+the `Claude Code-credentials` item in your keychain. It sends the token only to api.anthropic.com, and never
+saves, logs or renews it: once it runs out, CTally waits for Claude Code to renew it. Switch off
+**Exact usage** in Settings and CTally makes no network requests at all, and never reads the sign-in.
+
+To show session names it reads each transcript in `~/.claude/projects/`, but only two parts:
 
 - the last 256 KB, for the `/rename` name or the generated title
 - the first 256 KB, once, for the directory the session started in
@@ -493,9 +509,9 @@ screen of that session's tmux pane when you open the menu, and types only the di
 
 For how full each session's context is, it reads the latest its status line was handed for that session
 (which also holds the model, the session's cost so far and its folder; CTally uses only the context numbers).
-For the usage limits it reads what its status line saved, and from `~/.claude.json` only the cached `/usage`
-numbers and your account's id, to show the numbers that are that account's (the status line and the hook
-read the id there too, and name files by it). It never touches your credentials.
+For the usage limits it also reads what its status line saved, and from `~/.claude.json` only the cached
+`/usage` numbers and your account's id, to show the numbers that are that account's (the status line and the
+hook read the id there too, and name files by it).
 
 The history behind `ctally stats` holds nothing but times, session ids and states, and is kept for 90 days.
 
@@ -548,6 +564,9 @@ tmux settings are left as they are. The second removes the command and its Qt.
   an account CTally hasn't seen, there are none until its first reply.
 - **The limits look like another account's.** After upgrading from 0.3.4 or earlier, run `ctally setup`
   again: it's the newer status line script that tells accounts apart.
+- **A model's week says `as of …`.** CTally couldn't ask Anthropic for it: `ctally usage` says why, and so
+  does the log. Most often Claude Code's sign-in has run out and no session has renewed it yet, or the
+  answers came too often and CTally is waiting as it was told. Check that **Exact usage** is on in Settings.
 - **Ubuntu: "Could not load the Qt platform plugin xcb".** Install the library it names, usually
   `sudo apt install libxcb-cursor0`.
 

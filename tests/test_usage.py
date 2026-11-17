@@ -500,6 +500,13 @@ def test_when_and_resets(utc):
     assert usage.resets(saturday, now) == "resets Sat Oct 10, 10 pm"
     assert usage.clock(datetime(2026, 10, 7, 0, 5, tzinfo=timezone.utc).timestamp()) == "12:05 am"
     assert usage.clock(datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc).timestamp()) == "12 pm"
+    # Fable's week can end a fraction of a second before the hour: it still reads as the hour,
+    # and a moment before midnight as the day after.
+    assert usage.when(saturday - 0.2, now) == "Sat 10 pm"
+    assert usage.resets(saturday - 0.2, now) == "resets Sat Oct 10, 10 pm"
+    midnight = datetime(2026, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert usage.when(midnight - 0.2, now) == "Sat 12 am"
+    assert usage.resets(soon - 0.2, now) == "resets 7:30 pm (in 2h 25m)"
 
 
 def test_ago():

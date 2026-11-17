@@ -1,5 +1,6 @@
 """The settings window: CTally on or off, how see-through it is, whether it shows your
-plan's usage limits, and whether it takes snapshots of tmux for after a restart."""
+plan's usage limits and asks Anthropic for them, and whether it takes snapshots of tmux for
+after a restart."""
 from __future__ import annotations
 
 import math
@@ -100,6 +101,7 @@ class SettingsWindow(QWidget):
     toggled = Signal(bool)
     opacity_changed = Signal(float)
     usage_toggled = Signal(bool)
+    exact_usage_toggled = Signal(bool)
     snapshots_toggled = Signal(bool)
     quit_requested = Signal()
     closed = Signal()
@@ -154,6 +156,18 @@ class SettingsWindow(QWidget):
         self.usage_switch.setAccessibleName("Usage limits")
         self.usage_switch.toggled.connect(self.usage_toggled)
 
+        exact_title = QLabel("Exact usage")
+        exact_hint = QLabel("Asks Anthropic every 5 min, as /usage does")
+        secondary(exact_hint)
+        exact_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        exact_labels = QVBoxLayout()
+        exact_labels.setSpacing(2)
+        exact_labels.addWidget(exact_title)
+        exact_labels.addWidget(exact_hint)
+        self.exact_switch = Switch()
+        self.exact_switch.setAccessibleName("Exact usage")
+        self.exact_switch.toggled.connect(self.exact_usage_toggled)
+
         snapshots_title = QLabel("Snapshots")
         snapshots_hint = QLabel("Every 2 min, to restore tmux after a restart")
         secondary(snapshots_hint)
@@ -196,6 +210,11 @@ class SettingsWindow(QWidget):
         limits.setContentsMargins(52, 0, 0, 0)
         limits.addLayout(usage_labels, 1)
         limits.addWidget(self.usage_switch, 0, Qt.AlignVCenter)
+        exact = QHBoxLayout()
+        exact.setSpacing(12)
+        exact.setContentsMargins(52, 0, 0, 0)
+        exact.addLayout(exact_labels, 1)
+        exact.addWidget(self.exact_switch, 0, Qt.AlignVCenter)
         keep = QHBoxLayout()
         keep.setSpacing(12)
         keep.setContentsMargins(52, 0, 0, 0)
@@ -212,6 +231,7 @@ class SettingsWindow(QWidget):
         stack.addLayout(row)
         stack.addLayout(fade)
         stack.addLayout(limits)
+        stack.addLayout(exact)
         stack.addLayout(keep)
         stack.addWidget(rule)
         stack.addLayout(footer)
@@ -252,6 +272,13 @@ class SettingsWindow(QWidget):
             self.usage_switch.setChecked(shown)
             self.usage_switch.blockSignals(False)
             self.usage_switch.update()
+
+    def update_exact_usage(self, on: bool) -> None:
+        if self.exact_switch.isChecked() != on:
+            self.exact_switch.blockSignals(True)
+            self.exact_switch.setChecked(on)
+            self.exact_switch.blockSignals(False)
+            self.exact_switch.update()
 
     def update_snapshots(self, on: bool) -> None:
         if self.snapshots_switch.isChecked() != on:

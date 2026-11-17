@@ -12,7 +12,8 @@
   ctally list                   one line per live session: state, tmux pane, subagents running,
                                 how full its context is, project, id
   ctally usage [--json]         your plan's usage limits, as Claude Code's /usage shows them:
-                                the session, the week, each model's week, and when each resets
+                                the session, the week, each model's week, and when each resets;
+                                asked of Anthropic first if they're a few minutes old
   ctally stats [--days N] [--json]
                                 the last week (or N days), day by day: how long Claude worked and
                                 waited on you, prompts, turns finished, sessions, limits hit
@@ -140,6 +141,11 @@ def usage_items() -> list[str]:
 
 
 def usage(as_json: bool) -> int:
+    from .prefs import Prefs
+    problem = limits.refresh() if Prefs()["exact_usage"] else None
+    if problem:
+        print(f"ctally: couldn't ask Anthropic for the latest ({problem}), so these are as last seen",
+              file=sys.stderr)
     found = limits.read()
     if found is None:
         print("ctally: no usage limits known yet. Claude Code saves them once a session on a Pro, Max or "

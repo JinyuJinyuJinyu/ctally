@@ -5,7 +5,8 @@ state files CTally's hooks write.
 Switch it off and on from the tray icon, the settings window, or the indicator's right-click
 menu. Off is remembered, and while off the app sits dormant: only the tray icon stays, and no
 timers run but the snapshots'. The tray icon's menu also lists your plan's usage limits,
-whenever they're known.
+whenever they're known. While they're looked at, they're asked of Anthropic every few
+minutes, unless that's switched off: see fetch.py.
 
 Snapshots of tmux and its Claude Code sessions, every couple of minutes, are switched on and
 off from the same menus and the settings window; the menus offer to restore one when it has a
@@ -26,7 +27,7 @@ from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QPai
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from .. import answer, focus, prefs, snapshots, system
+from .. import answer, fetch, focus, prefs, snapshots, system
 from ..sessions import State, StateReader
 from ..usage import UsageReader, describe
 from . import mac
@@ -125,7 +126,10 @@ class Controller:
         self.server = server
         self.prefs = prefs.Prefs()
         self.reader = StateReader()
+        # Asked for while they're being looked at: the indicator's polls, or the tray menu.
+        self.fetcher = fetch.Fetcher()
         self.usage = UsageReader()
+        self._ask_for_usage()
         self.sessions: list = []
         self.settings: SettingsWindow | None = None
 
@@ -214,10 +218,27 @@ class Controller:
 
     def set_show_usage(self, shown: bool) -> None:
         self.prefs["usage"] = bool(shown)
+        self._ask_for_usage()
         if self.settings is not None:
             self.settings.update_usage(self.show_usage)
         if self.enabled:
             self.poll()
+
+    @property
+    def exact_usage(self) -> bool:
+        return bool(self.prefs["exact_usage"])
+
+    def set_exact_usage(self, on: bool) -> None:
+        """On asks Anthropic for the numbers every few minutes, as /usage does; off goes by
+        what Claude Code saves, where a model's week is only as new as the last /usage."""
+        self.prefs["exact_usage"] = bool(on)
+        self._ask_for_usage()
+        if self.settings is not None:
+            self.settings.update_exact_usage(self.exact_usage)
+
+    def _ask_for_usage(self) -> None:
+        """Only with both switches on: limits hidden aren't worth a request."""
+        self.usage.fetcher = self.fetcher if self.exact_usage and self.show_usage else None
 
     @property
     def keep_snapshots(self) -> bool:
@@ -302,6 +323,7 @@ class Controller:
             window.toggled.connect(self.set_enabled)
             window.opacity_changed.connect(self.set_opacity)
             window.usage_toggled.connect(self.set_show_usage)
+            window.exact_usage_toggled.connect(self.set_exact_usage)
             window.snapshots_toggled.connect(self.set_keep_snapshots)
             window.quit_requested.connect(self.app.quit)
             window.closed.connect(self._settings_closed)
@@ -314,6 +336,7 @@ class Controller:
         self.settings.update_state(self.enabled, self.sessions)
         self.settings.update_opacity(self.opacity)
         self.settings.update_usage(self.show_usage)
+        self.settings.update_exact_usage(self.exact_usage)
         self.settings.update_snapshots(self.keep_snapshots)
         if system.MAC:
             mac.activate()
