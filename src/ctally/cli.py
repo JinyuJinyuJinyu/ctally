@@ -144,16 +144,19 @@ def usage(as_json: bool) -> int:
     if as_json:
         print(json.dumps({"updated": found.fetched_at, "stale": found.is_stale(now), "limits": [
             {"title": limit.title, "percent": limit.percent, "resets_at": limit.resets_at,
-             "level": ("ok", "warning", "critical")[limit.level], **({"detail": limit.detail} if limit.detail else {})}
+             "level": ("ok", "warning", "critical")[limit.level], "as_of": limit.seen,
+             **({"detail": limit.detail} if limit.detail else {})}
             for limit in current.limits]}, indent=1))
         return 0
     width = max(len(limit.title) for limit in current.limits)
     for limit in current.limits:
         filled = min(10, max(0, round(limit.percent / 10)))
         bar = "█" * filled + "░" * (10 - filled)
-        after = limit.detail or limits.resets(limit.resets_at, now)
+        after = " · ".join(part for part in (limit.detail or limits.resets(limit.resets_at, now),
+                                             limits.as_of(limit.seen, now) if current.behind(limit) else "") if part)
         print(f"{limit.title:<{width}}  {bar} {limits.percent_text(limit):>4}  {after}".rstrip())
-    print(limits.describe(found, now)[-1])
+    described = limits.describe(found, now)
+    print("\n".join(described[len(current.limits):]))
     return 0
 
 

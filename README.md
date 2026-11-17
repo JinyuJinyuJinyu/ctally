@@ -145,6 +145,10 @@ say), and usage credits if you've switched them on.
 - **Hover over any of them** for the details, and how fresh they are. The menu bar (top bar) icon's menu
   lists them too.
 - **Colours**: a bar turns amber at 75% and red at 90%. Numbers more than an hour old are dimmed.
+- **A model's week says how old it is.** Replies bring only the session and the week, so a per-model limit
+  stays as `/usage` last had it. Once that's more than an hour behind the rest, its line is dimmed and says
+  so (`13 h ago`, or `as of 9:33 am` in the menu and `ctally usage`). Run `/usage` in Claude Code to bring it
+  up to date.
 - **Hitting a limit** shows it at 100% at once, and the sessions it stopped as **limit**. A prompt you send
   before it resets doesn't make them look busy, because it can't get through. A limit reset early starts a new
   window, and the meter follows it from the next reply.

@@ -522,6 +522,31 @@ def test_describe(utc):
         "Updated 2 h ago: Claude Code refreshes it while a session runs")
 
 
+def test_a_number_well_behind_the_rest_says_when_it_is_from(utc):
+    """Replies bring the session and the week, never a model's week: that one stays as /usage
+    last had it, and once it's over an hour behind the rest it says so."""
+    cache = parse(cached())
+    assert {limit.seen for limit in cache.limits} == {FETCHED / 1000}
+    later = FETCHED / 1000 + 5 * 3600
+    live = parse_live(status_line(), later)
+    assert {limit.seen for limit in live.limits} == {later}
+    found = merge(cache, live)
+    fable = next(limit for limit in found.limits if "Fable" in limit.title)
+    assert [found.behind(limit) for limit in found.limits] == [False, False, True]
+    lines = usage.describe(found, later + 60)
+    assert lines[2] == "Current week (Fable): 0% used · resets Sat Oct 10, 11 am · as of 5:59 am"
+    assert lines[-2:] == ["Updated 1 min ago",
+                          "Replies bring only the session and the week: run /usage in Claude Code for the rest"]
+    assert usage.as_of(fable.seen, fable.seen + 2 * 86400) == "as of Wed 5:59 am"
+    assert usage.as_of(fable.seen, fable.seen + 9 * 86400) == "as of Oct 7"
+    # Within the hour it's as good as the rest, and a window run out since starts from nothing.
+    within = merge(cache, parse_live(status_line(), FETCHED / 1000 + 1800))
+    assert not any(within.behind(limit) for limit in within.limits)
+    reset = found.at(epoch(WEEK_RESET) + 60)
+    assert not any(reset.behind(limit) for limit in reset.limits)
+    assert usage.describe(cache, FETCHED / 1000 + 60)[-1] == "Updated 1 min ago"
+
+
 def test_credits_described_with_their_amounts():
     credits = Limit(("credits",), "Usage credits", "Credits", "", 24.8, None, detail="$12.40 of $50.00")
     lines = usage.describe(Usage((credits,), 1000), 1030)

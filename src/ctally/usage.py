@@ -12,7 +12,8 @@ Two places, both written by Claude Code, both only read here: no network, no cre
   session and the week, nothing else, the latest reply's for each account you use
   (~/.claude/ctally.d/.usage/<account id>). Where it's newer, it wins for those two. One of
   the two it says nothing of, which the cache lists with nothing used, isn't a limit of the
-  plan's any more, and isn't shown.
+  plan's any more, and isn't shown. The rest, each model's week, stay as the cache had them,
+  and say how old they are once that's well behind the session and the week.
 
 Both are an account's. ~/.claude.json names the one signed in, and only its numbers are shown:
 sign in to another, or swap accounts under the sessions that are running, and the limits are
@@ -60,6 +61,7 @@ class Limit(NamedTuple):
     resets_at: float | None     # Unix time
     severity: str = "normal"    # the server's own word for it, when it gives one
     detail: str = ""            # "$12.40 of $50.00", for credits
+    seen: float | None = None   # when this number was read: the cache's fetch, or a reply's
 
     @property
     def level(self) -> int:
@@ -77,12 +79,17 @@ class Usage(NamedTuple):
         """As things stand at `now`: a window whose reset time has passed starts again from
         nothing."""
         return self._replace(limits=tuple(
-            limit._replace(percent=0.0, resets_at=None, severity="normal", detail="")
+            limit._replace(percent=0.0, resets_at=None, severity="normal", detail="", seen=None)
             if limit.resets_at is not None and limit.resets_at <= now else limit
             for limit in self.limits))
 
     def is_stale(self, now: float) -> bool:
         return now - self.fetched_at > STALE_AFTER
+
+    def behind(self, limit: Limit) -> bool:
+        """Whether a limit's number is much older than the rest: a model's week, say, which
+        only /usage brings up to date, while every reply brings the session and the week."""
+        return limit.seen is not None and self.fetched_at - limit.seen > STALE_AFTER
 
     @property
     def compact(self) -> tuple[Limit, ...]:
@@ -143,7 +150,7 @@ def parse_live(status, modified: float) -> Usage | None:
         window = limits.get(field)
         percent = _number(window.get("used_percentage")) if isinstance(window, dict) else None
         if percent is not None:
-            found.append(Limit(key, title, short, tag, percent, _seconds(window.get("resets_at"))))
+            found.append(Limit(key, title, short, tag, percent, _seconds(window.get("resets_at")), seen=modified))
     return Usage(tuple(found), modified) if found else None
 
 
@@ -192,7 +199,8 @@ def with_hit(usage: Usage | None, hit: LimitHit | None, now: float, who: str | N
         current = Limit(key, title, short, tag, 100.0, resets)
         usage = Usage(_ordered((usage.limits if usage else ()) + (current,)),
                       usage.fetched_at if usage else hit.noted)
-    full = current._replace(percent=max(current.percent, 100.0), resets_at=resets, severity="exceeded")
+    full = current._replace(percent=max(current.percent, 100.0), resets_at=resets, severity="exceeded",
+                            seen=max(current.seen or hit.noted, hit.noted))
     return usage._replace(limits=tuple(full if limit.key == key else limit for limit in usage.limits))
 
 
@@ -211,7 +219,7 @@ def parse(config) -> Usage | None:
     fetched = _number(cached.get("fetchedAtMs"))
     if not isinstance(utilization, dict) or fetched is None:
         return None
-    limits = _limits(utilization)
+    limits = tuple(limit._replace(seen=fetched / 1000) for limit in _limits(utilization))
     return Usage(limits, fetched / 1000) if limits else None
 
 
@@ -341,18 +349,34 @@ def ago(moment: float, now: float) -> str:
     return f"{int(seconds // 86400)} d ago"
 
 
+def as_of(moment: float, now: float) -> str:
+    """"as of 9:33 am" today, "as of Mon 9:33 am" within the week, "as of Nov 9" before."""
+    then, today = time.localtime(moment), time.localtime(now)
+    if (then.tm_year, then.tm_yday) == (today.tm_year, today.tm_yday):
+        return f"as of {clock(moment)}"
+    if now - moment < 6 * 86400:
+        return f"as of {time.strftime('%a', then)} {clock(moment)}"
+    return f"as of {time.strftime('%b %-d', then)}"
+
+
 def describe(usage: Usage, now: float) -> list[str]:
-    """One line per limit, the way /usage puts it, and how old the numbers are."""
+    """One line per limit, the way /usage puts it, and how old the numbers are: any much older
+    than the rest says when it's from."""
     lines = []
-    for limit in usage.at(now).limits:
+    current = usage.at(now)
+    for limit in current.limits:
         parts = [f"{percent_text(limit)} used"]
         if limit.detail:
             parts.append(limit.detail)
         if limit.resets_at is not None:
             parts.append(resets(limit.resets_at, now))
+        if current.behind(limit):
+            parts.append(as_of(limit.seen, now))
         lines.append(f"{limit.title}: {' · '.join(parts)}")
     lines.append(f"Updated {ago(usage.fetched_at, now)}" if not usage.is_stale(now) else
                  f"Updated {ago(usage.fetched_at, now)}: Claude Code refreshes it while a session runs")
+    if any(current.behind(limit) for limit in current.limits):
+        lines.append("Replies bring only the session and the week: run /usage in Claude Code for the rest")
     return lines
 
 

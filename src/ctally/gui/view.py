@@ -44,7 +44,7 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiAppl
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from ..sessions import BY_URGENCY, Agents, Context, Session, State
-from ..usage import Usage, describe, percent_text, when
+from ..usage import Usage, ago, describe, percent_text, when
 
 ACCENT = {
     State.WORKING: QColor.fromRgbF(0.29, 0.80, 0.95),   # cyan
@@ -194,8 +194,9 @@ class Meter(NamedTuple):
     tag: str            # "5h", for the small meters
     share: float        # used, 0–1
     percent: str        # "71%"
-    when: str           # "in 1h 12m", "Sat 10 pm"
+    when: str           # "in 1h 12m", "Sat 10 pm"; or how old it is, "13 h ago", when that's well behind the rest
     level: int          # 0 fine, 1 getting close, 2 nearly out
+    old: bool = False   # much older than the rest: drawn faded
 
 
 class Chip(NamedTuple):
@@ -379,7 +380,10 @@ class TallyView(QWidget):
         if usage is not None:
             current = usage.at(now)
             drawn = {limit: Meter(limit.short, limit.tag or limit.short, min(max(limit.percent / 100, 0.0), 1.0),
-                                  percent_text(limit), when(limit.resets_at, now) or limit.detail, limit.level)
+                                  percent_text(limit),
+                                  ago(limit.seen, now) if current.behind(limit) else
+                                  when(limit.resets_at, now) or limit.detail,
+                                  limit.level, current.behind(limit))
                      for limit in current.limits}
             meters = tuple(drawn.values())
             compact = tuple(drawn[limit] for limit in current.compact)
@@ -1455,9 +1459,9 @@ class TallyView(QWidget):
         f = self.fonts
         label_width, percent_width, reset_width = self._usage_columns()
         painter.save()
-        if self._usage_dim:
-            painter.setOpacity(0.5)
         for index, meter in enumerate(self._meters):
+            # A number much older than the rest, faded, as the whole list is once it all is.
+            painter.setOpacity(0.5 if self._usage_dim or meter.old else 1.0)
             line = QRectF(rect.x() + 4, rect.y() + index * TallyView.USAGE_LINE, rect.width() - 8, TallyView.USAGE_LINE)
             draw_text(painter, meter.label, QRectF(line.x(), line.y(), label_width, line.height()),
                       f.usage, white(0.95, 0.75))
