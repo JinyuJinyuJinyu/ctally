@@ -195,7 +195,7 @@ def test_the_answer_is_saved_and_beats_claude_codes_older_copy(own_usage_and_pre
     found = usage.read()
     assert percents(found) == [("Week", 31), ("Week · Fable", 42)]
     assert time.time() - found.fetched_at < 5 and not any(found.behind(limit) for limit in found.limits)
-    claude_json(home, week=33, fable=45, age=0)        # a /usage since: the newer wins
+    claude_json(home, week=33, fable=45, age=-1)       # a /usage a second later: the newer wins
     assert percents(usage.read()) == [("Week", 33), ("Week · Fable", 45)]
 
 
