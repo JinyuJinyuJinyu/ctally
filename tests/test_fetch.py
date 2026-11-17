@@ -4,6 +4,7 @@ only server reached is one of the test's own, on this machine."""
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -140,7 +141,9 @@ def test_asking_sends_the_sign_in_and_reads_the_answer(anthropic):
 
 def test_a_refusal_says_why_and_how_long_to_wait(anthropic):
     anthropic((429, {"Retry-After": "120"}, {"error": {"type": "rate_limit_error"}}),
+              (429, {"Retry-After": "Wed, 18 Nov 2026 07:28:00 GMT"}, {"error": {"type": "rate_limit_error"}}),
               (401, {}, {"error": {"type": "authentication_error"}}),
+              (403, {}, {"error": {"type": "permission_error"}}),
               (200, {}, {"error": {"type": "rate_limit_error"}}),
               (200, {}, ["not", "usage"]))
     with pytest.raises(Refused) as told:
@@ -148,12 +151,33 @@ def test_a_refusal_says_why_and_how_long_to_wait(anthropic):
     assert (told.value.status, told.value.wait, told.value.why) == (429, 120.0, "asked too often")
     with pytest.raises(Refused) as told:
         fetch.ask("abc")
+    assert (told.value.status, told.value.wait) == (429, None)     # a date: the fetcher waits its own while
+    with pytest.raises(Refused) as told:
+        fetch.ask("abc")
     assert told.value.status == 401
+    with pytest.raises(Refused) as told:
+        fetch.ask("abc")
+    assert (told.value.status, told.value.why) == (403, "the sign-in may not read usage")
     with pytest.raises(Refused) as told:
         fetch.ask("abc")
     assert told.value.status == 429                                 # said in the answer instead
     with pytest.raises(Refused):
         fetch.ask("abc")
+
+
+def test_offline_or_signed_out_it_says_so(monkeypatch, tmp_path):
+    with socket.socket() as taken:                                  # a port nothing listens on
+        taken.bind(("127.0.0.1", 0))
+        port = taken.getsockname()[1]
+    monkeypatch.setattr(fetch, "URL", f"http://127.0.0.1:{port}/api/oauth/usage")
+    with pytest.raises(Refused) as told:
+        fetch.ask("abc", timeout=5)
+    assert told.value.why.startswith("couldn't reach Anthropic (") and told.value.status is None
+
+    said = []
+    fetcher = Fetcher(lambda: None, log=said.append)
+    assert not fetcher.once(ACCOUNT, tmp_path / "fetched") and not (tmp_path / "fetched").exists()
+    assert fetcher.problem == said[0] == "no claude.ai sign-in for Claude Code to ask with"
 
 
 # MARK: When to ask

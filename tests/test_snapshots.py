@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from conftest import wait_for
+from conftest import ROOT, wait_for
 
 from ctally import snapshots, system
 from ctally.snapshots import Keeper, Places, Snapshots, Tmux, capture, launch, options, restore, stop_ccsnap
@@ -231,6 +233,66 @@ def test_the_app_finds_what_there_is_to_restore_and_takes_snapshots(private_tmux
     store.save([{"name": "gone", "windows": [window([pane(str(tmp_path))])]}], 1000)
     path, saved = keeper.restorable()
     assert saved == 1000 and store.load(path)["sessions"][0]["name"] == "gone"
+
+
+def test_the_app_takes_over_from_ccsnap_and_restores_in_the_background(private_tmux, places, tmp_path, monkeypatch):
+    private_tmux.new_session("running")
+    monkeypatch.setattr(snapshots, "stop_ccsnap", lambda: "ccsnap's systemd timer (ccsnap.timer)")
+    said = []
+    store = Snapshots(tmp_path / "state")
+    keeper = Keeper(store, Tmux(private_tmux.name), places, log=said.append)
+    keeper.take_over()
+    assert wait_for(lambda: said) == ["switched off ccsnap's systemd timer (ccsnap.timer): CTally takes the snapshots now"]
+
+    store.save([{"name": "gone", "windows": [window([pane(str(tmp_path))])]}], 1000)
+    gate = threading.Event()
+    keeper.pool.submit(gate.wait)                                       # holds the restore back
+    keeper.restore_soon()
+    assert keeper.restoring and keeper.restorable() is None             # one at a time
+    gate.set()
+    assert wait_for(lambda: not keeper.restoring, timeout=20)
+    assert "gone" in private_tmux("list-sessions", "-F", "#{session_name}").split()
+    assert keeper.restorable() is None and store.restored_this_boot()
+    assert not [line for line in said if "stopped" in line or "left out" in line], said
+
+
+def test_the_snapshot_command(private_tmux):
+    """`ctally snapshot`, run as it is from a shell, on this test's tmux server, snapshots and
+    Claude Code folder (see conftest)."""
+    def ctally(*args, server=private_tmux.name):
+        env = {**os.environ, "CCSNAP_TMUX_SOCKET": server, "PYTHONPATH": str(ROOT / "src")}
+        return subprocess.run([sys.executable, "-m", "ctally", "snapshot", *args], capture_output=True,
+                              text=True, timeout=60, env=env)
+
+    done = ctally("save", server=f"ctally-pytest-none-{os.getpid()}")
+    assert done.returncode == 1 and "no tmux server running" in done.stderr
+    done = ctally("list")
+    assert done.returncode == 1 and "no snapshots yet" in done.stderr
+
+    private_tmux.new_session("keep")
+    private_tmux.new_session("work")
+    done = ctally("save")
+    assert done.returncode == 0 and done.stdout.startswith("saved "), done.stderr
+    assert "2 tmux sessions, 2 panes, 0 Claude Code sessions" in done.stdout
+    assert ctally("save").stdout.startswith("nothing has changed since the last one")
+
+    done = ctally("list")
+    rows = [line for line in done.stdout.splitlines() if line.lstrip(" *")[:1].isdigit()]
+    assert done.returncode == 0 and len(rows) == 1, done.stdout
+    assert rows[0].split()[:2] == ["*", "1"] and rows[0].endswith("keep(1) work(1)"), rows    # the newest
+    done = ctally("restore", "2")
+    assert done.returncode == 1 and "no snapshot 2" in done.stderr
+
+    private_tmux("kill-session", "-t", "work")
+    done = ctally("restore", "1", "--dry-run")
+    assert done.returncode == 0 and "work:0.0  shell" in done.stdout, done.stdout + done.stderr
+    assert "keep: a tmux session of that name is running" in done.stdout
+    assert private_tmux("has-session", "-t", "=work", check=False) == ""
+    assert "work" not in private_tmux("list-sessions", "-F", "#{session_name}").split()
+    done = ctally("restore", "1")
+    assert done.returncode == 0 and "made 1 tmux session(s), started 0 Claude Code session(s)" in done.stdout, \
+        done.stdout + done.stderr
+    assert "work" in private_tmux("list-sessions", "-F", "#{session_name}").split()
 
 
 def test_when_it_was_saved():

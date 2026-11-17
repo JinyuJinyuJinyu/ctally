@@ -20,8 +20,9 @@ def test_is_alive():
 
 
 def test_own_environment():
+    # What this process started with: HOME, as conftest changes PATH (and others) only later on.
     env = system.environment(os.getpid())
-    assert env is not None and env.get("PATH") == os.environ.get("PATH")
+    assert env is not None and env.get("HOME") == os.environ.get("HOME")
 
 
 def test_a_childs_environment():
