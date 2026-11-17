@@ -78,7 +78,8 @@ class Hook:
 
 def _real_files() -> dict:
     home = Path.home()
-    watched = [home / ".claude" / "settings.json", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf"]
+    watched = [home / ".claude" / "settings.json", home / ".codex" / "hooks.json",
+               home / ".codex" / "config.toml", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf"]
     hooks = home / ".claude" / "hooks"
     if hooks.is_dir():
         watched += sorted(hooks.iterdir())
@@ -118,6 +119,7 @@ def own_usage_and_prefs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(usage, "STATUS_LINE", home / ".statusline")
     monkeypatch.setenv("CTALLY_CLAUDE_JSON", str(home / ".claude.json"))
     monkeypatch.setenv("CTALLY_CONFIG_DIR", str(home / "config"))
+    monkeypatch.setenv("CTALLY_CODEX_HOME", str(home / "codex"))
     return home
 
 

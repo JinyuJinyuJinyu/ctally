@@ -212,6 +212,7 @@ class TallyView(QWidget):
 
     fold_requested = Signal(bool)       # the chevron was clicked: the folded state wanted
     selected = Signal(object, object)   # a row or badge was clicked: its Session, and when (focus.focus)
+    open_failed = Signal(str)          # navigation failed in the worker; report on the GUI thread
     answer_requested = Signal(object, QPoint)   # what a session asks was clicked: its Session, and where
     drag_finished = Signal()            # dropped after a drag
     layout_changed = Signal()           # wants another size: a closer look opened or folded
@@ -460,6 +461,8 @@ class TallyView(QWidget):
         titles: dict[str, str] = {}
         for session in self._sessions:
             base = session.title or session.label or "Claude"
+            if session.source == "codex":
+                base = "Codex · " + base
             seen[base] = seen.get(base, 0) + 1
             titles[session.id] = base if seen[base] == 1 else f"{base} {seen[base]}"
 
@@ -888,8 +891,11 @@ class TallyView(QWidget):
         if session.ask:
             lines += ["", session.ask.summary]
             lines += [line for line in session.ask.detail.splitlines() if line.strip() and line != session.ask.summary]
-            lines.append("Click the amber line to answer from here." if row.tmux
-                         else "Click the session to answer in its terminal.")
+            if session.source != "codex":
+                lines.append("Click the amber line to answer from here." if row.tmux and session.source == "claude"
+                             else "Click the session to answer in its terminal.")
+        if session.source == "codex":
+            lines.append("Click to open this task in Codex and continue the conversation.")
         if session.agents:
             progress = session.agents.progress
             lines += ["", row.agents + (f" ({progress} done)" if progress else "")]

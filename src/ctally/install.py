@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import claude_hooks, prefs, system, tmux_conf
+from . import claude_hooks, codex_hooks, prefs, system, tmux_conf
 from .sessions import STATE_DIR
 
 LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / f"{prefs.APP_ID}.plist"
@@ -34,13 +34,23 @@ def command() -> str:
     sys.exit("Run this as the `ctally` command (pipx install puts it on your PATH).")
 
 
-def setup(tmux: bool, hooks: bool, autostart: bool, launch: bool, statusline: bool = True) -> int:
+def setup(tmux: bool, hooks: bool, autostart: bool, launch: bool, statusline: bool = True,
+          codex: bool = False) -> int:
     ctally = command()
     if system.MAC and OLD_APP.exists():
         print("==> replacing the old CTally.app")
         retire_old_app()
 
-    if hooks:
+    if hooks and codex:
+        print("==> hooking into Codex")
+        try:
+            say(codex_hooks.update(install=True))
+        except (claude_hooks.SettingsError, OSError) as error:
+            print(error, file=sys.stderr)
+            return 1
+        print("    Restart Codex, open /hooks, and select each event with an installed hook.")
+        print("    Review the entries named 'CTally · <event>' and press t to trust them.")
+    elif hooks:
         print("==> hooking into Claude Code")
         claude_hooks.install_script()
         try:
@@ -111,6 +121,11 @@ def uninstall() -> int:
     except claude_hooks.SettingsError as error:
         print(error, file=sys.stderr)
     claude_hooks.remove_scripts()
+    try:
+        say(codex_hooks.update(install=False))
+    except (claude_hooks.SettingsError, OSError) as error:
+        print(error, file=sys.stderr)
+    shutil.rmtree(codex_hooks.home() / "ctally.d", ignore_errors=True)
     say(tmux_conf.uninstall())
 
     old = Path.home() / ".claude" / "claude-pet.d"
@@ -162,7 +177,7 @@ def install_autostart(ctally: str, start_now: bool) -> str:
         "[Desktop Entry]",
         "Type=Application",
         "Name=CTally",
-        "Comment=A status light for your Claude Code sessions",
+        "Comment=A status light for your Claude Code and Codex sessions",
         f'Exec="{ctally}" run',
         "Terminal=false",
         "X-GNOME-Autostart-enabled=true",

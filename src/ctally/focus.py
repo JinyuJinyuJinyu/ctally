@@ -7,20 +7,29 @@ terminal the session runs in: on macOS the exact Terminal tab, or the app for an
 window of any other terminal where the desktop allows it (X11, with xdotool installed;
 Wayland lets no app raise another's window).
 
-All of this shells out, so it runs off the main thread, and it stays silent when anything
-along the way is missing.
+Shared Codex tasks open by session ID through `codex resume`, even without a known terminal.
+All of this shells out, so it runs off the main thread. Codex launch errors are reported
+through the caller's callback; raising an existing terminal remains best-effort.
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
 import subprocess
 import threading
+import time
+from pathlib import Path
+from uuid import UUID
 
 from . import system
+from .codex_hooks import home as codex_home
 
 TERMINAL = "com.apple.Terminal"
+_opening: set[str] = set()
+_opened_at: dict[str, float] = {}
+_open_lock = threading.Lock()
 
 # Picks the Terminal tab whose tty matches, and puts its window in front.
 RAISE_TAB = """
@@ -48,6 +57,72 @@ def focus(pid: int, when: int = 0) -> None:
     front of the one I'm using only for something I did after I last used that."""
     if pid > 0:
         threading.Thread(target=_focus_now, args=(pid, when), daemon=True).start()
+
+
+def open_session(session, when: int = 0, failed=None) -> None:
+    """Open the selected task, coalescing double-clicks while its terminal starts."""
+    with _open_lock:
+        if session.id in _opening or time.monotonic() - _opened_at.get(session.id, -10) < 2:
+            return
+        _opening.add(session.id)
+
+    def go():
+        try:
+            _open_session_now(session, when)
+        except (OSError, ValueError) as error:
+            if failed:
+                failed(str(error))
+        else:
+            with _open_lock:
+                _opened_at[session.id] = time.monotonic()
+        finally:
+            with _open_lock:
+                _opening.discard(session.id)
+
+    threading.Thread(target=go, daemon=True).start()
+
+
+def _open_session_now(session, when: int) -> None:
+    if session.source != "codex":
+        if session.pid > 0:
+            _focus_now(session.pid, when)
+        return
+    # A private server belongs to this terminal. A shared daemon can have many
+    # tasks in one pane: raising that pane alone would show whichever task was last selected.
+    current = session.owner_pid
+    for _ in range(32):
+        if session.pid > 0 and current == session.pid:
+            _focus_now(session.pid, when)
+            return
+        current = system.parent(current) if current > 1 else None
+        if not current:
+            break
+    sid = session.id.removeprefix("codex:")
+    try:
+        UUID(sid)
+    except ValueError:
+        raise ValueError("This Codex task has no valid session ID.") from None
+    binary = shutil.which("codex") or next(
+        (str(p) for p in (Path.home() / ".npm-global/bin/codex", Path.home() / ".local/bin/codex",
+                         Path("/opt/homebrew/bin/codex"), Path("/usr/local/bin/codex"))
+         if p.is_file() and os.access(p, os.X_OK)), None)
+    if not binary:
+        raise OSError("Codex CLI was not found. Install it or add codex to CTally's PATH, then try again.")
+    # Explicit ID, no prompt: this attaches a UI to the existing task without starting a turn.
+    command = shlex.join(["env", f"CODEX_HOME={codex_home()}", binary, "resume", "--", sid])
+    command = "exec " + command
+    if session.path and Path(session.path).is_dir():
+        command = f"cd {shlex.quote(session.path)} && " + command
+    if system.MAC:
+        script = ('on run argv\n tell application "Terminal"\n'
+                  ' do script (item 1 of argv)\n activate\n end tell\nend run')
+        if system.run(["osascript", "-e", script, command]) is None:
+            raise OSError("Could not open Terminal. Allow CTally to control Terminal in System Settings → Privacy & Security → Automation.")
+    elif system.LINUX and (terminal := shutil.which("x-terminal-emulator")):
+        subprocess.Popen([terminal, "-e", "sh", "-c", command], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        raise OSError("No supported terminal was found. Install an x-terminal-emulator to open Codex tasks.")
 
 
 def _focus_now(pid: int, when: int) -> None:

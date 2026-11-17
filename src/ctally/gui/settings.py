@@ -130,6 +130,12 @@ class SettingsWindow(QWidget):
         self.switch.setAccessibleName("Show CTally")
         self.switch.toggled.connect(self.toggled)
 
+        self.empty_hint = QLabel("Start a Claude Code or Codex session and send a message. "
+                                "For Codex, trust and enable CTally in /hooks first.")
+        self.empty_hint.setWordWrap(True)
+        secondary(self.empty_hint)
+        self.empty_hint.hide()
+
         opacity_title = QLabel("Opacity")
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(round(OPACITY_RANGE[0] * 100), round(OPACITY_RANGE[1] * 100))
@@ -141,8 +147,8 @@ class SettingsWindow(QWidget):
         self.opacity_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.opacity_value.setFixedWidth(38)
 
-        usage_title = QLabel("Usage limits")
-        usage_hint = QLabel("Session and weekly limits, as in /usage")
+        usage_title = QLabel("Claude Code usage limits")
+        usage_hint = QLabel("Not available for Codex yet")
         secondary(usage_hint)
         usage_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         usage_labels = QVBoxLayout()
@@ -150,7 +156,7 @@ class SettingsWindow(QWidget):
         usage_labels.addWidget(usage_title)
         usage_labels.addWidget(usage_hint)
         self.usage_switch = Switch()
-        self.usage_switch.setAccessibleName("Usage limits")
+        self.usage_switch.setAccessibleName("Claude Code usage limits")
         self.usage_switch.toggled.connect(self.usage_toggled)
 
         where = "menu bar" if system.MAC else "top bar"
@@ -192,6 +198,7 @@ class SettingsWindow(QWidget):
         stack.setContentsMargins(20, 20, 20, 20)
         stack.setSpacing(14)
         stack.addLayout(row)
+        stack.addWidget(self.empty_hint)
         stack.addLayout(fade)
         stack.addLayout(limits)
         stack.addWidget(rule)
@@ -218,6 +225,10 @@ class SettingsWindow(QWidget):
         text = describe(sessions) if enabled else "Off · hidden"
         if self.status.text() != text:
             self.status.setText(text)
+        self.empty_hint.setVisible(enabled and not sessions)
+        height = self.sizeHint().height()
+        if height != self.height():
+            self.setFixedHeight(height)
 
     def update_opacity(self, value: float) -> None:
         percent = round(value * 100)
@@ -278,4 +289,4 @@ def describe(sessions: list) -> str:
         n = sum(1 for s in sessions if s.state is state)
         if n:
             counts.append(f"{n} {state.value}")
-    return "On · " + ", ".join(counts) if counts else "On · no Claude Code sessions"
+    return "On · " + ", ".join(counts) if counts else "On · no sessions detected"
