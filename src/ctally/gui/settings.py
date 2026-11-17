@@ -1,5 +1,5 @@
-"""The settings window: CTally on or off, how see-through it is, and whether it shows your
-plan's usage limits."""
+"""The settings window: CTally on or off, how see-through it is, whether it shows your
+plan's usage limits, and whether it takes snapshots of tmux for after a restart."""
 from __future__ import annotations
 
 import math
@@ -100,6 +100,7 @@ class SettingsWindow(QWidget):
     toggled = Signal(bool)
     opacity_changed = Signal(float)
     usage_toggled = Signal(bool)
+    snapshots_toggled = Signal(bool)
     quit_requested = Signal()
     closed = Signal()
 
@@ -153,6 +154,18 @@ class SettingsWindow(QWidget):
         self.usage_switch.setAccessibleName("Usage limits")
         self.usage_switch.toggled.connect(self.usage_toggled)
 
+        snapshots_title = QLabel("Snapshots")
+        snapshots_hint = QLabel("Every 2 min, to restore tmux after a restart")
+        secondary(snapshots_hint)
+        snapshots_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        snapshots_labels = QVBoxLayout()
+        snapshots_labels.setSpacing(2)
+        snapshots_labels.addWidget(snapshots_title)
+        snapshots_labels.addWidget(snapshots_hint)
+        self.snapshots_switch = Switch()
+        self.snapshots_switch.setAccessibleName("Snapshots")
+        self.snapshots_switch.toggled.connect(self.snapshots_toggled)
+
         where = "menu bar" if system.MAC else "top bar"
         hint = QLabel(f"Off stays off, even after a restart. The hexagon icon in the {where} switches it too.")
         hint.setWordWrap(True)
@@ -183,6 +196,11 @@ class SettingsWindow(QWidget):
         limits.setContentsMargins(52, 0, 0, 0)
         limits.addLayout(usage_labels, 1)
         limits.addWidget(self.usage_switch, 0, Qt.AlignVCenter)
+        keep = QHBoxLayout()
+        keep.setSpacing(12)
+        keep.setContentsMargins(52, 0, 0, 0)
+        keep.addLayout(snapshots_labels, 1)
+        keep.addWidget(self.snapshots_switch, 0, Qt.AlignVCenter)
         footer = QHBoxLayout()
         footer.setSpacing(12)
         footer.addWidget(hint, 1)
@@ -194,6 +212,7 @@ class SettingsWindow(QWidget):
         stack.addLayout(row)
         stack.addLayout(fade)
         stack.addLayout(limits)
+        stack.addLayout(keep)
         stack.addWidget(rule)
         stack.addLayout(footer)
 
@@ -233,6 +252,13 @@ class SettingsWindow(QWidget):
             self.usage_switch.setChecked(shown)
             self.usage_switch.blockSignals(False)
             self.usage_switch.update()
+
+    def update_snapshots(self, on: bool) -> None:
+        if self.snapshots_switch.isChecked() != on:
+            self.snapshots_switch.blockSignals(True)
+            self.snapshots_switch.setChecked(on)
+            self.snapshots_switch.blockSignals(False)
+            self.snapshots_switch.update()
 
     def _slid(self, percent: int) -> None:
         self.opacity_value.setText(f"{percent}%")

@@ -53,9 +53,11 @@ red at 90%, so you see a session nearing compaction before it gets there. [More 
 - **Fold the list** down to a bar of counts with the chevron.
 - **When a turn finishes**, its row washes green and its mark bounces once; then everything holds still.
 - **Menu bar (or top bar) icon** to show or hide CTally. Off stays off across restarts, and the app sits idle
-  with no timers.
-- **Settings window** with an on/off switch, an opacity slider (80% by default), and a switch for the usage
-  limits.
+  with no timers but the snapshots', if they're on.
+- **Settings window** with an on/off switch, an opacity slider (80% by default), and switches for the usage
+  limits and the snapshots.
+- **Snapshots for after a restart**: every two minutes, your tmux sessions and the Claude Code sessions in
+  them, and a **Restore Sessions** item in the menus to bring them back. [More below.](#snapshots-for-after-a-restart)
 - **Silent**: no sounds, no notifications, no Dock icon.
 - **One Python package**, installed with pipx: the same Qt app on macOS and Linux, and a `ctally` command for
   the terminal and tmux.
@@ -257,6 +259,37 @@ $ ctally status
 $ ctally usage         # your plan's usage limits
 $ ctally stats         # the last week: Claude's time and yours
 $ ctally jump          # inside tmux: go to the session that needs you
+```
+
+### Snapshots, for after a restart
+
+Switch on **Snapshot Sessions** in CTally's menus (or **Snapshots** in its settings) and every two minutes
+it notes your tmux sessions: their windows and layouts, each pane's folder, and the Claude Code session in it
+with the options it was started with, or the background job it shows. After a restart, the menus offer
+**Restore Sessions (Mon 10:14 pm)**: it makes the tmux sessions that aren't running, lays them out as they
+were, and resumes each Claude Code session in its pane (`claude --resume <id>`), or attaches to its
+background job again (`claude attach <job>`). Their rows turn up in CTally as they start.
+
+- **Only what's missing** is restored: a tmux session of the same name that's running is left alone, and a
+  Claude Code session already running elsewhere is typed into its pane but not started.
+- **A folder that isn't there yet**, on a disk still being mounted, is waited for for up to five minutes; a
+  tmux session whose folders never come is left out.
+- **The snapshot it restores** is the newest from before the computer started (the ones taken while it came
+  up are of nothing much) with a tmux session that isn't running now. Once you've restored, it's the newest.
+- **Kept for three days**, and a snapshot the same as the last isn't saved again. The newest from before the
+  last restart stays however old it is, so a week switched off doesn't lose it.
+- **They're ccsnap's snapshots**, in the same place and form (`~/.local/state/ccsnap/snapshots`, on macOS
+  `~/.ccsnap/snapshots`), so if you used ccsnap, its snapshots are there to restore. Switching CTally's on
+  switches ccsnap's own timer off (its systemd timer or launchd agent; its files stay, for `ccsnap auto on`).
+- Snapshots go on while CTally is hidden; quitting it stops them.
+
+From the shell:
+
+```console
+$ ctally snapshot list            # newest first; * marks the one restore picks
+$ ctally snapshot restore --dry-run
+$ ctally snapshot restore [N]     # that one, or number N from the list
+$ ctally snapshot save            # one now
 ```
 
 ## Requirements
@@ -468,6 +501,11 @@ The history behind `ctally stats` holds nothing but times, session ids and state
 
 To list sessions the hooks haven't heard from, it reads Claude Code's list of running sessions in
 `~/.claude/sessions/`: each one's id, process, folder, status and start time.
+
+Snapshots, when you switch them on, hold your tmux sessions' names, layouts and pane folders, and for each
+Claude Code session its id, name, folder and the options it was started with; for a background job, its id,
+name and folder from `~/.claude/jobs/`. To find which pane runs which session, CTally reads the command lines
+of the processes under each pane.
 
 ### Terminal support
 

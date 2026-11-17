@@ -16,6 +16,10 @@
   ctally stats [--days N] [--json]
                                 the last week (or N days), day by day: how long Claude worked and
                                 waited on you, prompts, turns finished, sessions, limits hit
+  ctally snapshot save|list|restore [N] [--dry-run]
+                                snapshots of tmux and its Claude Code sessions, to bring back after
+                                a restart (the app takes one every 2 minutes while they're on):
+                                take one now, list them, or restore the one marked * (or number N)
   ctally jump [pane client socket]
                                 switch a tmux client to the session that needs you: waiting first,
                                 then finished, longest-waiting first. Run it again to move on to
@@ -235,6 +239,52 @@ def jump(current: str | None, client: str | None, here: str | None) -> int:
     return 0
 
 
+def snapshot(action: str, number: int | None, dry_run: bool) -> int:
+    from . import snapshots
+    store, tmux = snapshots.Snapshots(), snapshots.Tmux()
+    if action == "save":
+        found = snapshots.capture(tmux)
+        if found is None:
+            print("ctally: no tmux server running, so nothing to save", file=sys.stderr)
+            return 1
+        path = store.save(found)
+        store.prune()
+        panes, claude = snapshots.counts(found)
+        print(f"saved {path}" if path else "nothing has changed since the last one: not saved again")
+        print(f"  {len(found)} tmux sessions, {panes} panes, {claude} Claude Code sessions")
+        return 0
+    entries = store.entries()
+    if not entries:
+        print("ctally: no snapshots yet: switch them on in CTally's menu, or `ctally snapshot save`", file=sys.stderr)
+        return 1
+    if action == "list":
+        picked = store.pick(tmux.sessions())
+        boot = snapshots.boot_time()
+        print("    #  saved                Claude  tmux sessions (panes)")
+        for index, (path, data) in enumerate(entries[:20], 1):
+            if index > 1 and data["saved_at"] < boot <= entries[index - 2][1]["saved_at"]:
+                print(f"       ---- started {time.strftime('%Y-%m-%d %H:%M', time.localtime(boot))} ----")
+            _, claude = snapshots.counts(data["sessions"])
+            names = " ".join(f"{s['name']}({sum(len(w['panes']) for w in s['windows'])})" for s in data["sessions"])
+            saved = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(data["saved_at"]))
+            print(f"  {'*' if path == picked else ' '}{index:>3}  {saved}  {claude:>6}  {names}")
+        print("\n  * is what `ctally snapshot restore` brings back: of those from before the computer started, "
+              "until one has been restored since, the newest with a tmux session not running now")
+        return 0
+    path = None
+    if number is not None:
+        if not 1 <= number <= len(entries):
+            print(f"ctally: no snapshot {number}: `ctally snapshot list` numbers them", file=sys.stderr)
+            return 1
+        path = entries[number - 1][0]
+    done = snapshots.restore(store, tmux, path, say=print, dry_run=dry_run)
+    for why in done.skipped:
+        print(f"  left out {why}")
+    if not dry_run and done.made:
+        print(f"made {len(done.made)} tmux session(s), started {len(done.started)} Claude Code session(s)")
+    return 0 if done.made or not done.skipped else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ctally", description=__doc__.split("\n")[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -258,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
     stats_ = commands.add_parser("stats", help="how long Claude worked, and waited on you, day by day")
     stats_.add_argument("--days", type=int, default=7, help="how many days back, today included (7)")
     stats_.add_argument("--json", action="store_true", help="as JSON, times in seconds")
+    snapshot_ = commands.add_parser("snapshot", help="snapshots of tmux and its Claude Code sessions")
+    snapshot_.add_argument("action", choices=["save", "list", "restore"])
+    snapshot_.add_argument("number", nargs="?", type=int, help="restore: which, as `ctally snapshot list` numbers them")
+    snapshot_.add_argument("--dry-run", action="store_true", help="restore: say what it would do, and do nothing")
     jump_ = commands.add_parser("jump", help="switch tmux to the session that needs you")
     jump_.add_argument("pane", nargs="?")
     jump_.add_argument("client", nargs="?")
@@ -284,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
         return usage(args.json)
     if args.command == "stats":
         return stats(args.days, args.json)
+    if args.command == "snapshot":
+        return snapshot(args.action, args.number, args.dry_run)
     if args.command == "jump":
         return jump(args.pane, args.client, args.socket)
     parser.print_help()
