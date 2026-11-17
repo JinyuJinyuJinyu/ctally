@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 import pytest
@@ -91,3 +92,28 @@ def test_tty_of_a_process_without_one():
         assert system.tty(child.pid) in (None, system.tty(os.getpid()))
     finally:
         child.kill()
+
+
+def test_what_a_command_line_hands_claude_code():
+    assert system.claude_arguments(["claude", "attach", "f2b0a87f"]) == ["attach", "f2b0a87f"]
+    assert system.claude_arguments(["/home/me/.local/share/claude/versions/2.1.326", "--resume", "x"]) == ["--resume", "x"]
+    assert system.claude_arguments(["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js", "attach", "j"]) == [
+        "attach", "j"]
+    assert system.claude_arguments(["vim", "claude-notes.txt"]) is None
+    assert system.claude_arguments(["python", "-c", "x", "claude"]) is None   # past where a program could be
+
+
+def test_a_terminal_running_claude_attach_is_found(tmp_path):
+    """`claude attach <job>`, as ccsnap types it into a pane it brings back."""
+    # A Python script named claude: its command line is "python .../claude attach f2b0a87f".
+    stand_in = tmp_path / "claude"
+    stand_in.write_text("import time; time.sleep(600)\n")
+    child = subprocess.Popen([sys.executable, str(stand_in), "attach", "f2b0a87f"])
+    other = subprocess.Popen([sys.executable, str(stand_in), "attach", "--help"])
+    try:
+        found = wait_for(lambda: system.attached().get(child.pid))
+        assert found == "f2b0a87f"
+        assert other.pid not in system.attached()       # an option, not a job
+    finally:
+        child.kill()
+        other.kill()

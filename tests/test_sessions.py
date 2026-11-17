@@ -11,8 +11,8 @@ import pytest
 from conftest import dead_pid, sleeper, wait_for
 
 from ctally import system
-from ctally.sessions import (AgentWatcher, Agents, Ask, Context, Member, Names, Phase, State, StateReader,
-                             TmuxLocator, ask_from, context_from, cut_short, stop_in)
+from ctally.sessions import (AgentWatcher, Agents, Ask, Context, Member, Names, Phase, Running, State, StateReader,
+                             TmuxLocator, Viewers, ask_from, context_from, cut_short, fronts, stop_in)
 
 LIVE = os.getpid()
 
@@ -292,6 +292,61 @@ def test_a_session_gone_on_in_a_background_job_is_the_job_in_its_terminal(dirs, 
     write(state, "new", f"working {worker} p\n", mtime=now - 5)          # once the job's hooks run
     assert [(s.id, s.state, s.pid) for s in reader.poll()] == [("new", State.WORKING, terminal),
                                                                ("other", State.IDLE, other)]
+
+
+class Attached:
+    """Stands in for the look over the processes: these pids run `claude attach <job>`."""
+
+    def __init__(self, found: dict[int, str]):
+        self.found = found
+
+    def poll(self) -> dict[int, str]:
+        return self.found
+
+
+def test_a_job_shown_by_claude_attach_is_in_that_terminal(dirs, registry, processes):
+    """ccsnap brings a pane that showed a job back as `claude attach <job>`, which has no
+    session of its own in Claude Code's list: the job is wherever that runs."""
+    state, projects = dirs
+    worker, viewer, idle = processes(), processes(), processes()
+    listed(registry, worker, "job-session", kind="bg", jobId="f2b0a87f", name="cb7 saves", started=300)
+    listed(registry, idle, "lonely", kind="bg", jobId="84727875", name="cb5", started=400)
+    reader = StateReader(state, projects, registry, Attached({viewer: "f2b0a87f"}))
+    assert [(s.id, s.pid) for s in reader.poll()] == [("job-session", viewer), ("lonely", idle)]
+    assert reader.fronts["job-session"].pid == viewer
+
+
+def test_the_look_for_attached_terminals_runs_aside_and_forgets_the_gone(processes):
+    viewer, looks = processes(), []
+
+    def look():
+        looks.append(1)
+        return {viewer: "f2b0a87f", dead_pid(): "84727875"}
+
+    viewers = Viewers(look)
+    assert wait_for(lambda: viewers.poll()) == {viewer: "f2b0a87f"}
+    viewers.poll()
+    assert len(looks) == 1                  # not again for a while
+
+
+def test_what_claude_attach_names_is_one_job():
+    def job(sid, short, name=""):
+        return Running(sid, 1, "/w", State.IDLE, 0, 0, job=short, name=name)
+
+    jobs = [job("a", "f2b0a87f", "cb7 saves"), job("b", "84727875", "cb5"), job("c", "84790000", "CB6")]
+    named = {front.pid: sid for sid, front in fronts(jobs, {
+        11: "f2b0a87f",         # its id
+        12: "847278",           # the start of one, and only one
+        13: "cb6",              # its name, whatever the case
+    }).items()}
+    assert named == {11: "a", 12: "b", 13: "c"}
+    assert fronts(jobs, {14: "847"}) == {}          # the start of two
+    assert fronts(jobs, {15: "nothing-like-it"}) == {}
+    # A terminal whose own session went on in the job comes first.
+    parked = Running("old", 20, "/w", State.IDLE, 0, 0, parked="f2b0a87f")
+    assert fronts(jobs + [parked], {11: "f2b0a87f"})["a"].pid == 20
+    # Two attached to one job: one of them, the same each time.
+    assert fronts(jobs, {31: "cb5", 30: "84727875"})["b"].pid == 30
 
 
 def test_a_parked_session_taken_up_elsewhere_is_shown(dirs, registry, processes):

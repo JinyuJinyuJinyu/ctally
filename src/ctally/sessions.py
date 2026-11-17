@@ -18,6 +18,7 @@ when a session went idle without a word to the hooks.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -800,6 +801,7 @@ class Running(NamedTuple):
     changed: float = 0.0    # when its state last changed, if Claude Code says
     job: str | None = None  # a background job's id ("f64ac6b7"), when that's what it is
     parked: str | None = None   # the job a terminal's session went on in, leaving it only to show it
+    name: str = ""          # its name in Claude Code's list ("cb5"), which `claude attach` takes too
 
 
 def _seconds(milliseconds) -> float:
@@ -864,12 +866,13 @@ class Registry:
             return None
         started = _seconds(record.get("startedAt"))
         updated = _seconds(record.get("updatedAt")) or started
-        job, parked = record.get("jobId"), record.get("parkedJobId")
+        job, parked, name = record.get("jobId"), record.get("parkedJobId"), record.get("name")
         running = Running(sid, pid, cwd if isinstance(cwd, str) else "",
                           Registry.STATES.get(record.get("status"), State.IDLE),
                           started, updated, _seconds(record.get("statusUpdatedAt")) or updated,
                           job if isinstance(job, str) and job else None,
-                          parked if isinstance(parked, str) and parked else None)
+                          parked if isinstance(parked, str) and parked else None,
+                          name if isinstance(name, str) else "")
         began = record.get("procStart")
         return running, (str(began) if began is not None else None)
 
@@ -896,11 +899,60 @@ def reconcile(running: list[Running], heard: dict[str, tuple[int, float]]) -> tu
     return [r for r in running if r.id not in heard and r.pid not in pids and not r.parked], left
 
 
-def fronts(running: list[Running]) -> dict[str, Running]:
+def fronts(running: list[Running], attached: dict[int, str] | None = None) -> dict[str, Running]:
     """Where each background job is on show, by the job's session id: the terminal whose
-    session went on in it. Its tmux pane and its window are the job's."""
+    session went on in it, or else one running `claude attach` on it (given as pid -> the job
+    it names, its id, the start of it, or its name), the way ccsnap brings back a pane that
+    showed a job. Its tmux pane and its window are the job's."""
     jobs = {r.job: r.id for r in running if r.job}
-    return {jobs[r.parked]: r for r in running if r.parked in jobs}
+    found = {jobs[r.parked]: r for r in running if r.parked in jobs}
+    listed = [r for r in running if r.job and r.id not in found]
+    for pid, named in sorted((attached or {}).items()):
+        job = _named(listed, named.lower())
+        if job is not None and job.id not in found:
+            found[job.id] = Running("", pid, job.cwd, State.IDLE, 0.0, 0.0)
+    return found
+
+
+def _named(jobs: list[Running], named: str) -> Running | None:
+    """The one job an attach names, by id, the start of one, or its name: none if it's unclear."""
+    for match in (lambda r: r.job.lower() == named, lambda r: r.job.lower().startswith(named),
+                  lambda r: r.name.lower() == named):
+        hits = [r for r in jobs if match(r)]
+        if hits:
+            return hits[0] if len(hits) == 1 else None
+    return None
+
+
+class Viewers:
+    """The terminals running `claude attach <job>`. They're found by their command lines, as
+    Claude Code's list doesn't name them: off the main thread, at most every few seconds, and
+    only while some job has no terminal of its own to show it in."""
+
+    EVERY = 10
+
+    def __init__(self, look=None):
+        self.look = look or system.attached
+        self.found: dict[int, str] = {}
+        self.checked = -math.inf
+        self.asking = False
+        self.lock = threading.Lock()
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctally-attach")
+
+    def poll(self) -> dict[int, str]:
+        with self.lock:
+            if not self.asking and time.monotonic() - self.checked >= Viewers.EVERY:
+                self.asking = True
+                self.pool.submit(self._look)
+            return {pid: job for pid, job in self.found.items() if system.is_alive(pid)}
+
+    def _look(self) -> None:
+        try:
+            found = self.look()
+        except Exception:               # a look gone wrong is no reason to stop looking
+            found = {}
+        with self.lock:
+            self.found, self.checked, self.asking = found, time.monotonic(), False
 
 
 # MARK: The state directory
@@ -991,10 +1043,12 @@ class StateReader:
         def alive(self) -> bool:
             return system.is_alive(self.pid)
 
-    def __init__(self, directory: Path = STATE_DIR, projects: Path = PROJECTS_DIR, registry: Path | None = None):
+    def __init__(self, directory: Path = STATE_DIR, projects: Path = PROJECTS_DIR, registry: Path | None = None,
+                 viewers: Viewers | None = None):
         self.dir = directory
         self.names = Names(projects)
         self.locator = TmuxLocator()
+        self.viewers = viewers or Viewers()
         self.watcher = AgentWatcher(directory / ".agents")
         self.asks = Notes(directory / ".asks", ask_from)
         self.contexts = Notes(directory / ".status", context_from)
@@ -1011,6 +1065,8 @@ class StateReader:
         running = self.registry.poll()
         self.listed = {(r.id, r.pid): r for r in running}
         self.fronts = fronts(running)
+        if any(r.job and r.id not in self.fronts for r in running):
+            self.fronts = fronts(running, self.viewers.poll())
         # A job goes by its terminal's start, so its row stays where that terminal's was.
         started = {r.id: r.started for r in running if r.started}
         started.update((sid, r.started) for sid, r in self.fronts.items() if r.started)

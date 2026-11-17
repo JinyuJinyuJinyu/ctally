@@ -60,6 +60,8 @@ def live_sessions() -> list[Live]:
     running = Registry().poll()
     listed = {(r.id, r.pid): r for r in running}
     front = fronts(running)
+    if any(r.job and r.id not in front for r in running):
+        front = fronts(running, system.attached())
     try:
         names = [n for n in os.listdir(STATE_DIR) if not n.startswith(".")]
     except OSError:

@@ -412,7 +412,10 @@ Two pieces, connected by a folder:
    never sent a prompt, shows from there: idle, or working or waiting as Claude Code has it. Once its hooks
    run, they say. Background jobs count too, but not the spare processes Claude Code starts ahead of need. A
    session sent to the background goes on as a job under a new id: CTally shows it once, in the terminal
-   that sent it, which is where clicking it takes you. The list also says when a session went idle without
+   that sent it, which is where clicking it takes you. A terminal running `claude attach <job>` (the way
+   CTally's snapshots and ccsnap bring such a pane back after a restart) is where its job is, too: Claude Code
+   doesn't list those, so CTally finds them by their command line every few seconds while a job has no
+   terminal of its own. The list also says when a session went idle without
    a word to the hooks, as a job can after a prompt it never answers: one the hooks last heard working is
    then done, unless its agents are still at work. Sessions are listed oldest first, by when they started.
 
