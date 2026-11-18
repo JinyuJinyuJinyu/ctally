@@ -171,10 +171,12 @@ def state(tmp_path, monkeypatch):
     return folder
 
 
-def test_the_command(state, capsys):
+def test_the_command(state, capsys, monkeypatch):
     assert cli.main(["stats"]) == 1
     assert "no history yet" in capsys.readouterr().err
-    now = time.time()
+    # Noon today on the command's clock: just after midnight, the last ten minutes were yesterday.
+    now = datetime.combine(date.today(), datetime.min.time()).timestamp() + 12 * 3600
+    monkeypatch.setattr(time, "time", lambda: now)
     write(state / ".history", [Line(now - 600, "s", "working", True), Line(now - 300, "s", "done")])
     assert cli.main(["stats", "--days", "2"]) == 0
     out = capsys.readouterr().out.splitlines()
