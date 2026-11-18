@@ -111,16 +111,21 @@ SCRIPT = textwrap.dedent('''
     assert not c.keep_snapshots and not c.snapshot_timer.isActive() and prefs.Prefs()["snapshots"] is False
     assert c.snapshot_timer.interval() == 60 * 60_000           # kept for next time
 
-    # A number typed counts once it's done with, or as the window closes.
+    # A number typed counts once it's done with, or as the window closes, and is still there
+    # when something else is switched meanwhile (from the menus, say).
     window.every_box.lineEdit().setText("5 min")
-    assert prefs.Prefs()["snapshot_minutes"] == 60
+    window.keep_box.lineEdit().setText("7 days")
+    assert prefs.Prefs()["snapshot_minutes"] == 60 and prefs.Prefs()["snapshot_days"] == 14
+    c.refresh_controls()
+    assert window.every_box.text() == "5 min" and window.keep_box.text() == "7 days"
     window.close()
     assert prefs.Prefs()["snapshot_minutes"] == 5 and c.snapshot_timer.interval() == 5 * 60_000
+    assert prefs.Prefs()["snapshot_days"] == 7 and c.keeper.store.keep_for == 7 * 86400
 
     # Started again, it's as it was set.
     app.processEvents()
     again = Controller(app, QLocalServer())
-    assert again.snapshot_timer.interval() == 5 * 60_000 and again.keeper.store.keep_for == 14 * 86400
+    assert again.snapshot_timer.interval() == 5 * 60_000 and again.keeper.store.keep_for == 7 * 86400
     print("ok")
 ''')
 

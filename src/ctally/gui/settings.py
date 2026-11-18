@@ -333,7 +333,11 @@ class SettingsWindow(QWidget):
         self.snapshot_days_changed.emit(days)
 
     def _days_suffix(self, days: int) -> None:
-        self.keep_box.setSuffix(" day" if days == 1 else " days")
+        # Only when it changes: setting it puts the box's text back to its value, and a
+        # number being typed would be gone.
+        suffix = " day" if days == 1 else " days"
+        if self.keep_box.suffix() != suffix:
+            self.keep_box.setSuffix(suffix)
 
     def _slid(self, percent: int) -> None:
         self.opacity_value.setText(f"{percent}%")
