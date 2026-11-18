@@ -280,7 +280,11 @@ were, and resumes each Claude Code session in its pane (`claude --resume <id>`),
 background job again (`claude attach <job>`). Their rows turn up in CTally as they start.
 
 - **Only what's missing** is restored: a tmux session of the same name that's running is left alone, and a
-  Claude Code session already running elsewhere is typed into its pane but not started.
+  Claude Code session already running elsewhere is typed into its pane but not started. A tmux session that
+  can't be made is left out, and the rest are restored.
+- **The options it was started with** come back with a session (`--dangerously-skip-permissions`,
+  `--model`, a system prompt), not the ones that pick a session, nor a prompt, which would be sent again. An
+  option CTally doesn't know, followed by something that could be its value or a prompt, is left out.
 - **A folder that isn't there yet**, on a disk still being mounted, is waited for for up to five minutes; a
   tmux session whose folders never come is left out.
 - **The snapshot it restores** is the newest from before the computer started (the ones taken while it came
