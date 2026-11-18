@@ -4,7 +4,14 @@ state files CTally's hooks write.
 
 Switch it off and on from the tray icon, the settings window, or the indicator's right-click
 menu. Off is remembered, and while off the app sits dormant: only the tray icon stays, and no
-timers run. The tray icon's menu also lists your plan's usage limits, whenever they're known.
+timers run but the snapshots'. The tray icon's menu also lists your plan's usage limits,
+whenever they're known. While they're looked at, they're asked of Anthropic every few
+minutes, unless that's switched off: see fetch.py.
+
+Snapshots of tmux and its Claude Code sessions, every couple of minutes, are switched on and
+off from the same menus and the settings window, which also sets how often they're taken and
+how many days they're kept; the menus offer to restore one when it has a tmux session that
+isn't running, as after a restart. See snapshots.py.
 
 A session waiting on me can be answered from a menu of the choices its tmux pane shows: see
 answer.py.
@@ -21,7 +28,7 @@ from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QPai
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from .. import answer, focus, prefs, system
+from .. import answer, fetch, focus, prefs, snapshots, system
 from ..sessions import State, StateReader
 from ..usage import UsageReader, describe
 from . import mac
@@ -29,6 +36,7 @@ from .settings import OPACITY_RANGE, SettingsWindow, app_icon, hexagon
 from .view import TallyView
 
 INSET = 24          # the default corner's distance from the screen's edges
+SNAPSHOTS = "Snapshot Sessions"     # the switch, in the menus
 POLL_MS = 500       # the hooks' files, twice a second
 FRAME_MS = 1000 // 12   # the marks bob slowly: 12 frames a second keeps them smooth, at half the CPU
 
@@ -119,7 +127,10 @@ class Controller:
         self.server = server
         self.prefs = prefs.Prefs()
         self.reader = StateReader()
+        # Asked for while they're being looked at: the indicator's polls, or the tray menu.
+        self.fetcher = fetch.Fetcher()
         self.usage = UsageReader()
+        self._ask_for_usage()
         self.sessions: list = []
         self.settings: SettingsWindow | None = None
 
@@ -149,6 +160,11 @@ class Controller:
         self.frame_timer = QTimer()
         self.frame_timer.setInterval(FRAME_MS)
         self.frame_timer.timeout.connect(self.frame)
+        # Snapshots go on whether the indicator shows or not: they're for after a restart.
+        self.keeper = snapshots.Keeper(snapshots.Snapshots(keep_for=self.snapshot_days * 86400))
+        self.snapshot_timer = QTimer()
+        self.snapshot_timer.setInterval(self.snapshot_minutes * 60_000)
+        self.snapshot_timer.timeout.connect(self.keeper.save_soon)
 
         self.tray = self._make_tray()
 
@@ -165,6 +181,9 @@ class Controller:
 
     def start(self, by_hand: bool) -> None:
         self.refresh_controls()
+        if self.keep_snapshots:
+            self.snapshot_timer.start()
+            self.keeper.save_soon()
         if self.enabled:
             self.show_tally()
         elif by_hand or self.tray is None:
@@ -201,10 +220,68 @@ class Controller:
 
     def set_show_usage(self, shown: bool) -> None:
         self.prefs["usage"] = bool(shown)
+        self._ask_for_usage()
         if self.settings is not None:
             self.settings.update_usage(self.show_usage)
         if self.enabled:
             self.poll()
+
+    @property
+    def exact_usage(self) -> bool:
+        return bool(self.prefs["exact_usage"])
+
+    def set_exact_usage(self, on: bool) -> None:
+        """On asks Anthropic for the numbers every few minutes, as /usage does; off goes by
+        what Claude Code saves, where a model's week is only as new as the last /usage."""
+        self.prefs["exact_usage"] = bool(on)
+        self._ask_for_usage()
+        if self.settings is not None:
+            self.settings.update_exact_usage(self.exact_usage)
+
+    def _ask_for_usage(self) -> None:
+        """Only with both switches on: limits hidden aren't worth a request."""
+        self.usage.fetcher = self.fetcher if self.exact_usage and self.show_usage else None
+
+    @property
+    def keep_snapshots(self) -> bool:
+        return bool(self.prefs["snapshots"])
+
+    def set_keep_snapshots(self, on: bool) -> None:
+        """On takes one at once, then one every couple of minutes (as set), and switches off ccsnap's
+        own timer, which would only do the same."""
+        self.prefs["snapshots"] = bool(on)
+        if on:
+            self.keeper.take_over()
+            self.keeper.save_soon()
+            self.snapshot_timer.start()
+        else:
+            self.snapshot_timer.stop()
+        self.refresh_controls()
+
+    @property
+    def snapshot_minutes(self) -> int:
+        return snapshots.minutes(self.prefs["snapshot_minutes"])
+
+    @property
+    def snapshot_days(self) -> int:
+        return snapshots.days(self.prefs["snapshot_days"])
+
+    def set_snapshot_minutes(self, value: int) -> None:
+        """Takes effect at once: the next snapshot is that long from now."""
+        self.prefs["snapshot_minutes"] = snapshots.minutes(value)
+        self.snapshot_timer.setInterval(self.snapshot_minutes * 60_000)
+        self.refresh_controls()
+
+    def set_snapshot_days(self, value: int) -> None:
+        """Older snapshots go when the next one is saved, as they always do."""
+        self.prefs["snapshot_days"] = snapshots.days(value)
+        self.keeper.store.keep_for = self.snapshot_days * 86400
+        self.refresh_controls()
+
+    def restore_sessions(self) -> None:
+        """Brings back the tmux sessions the snapshot has and aren't running: their rows turn
+        up as each Claude Code session starts."""
+        self.keeper.restore_soon()
 
     def set_opacity(self, value: float) -> None:
         self.prefs["opacity"] = round(min(max(float(value), OPACITY_RANGE[0]), OPACITY_RANGE[1]), 2)
@@ -221,9 +298,12 @@ class Controller:
         enabled = self.enabled
         if self.tray is not None:
             self.show_action.setChecked(enabled)
+            self.snapshot_action.setChecked(self.keep_snapshots)
             self.tray.setIcon(tray_icon(dimmed=not enabled))
         if self.settings is not None:
             self.settings.update_state(enabled, self.sessions)
+            self.settings.update_snapshots(self.keep_snapshots)
+            self.settings.update_snapshot_times(self.snapshot_minutes, self.snapshot_days)
 
     # MARK: Showing and hiding
 
@@ -266,6 +346,10 @@ class Controller:
             window.toggled.connect(self.set_enabled)
             window.opacity_changed.connect(self.set_opacity)
             window.usage_toggled.connect(self.set_show_usage)
+            window.exact_usage_toggled.connect(self.set_exact_usage)
+            window.snapshots_toggled.connect(self.set_keep_snapshots)
+            window.snapshot_minutes_changed.connect(self.set_snapshot_minutes)
+            window.snapshot_days_changed.connect(self.set_snapshot_days)
             window.quit_requested.connect(self.app.quit)
             window.closed.connect(self._settings_closed)
             window.winId()                  # a native window to set the Space behaviour on
@@ -277,6 +361,9 @@ class Controller:
         self.settings.update_state(self.enabled, self.sessions)
         self.settings.update_opacity(self.opacity)
         self.settings.update_usage(self.show_usage)
+        self.settings.update_exact_usage(self.exact_usage)
+        self.settings.update_snapshots(self.keep_snapshots)
+        self.settings.update_snapshot_times(self.snapshot_minutes, self.snapshot_days)
         if system.MAC:
             mac.activate()
         self.settings.show()
@@ -299,9 +386,16 @@ class Controller:
         self.tray_menu = QMenu()
         self.usage_actions: list[QAction] = []
         self.tray_menu.aboutToShow.connect(self._list_usage)
+        self.tray_menu.aboutToShow.connect(lambda: self._offer_restore(self.restore_action))
         self.show_action = self.tray_menu.addAction("Show CTally")
         self.show_action.setCheckable(True)
         self.show_action.triggered.connect(lambda: self.set_enabled(not self.enabled))
+        self.snapshot_action = self.tray_menu.addAction(SNAPSHOTS)
+        self.snapshot_action.setCheckable(True)
+        self.snapshot_action.triggered.connect(lambda: self.set_keep_snapshots(not self.keep_snapshots))
+        self.restore_action = self.tray_menu.addAction("Restore Sessions")
+        self.restore_action.triggered.connect(self.restore_sessions)
+        self._offer_restore(self.restore_action)
         self.tray_menu.addAction("Settings…").triggered.connect(self.show_settings)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction("Quit CTally").triggered.connect(self.app.quit)
@@ -328,6 +422,25 @@ class Controller:
         rule.setSeparator(True)
         self.usage_actions.append(rule)
         self.tray_menu.insertActions(first, self.usage_actions)
+
+    def _offer_restore(self, action: QAction) -> None:
+        """Shown when there's a snapshot to bring back, saying when it was saved, and while one
+        is being brought back, greyed."""
+        if self.keeper.restoring:
+            action.setText("Restoring Sessions…")
+            action.setEnabled(False)
+            action.setVisible(True)
+            return
+        try:
+            found = self.keeper.restorable()
+        except Exception:
+            found = None
+        action.setVisible(found is not None)
+        action.setEnabled(found is not None)
+        if found is not None:
+            action.setText(f"Restore Sessions ({snapshots.saved_when(found[1], time.time())})")
+            action.setToolTip("Brings back the tmux sessions from that snapshot that aren't running, "
+                              "and starts Claude Code in their panes")
 
     def _tray_activated(self, reason) -> None:
         # macOS opens the menu on a click by itself. On Linux a click the tray passes on brings up
@@ -357,6 +470,13 @@ class Controller:
             fold.triggered.connect(lambda: self.set_folded(not self.view.folded))
         limits = menu.addAction("Hide Usage Limits" if self.show_usage else "Show Usage Limits")
         limits.triggered.connect(lambda: self.set_show_usage(not self.show_usage))
+        keep = menu.addAction(SNAPSHOTS)
+        keep.setCheckable(True)
+        keep.setChecked(self.keep_snapshots)
+        keep.triggered.connect(lambda: self.set_keep_snapshots(not self.keep_snapshots))
+        restore = menu.addAction("Restore Sessions")
+        restore.triggered.connect(self.restore_sessions)
+        self._offer_restore(restore)
         menu.addAction("Settings…").triggered.connect(self.show_settings)
         menu.addSeparator()
         menu.addAction("Quit CTally").triggered.connect(self.app.quit)

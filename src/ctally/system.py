@@ -146,6 +146,54 @@ def _mac_environment(pid: int) -> dict[str, str] | None:
     return environment
 
 
+def claude_arguments(argv: list[str]) -> list[str] | None:
+    """What a command line hands Claude Code, or None when it doesn't run Claude Code. The
+    native install runs as .../claude/versions/<version>, so the program isn't always named
+    "claude"; an npm install runs node with cli.js."""
+    for index, argument in enumerate(argv[:3]):
+        base = os.path.basename(argument)
+        if base == "claude" or base.endswith(("cli.js", "cli.mjs")) or (index == 0 and "/claude/versions/" in argument):
+            return argv[index + 1:]
+    return None
+
+
+def attached() -> dict[int, str]:
+    """Every process of mine running `claude attach <job>`, and the job it names: its id, or
+    its name. Such a terminal shows a background job, and has no session of its own."""
+    found = {}
+    for pid, argv in _command_lines("attach"):
+        arguments = claude_arguments(argv)
+        if arguments and len(arguments) > 1 and arguments[0] == "attach" and not arguments[1].startswith("-"):
+            found[pid] = arguments[1]
+    return found
+
+
+def _command_lines(word: str):
+    """(pid, arguments) for each of my processes whose command line has the word in it. From
+    `ps` an argument with spaces comes in pieces, which a job's id or name doesn't mind."""
+    if LINUX:
+        mine, needle = os.getuid(), word.encode()
+        try:
+            pids = [name for name in os.listdir("/proc") if name.isdigit()]
+        except OSError:
+            return
+        for pid in pids:
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    raw = f.read()
+                if needle not in raw or os.stat(f"/proc/{pid}").st_uid != mine:
+                    continue
+            except OSError:
+                continue                # gone meanwhile
+            yield int(pid), [part.decode(errors="replace") for part in raw.rstrip(b"\0").split(b"\0")]
+        return
+    out = run(["ps", "-x", "-ww", "-o", "pid=", "-o", "args="]) or ""
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[0].isdigit() and word in parts:
+            yield int(parts[0]), parts[1:]
+
+
 _tmux: str | None = None
 
 

@@ -1,5 +1,6 @@
-"""Shared helpers. Nothing here touches the real ~/.claude, tmux config or tmux server: homes
-are temporary, and tmux runs as private servers that are killed afterwards."""
+"""Shared helpers. Nothing here touches the real ~/.claude, tmux config or tmux server, nor the
+real snapshots or ccsnap's timer: homes are temporary, and tmux runs as private servers that are
+killed afterwards."""
 from __future__ import annotations
 
 import json
@@ -79,7 +80,9 @@ class Hook:
 def _real_files() -> dict:
     home = Path.home()
     watched = [home / ".claude" / "settings.json", home / ".codex" / "hooks.json",
-               home / ".codex" / "config.toml", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf"]
+               home / ".codex" / "config.toml", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf",
+               # there while ccsnap's timer is switched on
+               home / ".config" / "systemd" / "user" / "timers.target.wants" / "ccsnap.timer"]
     hooks = home / ".claude" / "hooks"
     if hooks.is_dir():
         watched += sorted(hooks.iterdir())
@@ -95,7 +98,8 @@ def _real_files() -> dict:
 
 @pytest.fixture(scope="session", autouse=True)
 def real_setup_untouched():
-    """A test that writes to the real Claude Code or tmux setup fails the run, loudly."""
+    """A test that writes to the real Claude Code or tmux setup, or switches ccsnap's timer,
+    fails the run, loudly."""
     before = _real_files()
     yield
     after = _real_files()
@@ -103,13 +107,34 @@ def real_setup_untouched():
     assert not changed, f"the tests changed real files: {changed}"
 
 
+@pytest.fixture(scope="session")
+def stand_ins(tmp_path_factory) -> Path:
+    """systemctl and launchctl that do nothing, so no test can switch ccsnap's timer."""
+    folder = tmp_path_factory.mktemp("bin")
+    for name in ("systemctl", "launchctl"):
+        path = folder / name
+        path.write_text(f'#!/bin/sh\necho "{name}: a stand-in for the tests, which does nothing" >&2\nexit 1\n')
+        path.chmod(0o755)
+    return folder
+
+
 @pytest.fixture(autouse=True)
-def own_usage_and_prefs(tmp_path_factory, monkeypatch):
+def own_usage_and_prefs(tmp_path_factory, monkeypatch, stand_ins):
     """Usage limits, preferences, transcripts and running sessions come from each test's own
     files, never the real ~/.claude.json, status line, CTally settings, ~/.claude/projects or
-    ~/.claude/sessions."""
-    from ctally import cli, sessions, usage
+    ~/.claude/sessions. Nor is the real sign-in read, or Anthropic asked: only a test's own
+    server, on this machine, is reachable. Snapshots are the test's own too."""
+    from ctally import cli, fetch, sessions, usage
     home = tmp_path_factory.mktemp("usage")
+    monkeypatch.setattr(fetch, "CLAUDE_DIR", home / "claude")
+    monkeypatch.setattr(fetch, "_keychain", lambda: None)
+    real_urlopen = fetch.urllib.request.urlopen
+
+    def local_only(request, *args, **kwargs):
+        url = request.full_url if hasattr(request, "full_url") else str(request)
+        assert url.startswith("http://127.0.0.1:"), f"a test reached out to {url}"
+        return real_urlopen(request, *args, **kwargs)
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", local_only)
     # Nor real transcripts, nor Claude Code's list of the sessions running here.
     monkeypatch.setattr(sessions, "PROJECTS_DIR", home / "projects")
     monkeypatch.setattr(cli, "PROJECTS_DIR", home / "projects")
@@ -120,6 +145,17 @@ def own_usage_and_prefs(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("CTALLY_CLAUDE_JSON", str(home / ".claude.json"))
     monkeypatch.setenv("CTALLY_CONFIG_DIR", str(home / "config"))
     monkeypatch.setenv("CTALLY_CODEX_HOME", str(home / "codex"))
+    # A process a test starts, the app say, gets none of the patches above, only the
+    # environment: there Claude Code's folder (the sign-in, the jobs) and the transcripts are
+    # this test's as well, as are the hooks' notes and the status line...
+    monkeypatch.setenv("CTALLY_STATE_DIR", str(home / "state"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "claude"))
+    monkeypatch.setenv("CTALLY_PROJECTS_DIR", str(home / "projects"))
+    # ...and so are the snapshots, of a tmux server that isn't running unless a test names its
+    # own; and ccsnap's timer stays as it is, whatever asks to switch it off.
+    monkeypatch.setenv("CCSNAP_HOME", str(home / "ccsnap"))
+    monkeypatch.setenv("CCSNAP_TMUX_SOCKET", f"ctally-pytest-none-{os.getpid()}")
+    monkeypatch.setenv("PATH", f"{stand_ins}{os.pathsep}{os.environ.get('PATH', '')}")
     return home
 
 
@@ -162,7 +198,9 @@ class PrivateTmux:
         """The pane's process, once it has become the python (not the forked tmux child)."""
         pid = int(self.pane(target, "#{pane_pid}"))
         from ctally import system
-        wait_for(lambda: (system.environment(pid) or {}).get("TMUX_PANE"), timeout=5)
+        # A busy CI machine can take a while; past that, say so here rather than fail later on.
+        assert wait_for(lambda: (system.environment(pid) or {}).get("TMUX_PANE"), timeout=20), \
+            f"the process in {target} ({pid}) never showed tmux's environment"
         return pid
 
     @property

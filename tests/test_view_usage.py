@@ -71,3 +71,34 @@ SCRIPT = textwrap.dedent('''
 def test_usage_tooltip_and_clicks():
     done = subprocess.run([sys.executable, "-c", SCRIPT, str(ROOT)], capture_output=True, text=True, timeout=120)
     assert done.returncode == 0 and done.stdout.strip().endswith("ok"), done.stderr
+
+
+BEHIND = textwrap.dedent('''
+    import os, sys, time
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    sys.path[:0] = [sys.argv[1] + "/src", sys.argv[1] + "/tools"]
+    from PySide6.QtWidgets import QApplication
+    app = QApplication([])
+    import snapshot
+    from ctally.gui.view import TallyView
+
+    now = time.time()
+    fresh = snapshot.demo_usage(now)
+    # The model's week from /usage five hours ago, the rest from a reply just now.
+    usage = fresh._replace(limits=tuple(
+        limit._replace(seen=now - 5 * 3600 if "Fable" in limit.title else now) for limit in fresh.limits))
+    view = TallyView()
+    view.apply(snapshot.sessions_for("list"))
+    view.apply_usage(usage, now)
+    shown = {meter.label: (meter.when, meter.old) for meter in view._meters}
+    assert shown["Week · Fable"] == ("5 h ago", True), shown
+    assert not shown["Week"][1] and not shown["Week"][0].endswith("ago"), shown
+    view.resize(view.preferred_size())
+    view.grab()                         # draws, faded row and all
+    print("ok")
+''')
+
+
+def test_a_number_well_behind_the_rest_shows_its_age():
+    done = subprocess.run([sys.executable, "-c", BEHIND, str(ROOT)], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0 and done.stdout.strip().endswith("ok"), done.stderr

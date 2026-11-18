@@ -500,6 +500,13 @@ def test_when_and_resets(utc):
     assert usage.resets(saturday, now) == "resets Sat Oct 10, 10 pm"
     assert usage.clock(datetime(2026, 10, 7, 0, 5, tzinfo=timezone.utc).timestamp()) == "12:05 am"
     assert usage.clock(datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc).timestamp()) == "12 pm"
+    # Fable's week can end a fraction of a second before the hour: it still reads as the hour,
+    # and a moment before midnight as the day after.
+    assert usage.when(saturday - 0.2, now) == "Sat 10 pm"
+    assert usage.resets(saturday - 0.2, now) == "resets Sat Oct 10, 10 pm"
+    midnight = datetime(2026, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert usage.when(midnight - 0.2, now) == "Sat 12 am"
+    assert usage.resets(soon - 0.2, now) == "resets 7:30 pm (in 2h 25m)"
 
 
 def test_ago():
@@ -520,6 +527,31 @@ def test_describe(utc):
     ]
     assert usage.describe(found, found.fetched_at + 7200)[-1] == (
         "Updated 2 h ago: Claude Code refreshes it while a session runs")
+
+
+def test_a_number_well_behind_the_rest_says_when_it_is_from(utc):
+    """Replies bring the session and the week, never a model's week: that one stays as /usage
+    last had it, and once it's over an hour behind the rest it says so."""
+    cache = parse(cached())
+    assert {limit.seen for limit in cache.limits} == {FETCHED / 1000}
+    later = FETCHED / 1000 + 5 * 3600
+    live = parse_live(status_line(), later)
+    assert {limit.seen for limit in live.limits} == {later}
+    found = merge(cache, live)
+    fable = next(limit for limit in found.limits if "Fable" in limit.title)
+    assert [found.behind(limit) for limit in found.limits] == [False, False, True]
+    lines = usage.describe(found, later + 60)
+    assert lines[2] == "Current week (Fable): 0% used · resets Sat Oct 10, 11 am · as of 5:59 am"
+    assert lines[-2:] == ["Updated 1 min ago",
+                          "Replies bring only the session and the week: run /usage in Claude Code for the rest"]
+    assert usage.as_of(fable.seen, fable.seen + 2 * 86400) == "as of Wed 5:59 am"
+    assert usage.as_of(fable.seen, fable.seen + 9 * 86400) == "as of Oct 7"
+    # Within the hour it's as good as the rest, and a window run out since starts from nothing.
+    within = merge(cache, parse_live(status_line(), FETCHED / 1000 + 1800))
+    assert not any(within.behind(limit) for limit in within.limits)
+    reset = found.at(epoch(WEEK_RESET) + 60)
+    assert not any(reset.behind(limit) for limit in reset.limits)
+    assert usage.describe(cache, FETCHED / 1000 + 60)[-1] == "Updated 1 min ago"
 
 
 def test_credits_described_with_their_amounts():

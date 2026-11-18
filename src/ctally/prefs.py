@@ -26,11 +26,14 @@ def log_file() -> Path:
 
 
 class Prefs:
-    """A small JSON file: on or off, opacity, folded, whether to show usage limits, and where
-    the indicator sits: its right edge and the top or bottom edge it grows away from, in
-    screen coordinates ([right, y, "top"]; [right, bottom] from before it could grow down)."""
+    """A small JSON file: on or off, opacity, folded, whether to show usage limits, whether to
+    ask Anthropic for them (exact_usage), whether to take snapshots of tmux for after a
+    restart, how many minutes apart and how many days they're kept, and where the indicator
+    sits: its right edge and the top or bottom edge it grows away from, in screen coordinates
+    ([right, y, "top"]; [right, bottom] from before it could grow down)."""
 
-    DEFAULTS = {"enabled": True, "opacity": 0.8, "folded": False, "usage": True, "anchor": None}
+    DEFAULTS = {"enabled": True, "opacity": 0.8, "folded": False, "usage": True, "exact_usage": True,
+                "snapshots": False, "snapshot_minutes": 2, "snapshot_days": 3, "anchor": None}
 
     def __init__(self, path: Path | None = None):
         self.path = path or config_dir() / "prefs.json"
