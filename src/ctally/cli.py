@@ -219,7 +219,13 @@ def jump(current: str | None, client: str | None, here: str | None) -> int:
 
     def say(message: str) -> None:
         if client and here:
-            system.run([binary, "-S", here, "display-message", "-c", client, message])
+            if system.run([binary, "-S", here, "display-message", "-c", client, message]) is None:
+                # tmux 3.2 advertises -c in its usage but doesn't accept it.
+                clients = system.run([binary, "-S", here, "list-clients", "-F", "#{client_name} #{pane_id}"]) or ""
+                pane = next((line.rsplit(" ", 1)[1] for line in clients.splitlines()
+                             if line.rsplit(" ", 1)[0] == client), None)
+                if pane:
+                    system.run([binary, "-S", here, "display-message", "-t", pane, message])
         else:
             print(message)
 

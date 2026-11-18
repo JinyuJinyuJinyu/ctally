@@ -274,15 +274,20 @@ def test_jump_switches_a_real_client(state, private_tmux, capsys):
 
     client = attach_client(private_tmux, "misc")
     socket = private_tmux.socket
+
+    def client_pane():
+        # Older tmux versions don't support display-message -p with -c.
+        clients = private_tmux("list-clients", "-F", "#{client_name} #{pane_id}")
+        return dict(line.rsplit(" ", 1) for line in clients.splitlines())[client]
+
     visited = []
     for _ in range(4):
-        current = private_tmux("display-message", "-p", "-c", client, "#{pane_id}")
+        current = client_pane()
         assert cli.jump(current, client, socket) == 0
-        landed = wait_for(lambda: private_tmux("display-message", "-p", "-c", client, "#{pane_id}") != current
-                          and private_tmux("display-message", "-p", "-c", client, "#{pane_id}"))
+        landed = wait_for(lambda: (pane := client_pane()) != current and pane)
         visited.append(pane_ids.get(landed, landed))
     assert visited == ["wait", "done-old", "done-new", "wait"]
-    messages = private_tmux("show-messages")
+    messages = private_tmux("show-messages", "-t", client)
     assert "CTally: done-old · done" in messages
 
 

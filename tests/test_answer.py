@@ -201,9 +201,10 @@ def dialog(private_tmux, short_tmp):
     private_tmux("-f", "/dev/null", "new-session", "-d", "-s", "work", "-x", "140", "-y", "40",
                  sys.executable, "-c", DIALOG, str(screen), str(out))
     pid = private_tmux.pid_in("work:0.0")
-    target = system.tmux_pane(pid)
+    # Reading a starting process's environment can still fail transiently after pid_in.
+    target = wait_for(lambda: system.tmux_pane(pid), timeout=20)
     assert target is not None
-    wait_for(lambda: answer.read(target))
+    assert wait_for(lambda: answer.read(target))
     return target, out, pid
 
 
