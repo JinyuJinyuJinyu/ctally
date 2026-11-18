@@ -74,6 +74,27 @@ def test_options_keep_the_settings_and_drop_what_picks_a_session():
     assert options(["--name=cb5", "--effort", "high", "--", "--model", "x"]) == ["--effort", "high"]
 
 
+def test_options_keep_what_each_takes_and_no_more():
+    # One that takes a value keeps it, and one that takes several keeps them all; a prompt
+    # after either isn't theirs.
+    assert options(["--autocompact", "300000", "--model", "opus"]) == ["--autocompact", "300000", "--model", "opus"]
+    assert options(["--plugin-dir", "./mine", "fix the tests"]) == ["--plugin-dir", "./mine"]
+    assert options(["--tools", "Bash", "Edit", "--brief", "fix the tests"]) == ["--tools", "Bash", "Edit", "--brief"]
+    assert options(["--debug", "--verbose"]) == ["--debug", "--verbose"]
+    assert options(["--dangerously-skip-permissions", "fix the tests"]) == ["--dangerously-skip-permissions"]
+    assert options(["--append-system-prompt", "be brief, please"]) == ["--append-system-prompt", "be brief, please"]
+
+
+def test_an_option_it_does_not_know_is_kept_only_when_it_is_clear_what_it_takes():
+    assert options(["--new-flag"]) == ["--new-flag"]
+    assert options(["--new-flag", "--model", "opus"]) == ["--new-flag", "--model", "opus"]
+    assert options(["--new-thing=42", "--model", "opus"]) == ["--new-thing=42", "--model", "opus"]
+    # What follows could be its value, or a prompt: without it the option would take the next
+    # for its own, and with it a prompt would be sent again.
+    assert options(["--new-thing", "42", "--model", "opus"]) == ["--model", "opus"]
+    assert options(["--new-flag", "fix the tests"]) == []
+
+
 def test_what_a_pane_gets_typed_into_it(places, tmp_path):
     transcript(places, "s1")
     job(places, "f2b0a87f", "s2", "cb7", "/w")
@@ -159,6 +180,20 @@ def test_the_one_to_restore(tmp_path, monkeypatch):
     assert store.pick({"fresh"}, boot) == newer
 
 
+def test_the_same_boot_though_the_clock_was_put_right(tmp_path, monkeypatch):
+    # Where a boot is told by when the computer started, that moves a little with the clock.
+    store = Snapshots(tmp_path)
+    monkeypatch.setattr(snapshots, "boot_id", lambda: "1793143150")
+    store.marker.write_text("1793143151")
+    assert store.restored_this_boot()
+    store.marker.write_text("1793100000")
+    assert not store.restored_this_boot()
+    monkeypatch.setattr(snapshots, "boot_id", lambda: "0b0d7f0e-52a5-4b6e-9d0b-3f6f8f1f2a11")
+    assert not store.restored_this_boot()
+    store.marker.write_text("0b0d7f0e-52a5-4b6e-9d0b-3f6f8f1f2a11")
+    assert store.restored_this_boot()
+
+
 # MARK: Noting tmux as it is
 
 def test_a_snapshot_notes_each_pane_and_what_claude_code_runs_there(private_tmux, places, tmp_path):
@@ -166,7 +201,8 @@ def test_a_snapshot_notes_each_pane_and_what_claude_code_runs_there(private_tmux
     work = tmp_path / "work"
     work.mkdir()
     private_tmux("-f", "/dev/null", "new-session", "-d", "-s", "cb", "-n", "claude", "-c", str(work),
-                 "-x", "120", "-y", "40", sys.executable, str(claude), "--resume", "s1", "--dangerously-skip-permissions")
+                 "-x", "120", "-y", "40", sys.executable, str(claude), "--resume", "s1", "--dangerously-skip-permissions",
+                 "--append-system-prompt", "be brief, please", "--add-dir", str(tmp_path / "my folder"))
     private_tmux("split-window", "-t", "cb:0", "-c", str(work), sys.executable, str(claude), "attach", "f2b0a87f")
     private_tmux("new-window", "-t", "cb:1", "-n", "notes", "-c", str(work))
     first = private_tmux.pid_in("cb:0.0")
@@ -181,7 +217,9 @@ def test_a_snapshot_notes_each_pane_and_what_claude_code_runs_there(private_tmux
     assert (claude_window["index"], claude_window["name"], len(claude_window["panes"])) == (0, "claude", 2)
     resumed, attached = (p["claude"] for p in claude_window["panes"])
     assert resumed == {"session_id": "s1", "name": "cb1", "name_source": "user", "cwd": str(work),
-                       "args": ["--dangerously-skip-permissions"], "had_transcript": True}
+                       "args": ["--dangerously-skip-permissions", "--append-system-prompt", "be brief, please",
+                                "--add-dir", str(tmp_path / "my folder")],     # each one whole, spaces and all
+                       "had_transcript": True}
     assert attached == {"job_id": "f2b0a87f", "job_name": "cb7 saves", "job_session_id": "s7",
                         "session_id": None, "name": "cb7 saves", "cwd": str(work), "args": [], "attach": True}
     assert notes["name"] == "notes" and "claude" not in notes["panes"][0]
@@ -234,6 +272,55 @@ def test_a_restore_makes_what_is_missing_and_starts_claude_code_in_it(private_tm
     assert store.restored_this_boot()
 
 
+def test_one_that_cannot_be_made_does_not_stop_the_rest_and_is_not_left_half_made(private_tmux, places, tmp_path):
+    private_tmux.new_session("running")
+    record = tmp_path / "typed.txt"
+    fake = tmp_path / "fake-claude"
+    fake.write_text(f"#!/bin/sh\necho \"$*\" >> '{record}'\n")
+    fake.chmod(0o755)
+    transcript(places, "s1")
+    transcript(places, "s2")
+    here = str(tmp_path)
+    store = Snapshots(tmp_path / "state")
+    store.save([
+        # Its second window can't be made: the first has that place.
+        {"name": "half", "windows": [window([pane(here, {"session_id": "s1", "cwd": here, "args": []})]),
+                                     window([pane(here)], index=0, name="again")]},
+        {"name": "empty", "windows": [window([])]},
+        # A window caught as it closed, with no pane in it, is left out; the rest is made.
+        {"name": "whole", "windows": [window([], index=0, name="closing"),
+                                      window([pane(here, {"session_id": "s2", "cwd": here, "args": []})], index=1)]},
+    ], 1000)
+    done = restore(store, Tmux(private_tmux.name), places=places, wait=0, claude=str(fake), settle=0.5, stagger=0)
+    assert done.made == ["whole"] and done.started == ["whole:1.0"]
+    assert [why.split(":")[0] for why in done.skipped] == ["half", "empty"], done.skipped
+    assert sorted(private_tmux("list-sessions", "-F", "#{session_name}").split()) == ["running", "whole"]
+    assert private_tmux("list-windows", "-t", "whole", "-F", "#{window_index}").split() == ["1"]
+    assert wait_for(lambda: record.exists() and record.read_text().splitlines() == ["--resume s2"], timeout=10)
+    assert store.restored_this_boot()
+    # Nothing made, nothing restored: the one to bring back is still the one from before.
+    again = Snapshots(tmp_path / "other")
+    again.save([{"name": "empty", "windows": [window([])]}], 1000)
+    assert restore(again, Tmux(private_tmux.name), places=places, wait=0).made == []
+    assert not again.restored_this_boot()
+
+
+def test_a_session_started_by_hand_while_a_folder_was_waited_for_is_left_alone(private_tmux, places, tmp_path):
+    private_tmux.new_session("running")
+    late = tmp_path / "late"
+    store = Snapshots(tmp_path / "state")
+    store.save([{"name": "mine", "windows": [window([pane(str(tmp_path))])]},
+                {"name": "slow", "windows": [window([pane(str(late))])]}], 1000)
+
+    def meanwhile() -> None:
+        time.sleep(0.5)
+        private_tmux.new_session("mine")
+        late.mkdir()
+    threading.Thread(target=meanwhile, daemon=True).start()
+    done = restore(store, Tmux(private_tmux.name), places=places, wait=20)
+    assert done.made == ["slow"] and done.skipped == ["mine: a tmux session of that name is running"]
+
+
 def test_a_dry_run_changes_nothing(private_tmux, places, tmp_path):
     private_tmux.new_session("running")
     store = Snapshots(tmp_path / "state")
@@ -256,6 +343,13 @@ def test_the_app_finds_what_there_is_to_restore_and_takes_snapshots(private_tmux
     store.save([{"name": "gone", "windows": [window([pane(str(tmp_path))])]}], 1000)
     path, saved = keeper.restorable()
     assert saved == 1000 and store.load(path)["sessions"][0]["name"] == "gone"
+
+
+def test_with_no_snapshots_the_menu_does_not_ask_tmux(places, tmp_path):
+    class NotAsked:
+        def sessions(self, timeout: float = 10) -> set:
+            raise AssertionError("tmux was asked")
+    assert Keeper(Snapshots(tmp_path / "state"), NotAsked(), places, log=lambda _: None).restorable() is None
 
 
 def test_the_app_takes_over_from_ccsnap_and_restores_in_the_background(private_tmux, places, tmp_path, monkeypatch):

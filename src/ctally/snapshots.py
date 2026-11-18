@@ -78,27 +78,27 @@ class Tmux:
         self.socket = socket or os.environ.get("CCSNAP_TMUX_SOCKET") or None
         self.binary = system.tmux_binary() or "tmux"
 
-    def __call__(self, *args, check: bool = True) -> subprocess.CompletedProcess:
+    def __call__(self, *args, check: bool = True, timeout: float = 10) -> subprocess.CompletedProcess:
         # -u: UTF-8 whatever the locale, so names with accents come out as they are.
         command = [self.binary, "-u"] + (["-L", self.socket] if self.socket else []) + [str(a) for a in args]
         try:
             done = subprocess.run(command, capture_output=True, encoding="utf-8", errors="replace",
-                                  stdin=subprocess.DEVNULL, timeout=10)
+                                  stdin=subprocess.DEVNULL, timeout=timeout)
         except (OSError, subprocess.SubprocessError) as error:
             done = subprocess.CompletedProcess(command, 127, "", f"can't run tmux: {error}")
         if check and done.returncode != 0:
             raise RuntimeError(f"`{shlex.join(command)}` failed: {done.stderr.strip()}")
         return done
 
-    def rows(self, args: list[str], fields: list[str]) -> list[dict] | None:
+    def rows(self, args: list[str], fields: list[str], timeout: float = 10) -> list[dict] | None:
         """A list command's rows, or None with no server running."""
-        done = self(*args, "-F", "\t".join("#{%s}" % f for f in fields), check=False)
+        done = self(*args, "-F", "\t".join("#{%s}" % f for f in fields), check=False, timeout=timeout)
         if done.returncode != 0:
             return None
         return [dict(zip(fields, line.split("\t"))) for line in done.stdout.splitlines()]
 
-    def sessions(self) -> set[str]:
-        return {row["session_name"] for row in self.rows(["list-sessions"], ["session_name"]) or []}
+    def sessions(self, timeout: float = 10) -> set[str]:
+        return {row["session_name"] for row in self.rows(["list-sessions"], ["session_name"], timeout) or []}
 
 
 # MARK: What runs where
@@ -159,16 +159,29 @@ def _below(pid: int, children: dict[int, list[int]], hit: Callable[[int], bool])
 # Options not to start a resumed session with: they pick or make a session, or run just once.
 DROP = {"-r", "--resume", "-c", "--continue", "--session-id", "--fork-session", "-n", "--name",
         "-p", "--print", "--bg", "--background", "--from-pr", "--teleport", "--cloud",
-        "-w", "--worktree", "--tmux"}
+        "-w", "--worktree", "--tmux", "--desktop", "-h", "--help", "-v", "--version"}
+# Claude Code's options, as `claude --help` lists them (2.1.326) and a few it doesn't: those
+# that take a value, those that take as many as follow, those that may take one, and those
+# that take none.
 VALUE = {"--model", "--permission-mode", "--effort", "--agent", "--settings", "--setting-sources",
          "--append-system-prompt", "--system-prompt", "--system-prompt-file",
-         "--append-system-prompt-file", "--fallback-model", "--output-format", "--input-format",
-         "--max-turns", "--max-budget-usd", "--session-id", "-n", "--name", "--tools",
-         "--json-schema", "--agents", "--permission-prompt-tool", "--plugin-url", "--environment"}
+         "--append-system-prompt-file", "--system-prompt-snapshot", "--fallback-model",
+         "--output-format", "--input-format", "--max-turns", "--max-budget-usd", "--session-id",
+         "-n", "--name", "--json-schema", "--agents", "--permission-prompt-tool",
+         "--permission-prompts", "--plugin-dir", "--plugin-url", "--environment", "--autocompact",
+         "--debug-file", "--remote-control-session-name-prefix", "--max-thinking-tokens", "--thinking"}
 VARIADIC = {"--add-dir", "--mcp-config", "--allowedTools", "--allowed-tools", "--disallowedTools",
-            "--disallowed-tools", "--plugin-dir", "--betas"}
+            "--disallowed-tools", "--betas", "--tools", "--file", "--channels",
+            "--dangerously-load-development-channels"}
 OPTIONAL = {"-r", "--resume", "-d", "--debug", "--remote-control", "-w", "--worktree",
-            "--from-pr", "--teleport", "--cloud"}
+            "--from-pr", "--teleport", "--cloud", "--prompt-suggestions"}
+FLAGS = {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--ax-screen-reader",
+         "--bare", "--brief", "--chrome", "--no-chrome", "--disable-slash-commands",
+         "--exclude-dynamic-system-prompt-sections", "--forward-subagent-text", "--ide",
+         "--include-hook-events", "--include-partial-messages", "--no-session-persistence",
+         "--replay-user-messages", "--restricted", "--safe-mode", "--strict-mcp-config", "--verbose",
+         "-c", "--continue", "--fork-session", "-p", "--print", "--bg", "--background", "--tmux",
+         "--desktop", "-h", "--help", "-v", "--version"}
 
 
 def options(arguments: list[str]) -> list[str]:
@@ -180,23 +193,30 @@ def options(arguments: list[str]) -> list[str]:
         argument = arguments[i]
         if argument == "--":
             break
-        if not argument.startswith("-"):
+        if not argument.startswith("-") or argument == "-":
             i += 1
             continue
         name = argument.split("=", 1)[0]
-        values = []
+        values, keep = [], name not in DROP
         if not (argument.startswith("--") and "=" in argument):
+            after = arguments[i + 1] if i + 1 < len(arguments) else None
             if name in VARIADIC:
                 j = i + 1
                 while j < len(arguments) and not arguments[j].startswith("-"):
                     values.append(arguments[j])
                     j += 1
-            elif name in VALUE and i + 1 < len(arguments):
-                values.append(arguments[i + 1])
-            elif name in OPTIONAL and i + 1 < len(arguments) and not arguments[i + 1].startswith("-"):
-                values.append(arguments[i + 1])
+            elif name in VALUE:
+                values += [after] if after is not None else []
+            elif name in OPTIONAL:
+                values += [after] if after is not None and not after.startswith("-") else []
+            elif name not in FLAGS and after is not None and not after.startswith("-"):
+                # One this doesn't know (Claude Code gains them), with something after it:
+                # what it takes, or a prompt, and there's no telling which. Kept without it,
+                # the option would take the next one for its own; kept with it, a prompt would
+                # be sent again. So neither is kept.
+                values, keep = [after], False
         i += 1 + len(values)
-        if name not in DROP:
+        if keep:
             out += [argument] + values
     return out
 
@@ -250,6 +270,12 @@ def capture(tmux: Tmux, places: Places = Places()) -> list[dict] | None:
         arguments = system.claude_arguments(processes[pid][1]) if pid in processes else None
         return bool(arguments) and len(arguments) > 1 and arguments[0] == "attach"
 
+    def given(pid: int) -> list[str]:
+        """What Claude Code was started with there, each argument whole: `ps` gives one with
+        spaces in it (a system prompt, a folder) in pieces."""
+        pieces = processes.get(pid, (0, []))[1]
+        return system.claude_arguments(system.arguments(pid) or pieces) or system.claude_arguments(pieces) or []
+
     sessions = {row["session_name"]: {"name": row["session_name"], "windows": {}} for row in names}
     for w in windows:
         sessions.setdefault(w["session_name"], {"name": w["session_name"], "windows": {}})["windows"][w["window_index"]] = {
@@ -266,7 +292,7 @@ def capture(tmux: Tmux, places: Places = Places()) -> list[dict] | None:
             sid = record["sessionId"]
             claude = {"session_id": sid, "name": record.get("name"), "name_source": record.get("nameSource"),
                       "cwd": record.get("cwd") or pane["cwd"],
-                      "args": options(system.claude_arguments(processes.get(pid, (0, []))[1]) or []),
+                      "args": options(given(pid)),
                       "had_transcript": places.has_transcript(sid)}
             if record.get("parkedJobId"):
                 job = places.job(record["parkedJobId"])
@@ -275,7 +301,8 @@ def capture(tmux: Tmux, places: Places = Places()) -> list[dict] | None:
                               job_name=job.get("name"))
             pane["claude"] = claude
         elif (pid := _below(shell, children, attaching)):
-            job_id, job = places.find_job(system.claude_arguments(processes[pid][1])[1])
+            named = given(pid)
+            job_id, job = places.find_job((named if len(named) > 1 else system.claude_arguments(processes[pid][1]))[1])
             pane["claude"] = {"job_id": job_id, "job_name": job.get("name"),
                               "job_session_id": job.get("resumeSessionId") or job.get("sessionId"),
                               "session_id": None, "name": job.get("name"),
@@ -323,6 +350,14 @@ def boot_id() -> str:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     except OSError:
         return str(int(boot_time()))        # none on macOS: when it started says which boot
+
+
+def same_boot(marked: str, now: str) -> bool:
+    """Whether a boot noted earlier is this one. Where it's told by when the computer started,
+    that moves a little each time the clock is put right, so a minute either way is the same."""
+    if marked == now:
+        return True
+    return marked.isdigit() and now.isdigit() and abs(int(marked) - int(now)) <= 60
 
 
 class Snapshots:
@@ -405,7 +440,7 @@ class Snapshots:
 
     def restored_this_boot(self) -> bool:
         try:
-            return self.marker.read_text().strip() == boot_id()
+            return same_boot(self.marker.read_text().strip(), boot_id())
         except OSError:
             return False
 
@@ -477,10 +512,10 @@ def restore(store: Snapshots, tmux: Tmux, path: Path | None = None, places: Plac
     # Never Claude Code in the wrong folder: wait for one that isn't there yet.
     def missing() -> set[str]:
         return {d for s in todo for d in _folders(s) if not os.path.isdir(d)}
-    gone = missing()
+    gone, waited = missing(), False
     if gone and wait > 0 and not dry_run:
         say(f"waiting up to {int(wait)} s for {len(gone)} folder(s): {', '.join(sorted(gone)[:3])}")
-        deadline = time.monotonic() + wait
+        deadline, waited = time.monotonic() + wait, True
         while gone and time.monotonic() < deadline:
             time.sleep(2)
             gone = missing()
@@ -494,16 +529,62 @@ def restore(store: Snapshots, tmux: Tmux, path: Path | None = None, places: Plac
                     say(f"{s['name']}:{w['index']}.{p['index']}  {command or 'shell'}  {note}".rstrip())
         return Restored([s["name"] for s in todo] if dry_run else [], [], skipped)
 
+    if waited:
+        # One started by hand while this waited is left as it is.
+        running = tmux.sessions()
+        skipped += [f"{s['name']}: a tmux session of that name is running" for s in todo if s["name"] in running]
+        todo = [s for s in todo if s["name"] not in running]
+
     live = {record.get("sessionId") for record in _running(places.registry).values()}
-    launches = []       # (pane id, command, whether to press Enter, label)
+    made, launches, started = [], [], []    # launches: (pane id, command, whether to press Enter, label)
     for s in todo:
-        chosen = None
-        for n, w in enumerate(s["windows"]):
-            folders = [p["claude"]["cwd"] if "claude" in p else p["cwd"] for p in w["panes"]]
-            fmt = "#{window_id}\t#{pane_id}"
+        try:
+            launches += _make(tmux, s, places, claude, live)
+        except Exception as error:      # one that can't be made is no reason to leave the others
+            skipped.append(f"{s['name']}: couldn't be made ({error})")
+            continue
+        made.append(s["name"])
+        say(f"made {s['name']}: {len(s['windows'])} window(s), {sum(len(w['panes']) for w in s['windows'])} pane(s)")
+
+    if launches:
+        time.sleep(settle)          # the new shells start before anything is typed into them
+        for pane, command, enter, label in launches:
+            # A pane closed since is no reason not to start the rest.
+            if tmux("send-keys", "-t", pane, "-l", command, check=False).returncode != 0:
+                say(f"couldn't type into {label}")
+                continue
+            if enter:
+                tmux("send-keys", "-t", pane, "Enter", check=False)
+                started.append(label)
+                time.sleep(stagger)
+            say(("started " if enter else "typed ") + label)
+    if made:
+        try:
+            store.home.mkdir(parents=True, exist_ok=True)
+            store.marker.write_text(boot_id())
+        except OSError:
+            pass
+    return Restored(made, started, skipped)
+
+
+def _make(tmux: Tmux, s: dict, places: Places, claude: str, live: set) -> list[tuple[str, str, bool, str]]:
+    """Makes one tmux session as a snapshot has it, and returns what to type into its panes.
+    One that can't be finished isn't left half-made, so a later restore can make it whole."""
+    windows = [w for w in s["windows"] if w["panes"]]       # one caught as it closed has none
+    if not windows:
+        raise RuntimeError("no window with a pane in it")
+    launches, chosen, fmt = [], None, "#{window_id}\t#{pane_id}"
+
+    def folders_of(w: dict) -> list[str]:
+        return [p["claude"]["cwd"] if "claude" in p else p["cwd"] for p in w["panes"]]
+
+    w = windows[0]
+    out = tmux("new-session", "-d", "-P", "-F", fmt, "-s", s["name"], "-n", w["name"],
+               "-c", folders_of(w)[0], "-x", w["width"], "-y", w["height"]).stdout
+    try:
+        for n, w in enumerate(windows):
+            folders = folders_of(w)
             if n == 0:
-                out = tmux("new-session", "-d", "-P", "-F", fmt, "-s", s["name"], "-n", w["name"],
-                           "-c", folders[0], "-x", w["width"], "-y", w["height"]).stdout
                 window, first = out.strip().split("\t")
                 if tmux("display", "-p", "-t", window, "#{window_index}").stdout.strip() != str(w["index"]):
                     tmux("move-window", "-s", window, "-t", f"={s['name']}:{w['index']}")
@@ -535,22 +616,10 @@ def restore(store: Snapshots, tmux: Tmux, path: Path | None = None, places: Plac
                 chosen = window
         if chosen:
             tmux("select-window", "-t", chosen, check=False)
-        say(f"made {s['name']}: {len(s['windows'])} window(s), {sum(len(w['panes']) for w in s['windows'])} pane(s)")
-
-    if launches:
-        time.sleep(settle)          # the new shells start before anything is typed into them
-        for pane, command, enter, label in launches:
-            tmux("send-keys", "-t", pane, "-l", command)
-            if enter:
-                tmux("send-keys", "-t", pane, "Enter")
-                time.sleep(stagger)
-            say(("started " if enter else "typed ") + label)
-    try:
-        store.home.mkdir(parents=True, exist_ok=True)
-        store.marker.write_text(boot_id())
-    except OSError:
-        pass
-    return Restored([s["name"] for s in todo], [label for _, _, enter, label in launches if enter], skipped)
+    except Exception:
+        tmux("kill-session", "-t", f"={s['name']}", check=False)
+        raise
+    return launches
 
 
 def saved_when(moment: float, now: float) -> str:
@@ -604,9 +673,10 @@ class Keeper:
     def restorable(self) -> tuple[Path, float] | None:
         """The snapshot a restore would bring back, and when it was saved, if it has a tmux
         session that isn't running now."""
-        if self.restoring:
-            return None
-        running = self.tmux.sessions()
+        if self.restoring or not self.store.entries():
+            return None                 # and with none, tmux isn't even asked
+        # The menu waits on this, so not for long.
+        running = self.tmux.sessions(timeout=3)
         path = self.store.pick(running)
         data = self.store.load(path) if path else None
         if data is None or all(s["name"] in running for s in data["sessions"]):

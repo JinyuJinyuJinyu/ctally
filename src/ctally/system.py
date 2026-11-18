@@ -122,7 +122,8 @@ def _sysctl(mib: list[int], size: int) -> bytes | None:
     return buffer.raw[:length.value]
 
 
-def _mac_environment(pid: int) -> dict[str, str] | None:
+def _mac_process(pid: int) -> tuple[list[str], dict[str, str]] | None:
+    """A process's arguments and its environment."""
     argmax = _sysctl([_CTL_KERN, _KERN_ARGMAX], 4)
     if not argmax:
         return None
@@ -135,6 +136,7 @@ def _mac_environment(pid: int) -> dict[str, str] | None:
     index = 1
     while index < len(strings) and strings[index] == b"":
         index += 1
+    arguments = [item.decode(errors="replace") for item in strings[index:index + argc]]
     index += argc
     environment = {}
     for item in strings[index:]:
@@ -143,7 +145,31 @@ def _mac_environment(pid: int) -> dict[str, str] | None:
         if b"=" in item:
             key, value = item.decode(errors="replace").split("=", 1)
             environment[key] = value
-    return environment
+    return arguments, environment
+
+
+def _mac_environment(pid: int) -> dict[str, str] | None:
+    found = _mac_process(pid)
+    return found[1] if found else None
+
+
+def arguments(pid: int) -> list[str] | None:
+    """A process's command line, each argument whole: from `ps` one with spaces in it comes in
+    pieces. Only our own processes' can be read."""
+    if LINUX:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
+        parts = raw.split(b"\0")
+        if parts and parts[-1] == b"":
+            parts.pop()                 # each one ends with a NUL, the last too
+        return [part.decode(errors="replace") for part in parts] or None
+    if MAC:
+        found = _mac_process(pid)
+        return (found[0] or None) if found else None
+    return None
 
 
 def claude_arguments(argv: list[str]) -> list[str] | None:

@@ -35,6 +35,19 @@ def test_a_childs_environment():
         child.kill()
 
 
+def test_a_process_s_arguments_each_one_whole():
+    given = ["-c", "import time; time.sleep(600)", "--append-system-prompt", "be brief, please", "",
+             "--add-dir", "/work/my folder"]
+    child = subprocess.Popen([sys.executable] + given, stdin=subprocess.DEVNULL)
+    try:
+        found = wait_for(lambda: system.arguments(child.pid))
+        assert found is not None and found[1:] == given
+    finally:
+        child.kill()
+        child.wait()
+    assert system.arguments(dead_pid()) is None
+
+
 def test_environment_of_a_dead_process():
     assert system.environment(dead_pid()) is None
 
