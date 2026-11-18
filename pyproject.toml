@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ctally"
 dynamic = ["version"]
-description = "A floating status light for your Claude Code sessions: whose turn is it?"
+description = "A floating status light for your Claude Code and Codex sessions: whose turn is it?"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

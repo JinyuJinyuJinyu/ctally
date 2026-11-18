@@ -79,7 +79,8 @@ class Hook:
 
 def _real_files() -> dict:
     home = Path.home()
-    watched = [home / ".claude" / "settings.json", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf",
+    watched = [home / ".claude" / "settings.json", home / ".codex" / "hooks.json",
+               home / ".codex" / "config.toml", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf",
                # there while ccsnap's timer is switched on
                home / ".config" / "systemd" / "user" / "timers.target.wants" / "ccsnap.timer"]
     hooks = home / ".claude" / "hooks"
@@ -143,6 +144,7 @@ def own_usage_and_prefs(tmp_path_factory, monkeypatch, stand_ins):
     monkeypatch.setattr(usage, "STATUS_LINE", home / ".statusline")
     monkeypatch.setenv("CTALLY_CLAUDE_JSON", str(home / ".claude.json"))
     monkeypatch.setenv("CTALLY_CONFIG_DIR", str(home / "config"))
+    monkeypatch.setenv("CTALLY_CODEX_HOME", str(home / "codex"))
     # A process a test starts, the app say, gets none of the patches above, only the
     # environment: there Claude Code's folder (the sign-in, the jobs) and the transcripts are
     # this test's as well, as are the hooks' notes and the status line...

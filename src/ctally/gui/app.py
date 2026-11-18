@@ -26,7 +26,7 @@ import time
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from .. import answer, fetch, focus, prefs, snapshots, system
 from ..sessions import State, StateReader
@@ -147,7 +147,8 @@ class Controller:
         self.view.folded = bool(self.prefs["folded"])
         self.view.setWindowOpacity(self.opacity)
         self.view.fold_requested.connect(self.set_folded)
-        self.view.selected.connect(lambda session, when: focus.focus(session.pid, when))
+        self.view.selected.connect(self.open_session)
+        self.view.open_failed.connect(lambda message: QMessageBox.warning(self.view, "Could Not Open Task", message))
         self.view.answer_requested.connect(self.show_answers)
         self.view.drag_finished.connect(self.settle_after_drag)
         self.view.layout_changed.connect(self.fit)
@@ -458,6 +459,9 @@ class Controller:
         if session is not None and session.state is State.WAITING and not session.limited:
             self._add_answers(menu, session)
             menu.addSeparator()
+        elif session is not None and session.source == "codex":
+            menu.addAction("Open Codex Task").triggered.connect(lambda: self.open_session(session, menu.when))
+            menu.addSeparator()
         hide = menu.addAction("Hide CTally")
         hide.setToolTip("Bring it back from the hexagon icon in the " + ("menu bar." if system.MAC else "top bar."))
         hide.triggered.connect(lambda: self.set_enabled(False))
@@ -480,6 +484,12 @@ class Controller:
 
     # MARK: Answering
 
+    def open_session(self, session, when=0) -> None:
+        if session.source == "codex":
+            focus.open_session(session, when, self.view.open_failed.emit)
+        else:
+            focus.focus(session.pid, when)
+
     def show_answers(self, session, at: QPoint) -> None:
         """What a session asks was clicked: its choices, and the way to its terminal."""
         menu = _Menu()
@@ -493,7 +503,7 @@ class Controller:
         it there. Outside tmux, or with no choices to be read on its screen, what's known of it,
         and the way to its terminal instead. Says whether it found the choices."""
         target = system.tmux_pane(session.pid) if session.pid > 0 else None
-        asked = answer.read(target) if target else None
+        asked = answer.read(target) if target and session.source == "claude" else None
         ask = session.ask
         # The tool or plan as asked says more than "Do you want to proceed?"; for questions, the
         # screen says which one is up now, or that the answers are ready to send.
@@ -507,7 +517,8 @@ class Controller:
             return True
         for option in ask.options if ask else ():
             menu.addAction(_menu_text("· " + option)).setEnabled(False)
-        menu.addAction("Answer in Its Terminal").triggered.connect(lambda: focus.focus(session.pid, menu.when))
+        label = "Open Codex Task" if session.source == "codex" else "Answer in Its Terminal"
+        menu.addAction(label).triggered.connect(lambda: self.open_session(session, menu.when))
         return False
 
     # MARK: Placement

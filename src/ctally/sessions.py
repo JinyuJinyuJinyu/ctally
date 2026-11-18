@@ -135,13 +135,15 @@ class Session:
     label: str                      # project folder name, from the hook or Claude Code's list
     pid: int = 0                    # the claude process I see it in, from the same: for a
                                     # background job, the terminal showing it
-    title: str | None = None        # session name, from the transcript
+    title: str | None = None        # session name, from the transcript or session index
     path: str | None = None         # directory the session started in, from the transcript (or the list)
     tmux: str | None = None         # where it sits in tmux, "report:0.2", if it runs there
     agents: Agents | None = None    # its subagents, while any run
     limited: bool = False           # waiting on the plan's usage limit, not on me
     ask: Ask | None = None          # what it's waiting on me for, when it's known
     context: Context | None = None  # how full its context is, once Claude Code has said
+    source: str = "claude"          # which CLI owns the session
+    owner_pid: int = 0              # Codex's server; separate from the terminal showing it
 
 
 # MARK: Stopping by hand
@@ -1045,7 +1047,10 @@ class StateReader:
 
     def __init__(self, directory: Path = STATE_DIR, projects: Path = PROJECTS_DIR, registry: Path | None = None,
                  viewers: Viewers | None = None):
+        from .codex import CodexReader
+
         self.dir = directory
+        self.codex = CodexReader()
         self.names = Names(projects)
         self.locator = TmuxLocator()
         self.viewers = viewers or Viewers()
@@ -1116,8 +1121,9 @@ class StateReader:
         def age(name: str) -> tuple:
             return self.first_seen.get(name, 0), name
         live = [n for n in self.cache if self.cache[n].alive and n not in left] + list(self.unheard)
-        if live:
-            return [self._snapshot(n) for n in sorted(live, key=age)]
+        codex = self.codex.poll()
+        if live or codex:
+            return [self._snapshot(n) for n in sorted(live, key=age)] + codex
         # Nothing is running. A finished turn still deserves to be on screen when I come
         # back; a dead session's "working" means only that it was killed.
         return [self._snapshot(n) for n in sorted(self.cache, key=age) if self.cache[n].state is State.DONE]

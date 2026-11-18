@@ -1,11 +1,13 @@
 # CTally
 
-A floating status light for your Claude Code sessions on **macOS and Ubuntu**: **whose turn is it?**
+A floating status light for your Claude Code and Codex CLI sessions on **macOS and Ubuntu**: **whose turn is it?**
 Glance over instead of tabbing back to the terminal.
 
 ```sh
 pipx install ctally
 ctally setup --tmux
+# For Codex CLI instead:
+ctally setup --codex --tmux
 ```
 
 The name comes from the *tally light*, the lamp on a broadcast camera that shows it's live, and from tallying
@@ -312,7 +314,7 @@ $ ctally snapshot save            # one now
   Python can be ahead of what's built for an older one: macOS 12 runs CTally with Python up to 3.13, macOS 13
   up to 3.14, and macOS 14 or later, Ubuntu 22.04 or later and Windows up to 3.15. If pipx's own Python is
   newer than yours takes, name one: `pipx install --python python3.14 ctally`.
-- Claude Code
+- Claude Code, or a Codex CLI version with lifecycle hooks (`/hooks`)
 
 ## Install
 
@@ -335,12 +337,63 @@ Restart any Claude Code sessions that were already running so they pick up the h
 | Option | Effect |
 |---|---|
 | `--tmux` | also set up tmux: the prefix + J jump key and status-line counts ([details](#built-for-tmux)) |
-| `--no-hooks` | leave `~/.claude/settings.json` alone (add the hooks yourself; see below) |
+| `--codex` | install Codex hooks instead of Claude Code hooks ([details](#codex-cli)) |
+| `--no-hooks` | leave the selected CLI's hook configuration alone |
 | `--no-statusline` | no status line: the [usage limits](#usage-limits) refresh only when Claude Code refreshes them |
 | `--no-autostart` | don't start CTally at login |
 | `--no-launch` | set up without starting CTally now |
 
+### Codex CLI
+
+```sh
+ctally setup --codex --tmux
+```
+
+Restart Codex, then open **`/hooks`**. The first screen lists events such as `SessionStart` and
+`PreToolUse`; select an event with an installed hook and press Enter. Its CTally entry is named
+**`CTally · <event>`**: review the command containing `-m ctally.codex`, then press **t** to trust
+it. Repeat for CTally's other events. An older installation may show **Unnamed hook** instead;
+identify it by that command, or rerun `ctally setup --codex` to add the names.
+
+Codex skips untrusted hooks, so no sessions appear until they are trusted and a lifecycle event runs. This integration
+targets the current [Codex lifecycle hooks](https://developers.openai.com/codex/hooks), with
+`SessionStart`, `UserPromptSubmit`, `PreModelRequest`, `PreToolUse`, `PermissionRequest`,
+`PostToolUse`, `Stop`, `Interrupt`, and `SessionEnd`; older notification-only versions need an upgrade.
+
+Setup merges these observers into `$CODEX_HOME/hooks.json` (normally `~/.codex/hooks.json`),
+backs up an existing file, and preserves other hooks. It does not change `config.toml`, approve
+tools, or trust hooks on your behalf. `ctally setup --codex` leaves Claude Code's configuration
+alone; run `ctally setup` as well to use both. The indicator reads both automatically.
+
+- Codex sessions are marked **Codex** in the window and `[codex]` in `ctally list`. They contribute
+  to `ctally status` and the tmux counts, and `ctally jump` includes them.
+- The window shows Codex's saved task titles and follows renames. Sessions without a title
+  use their project directory name.
+- The indicator follows idle, working, waiting for approval or a question, finished, and interrupted
+  turns. Parallel tool activity does not clear another tool's outstanding approval.
+- The context gauge uses the latest request's token count and model window from the local rollout,
+  not the lifetime token total. Missing or unrecognized rollout data leaves the gauge blank; the
+  transcript format is not a stable Codex API.
+- **Click a Codex session to open that task**, or right-click and choose **Open Codex Task**.
+  With the shared daemon, CTally opens a terminal running `codex resume <session-id>` so you can
+  answer pending questions or continue the conversation, even when the task has no visible terminal
+  or shares a tmux pane with other tasks. This attaches to the existing task without sending a prompt.
+  Double-clicks are treated as one opening. Each later click can open another terminal onto that task.
+  Sessions running with `codex --no-daemon` return to their own terminal or tmux pane.
+  This needs Codex CLI on CTally's PATH (common install locations are also checked), and Terminal.app
+  on macOS or `x-terminal-emulator` on Linux. Launch failures are shown in a dialog.
+- Approvals and questions are answered in Codex's terminal. CTally's direct answer menu, subagent
+  details, plan usage limits, and `ctally stats` remain Claude Code features in this first integration.
+
+Codex's observer records live in `$CODEX_HOME/ctally.d/`; task titles come from
+`$CODEX_HOME/session_index.jsonl`. CTally scans a bounded tail of the rollout
+for token counts and missed turn endings; it does not copy conversation messages into its records.
+Closing or archiving a session removes its record when Codex emits `SessionEnd`. With a shared
+daemon, switching away from a conversation can leave it loaded until Codex ends that session.
+`ctally uninstall` removes CTally's Codex hooks and records along with its other integrations.
+
 To upgrade: `pipx upgrade ctally`, then `ctally setup` again. It restarts CTally and keeps your preferences.
+For the Codex integration, use `ctally setup --codex` after upgrading and review any changed hooks.
 For the latest commit, before it's released: `pipx install --force git+https://github.com/JinyuJinyuJinyu/ctally.git`
 (or, keeping the Qt you have, `pipx runpip ctally install --no-deps --force-reinstall git+https://github.com/JinyuJinyuJinyu/ctally.git`),
 then `ctally setup`. Its version ends in `.dev0`, and `pipx upgrade` leaves it until the next release.
@@ -594,6 +647,8 @@ Every push runs the tests and pyflakes on GitHub (`.github/workflows/test.yml`),
 Set `CTALLY_STATE_DIR`, `CTALLY_PROJECTS_DIR`, `CTALLY_SESSIONS_DIR`, `CTALLY_CONFIG_DIR` and
 `CTALLY_CLAUDE_JSON` to run it against other folders than `~/.claude/ctally.d`, `~/.claude/projects`,
 `~/.claude/sessions` and its own settings, and another file than `~/.claude.json`.
+`CTALLY_CODEX_HOME` overrides the Codex home for isolated tests; otherwise CTally honors `CODEX_HOME`
+and defaults to `~/.codex`. Tests never install hooks into your real Codex configuration.
 
 ## Releasing
 

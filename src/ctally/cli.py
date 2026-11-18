@@ -4,6 +4,7 @@
   ctally setup [--tmux]         install the Claude Code hooks and status line, start CTally at
                                 login, and start it now; --tmux also binds prefix + J and puts
                                 the counts in tmux's status line
+  ctally setup --codex          install Codex hooks instead; review them in Codex's /hooks
   ctally uninstall              undo all of that (then: pipx uninstall ctally)
 
   ctally status [--tmux]        counts of live sessions by state, most urgent first: "!1 ▶2 ✓5 ·1"
@@ -39,7 +40,8 @@ from typing import NamedTuple
 
 from . import __version__, system
 from . import usage as limits
-from .sessions import (PROJECTS_DIR, STATE_DIR, AgentWatcher, Names, Notes, Registry, context_from, fronts,
+from .codex import CodexReader
+from .sessions import (PROJECTS_DIR, STATE_DIR, AgentWatcher, Context, Names, Notes, Registry, context_from, fronts,
                        gone_idle, put_aside, read_limit, reconcile, stopped_by_hand)
 
 GLYPH = {"waiting": "!", "working": "▶", "done": "✓", "idle": "·"}
@@ -56,6 +58,8 @@ class Live(NamedTuple):
     pid: int
     id: str
     project: str
+    source: str = "claude"
+    context: Context | None = None
 
 
 def live_sessions() -> list[Live]:
@@ -102,6 +106,10 @@ def live_sessions() -> list[Live]:
     for r in unheard:
         found.append(Live(RANK[r.state.value], r.updated, r.state.value, r.pid, r.id,
                           os.path.basename(r.cwd.rstrip("/")) or "?"))
+    codex = CodexReader()
+    for session in codex.poll():
+        found.append(Live(RANK[session.state.value], codex.updated[session.id], session.state.value,
+                          session.pid, session.id, f"[codex] {session.label}", "codex", session.context))
     # A background job is wherever its terminal is.
     return sorted(s._replace(pid=front[s.id].pid) if s.id in front else s for s in found)
 
@@ -197,9 +205,9 @@ def list_sessions() -> None:
     for session in live_sessions():
         target = system.tmux_pane(session.pid)
         location = (system.tmux_location(target) if target else None) or "-"
-        n = agents_running(session.id)
+        n = agents_running(session.id) if session.source == "claude" else 0
         agents = "-" if n == 0 else "1 agent" if n == 1 else f"{n} agents"
-        context = contexts.get(session.id)
+        context = contexts.get(session.id) if session.source == "claude" else session.context
         full = context.text if context else "-"
         print(f"{session.state:<8} {location:<16} {agents:<9} {full:<4} {session.project:<24} {session.id}")
 
@@ -215,20 +223,23 @@ def jump(current: str | None, client: str | None, here: str | None) -> int:
         else:
             print(message)
 
-    # Sessions that need me, in tmux, in order.
+    # Sessions that need me, in tmux, in order; one stop per pane.
     queue = []
+    seen = set()
     for session in live_sessions():
         if session.rank > 1:
             continue
         target = system.tmux_pane(session.pid)
-        if target:
+        if target and (target.socket, target.pane) not in seen:
             queue.append((target, session))
+            seen.add((target.socket, target.pane))
     if not queue:
         say("CTally: nothing needs you")
         return 0
 
     # The one after the pane I'm on, so pressing again moves along the queue.
-    at = next((i for i, (target, _) in enumerate(queue) if target.pane == current), None)
+    at = next((i for i, (target, _) in enumerate(queue)
+               if target.socket == here and target.pane == current), None)
     target, session = queue[at + 1] if at is not None and at + 1 < len(queue) else queue[0]
 
     if not here:
@@ -304,7 +315,8 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("run", help="start the indicator")
     setup = commands.add_parser("setup", help="install hooks, start at login, start now")
     setup.add_argument("--tmux", action="store_true", help="also bind prefix + J and add tmux status-line counts")
-    setup.add_argument("--no-hooks", action="store_true", help="leave ~/.claude/settings.json alone")
+    setup.add_argument("--codex", action="store_true", help="install Codex hooks instead of Claude Code hooks")
+    setup.add_argument("--no-hooks", action="store_true", help="leave the selected CLI's hooks alone")
     setup.add_argument("--no-statusline", action="store_true",
                        help="no status line: usage limits then refresh only when Claude Code fetches them")
     setup.add_argument("--no-autostart", action="store_true", help="don't start CTally at login")
@@ -334,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "setup":
         from . import install
         return install.setup(tmux=args.tmux, hooks=not args.no_hooks, statusline=not args.no_statusline,
-                             autostart=not args.no_autostart, launch=not args.no_launch)
+                             autostart=not args.no_autostart, launch=not args.no_launch, codex=args.codex)
     if args.command == "uninstall":
         from . import install
         return install.uninstall()
