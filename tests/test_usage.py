@@ -318,7 +318,11 @@ OTHER = "00000000-0000-4000-8000-000000000002"
 
 def signed_in(path, who: str | None) -> None:
     """~/.claude.json with no /usage numbers in it, just who is signed in."""
+    previous = path.stat().st_mtime if path.exists() else 0
     path.write_text(json.dumps({"numStartups": 80, "oauthAccount": who and {"accountUuid": who}}))
+    # Equal-length account IDs can be written within one filesystem clock tick.
+    stamp = max(time.time(), previous + 1)
+    os.utime(path, (stamp, stamp))
 
 
 def keep(folder, who: str, **numbers) -> None:
