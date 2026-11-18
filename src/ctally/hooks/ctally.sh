@@ -16,9 +16,9 @@
 #
 # What a session waiting on me asks, a tool to allow, questions or a plan, is kept as
 # Claude Code put it in ~/.claude/ctally.d/.asks/<session id>, until that's settled: the
-# tool has run (or failed), whoever asked has gone on to another, the turn is over, or I've
-# sent a new prompt. Until then the session stays waiting, whatever else of it carries on:
-# its agents, or a tool started alongside the one it asked about.
+# tool has run (or failed), whoever asked has gone on to another or, an agent, has finished,
+# the turn is over, or I've sent a new prompt. Until then the session stays waiting, whatever
+# else of it carries on: its agents, or a tool started alongside the one it asked about.
 #
 # Subagents, a workflow's included, each get a file in ~/.claude/ctally.d/.agents/<session
 # id>/ while they run. A turn that ends with agents or a workflow still running in the
@@ -200,7 +200,11 @@ case "$state" in
     agent=$(safe "$(field agent_id)")
     [ -n "$agent" ] && rm -f "$agents/$agent"
     rmdir "$agents" 2>/dev/null
-    exit 0
+    # What that agent asked went with it: told no, it can finish without another tool, and
+    # nobody else of the session would settle it.
+    [ -n "$agent" ] && [ -f "$ask" ] && [ "$(field agent_id "$ask")" = "$agent" ] || exit 0
+    rm -f "$ask"
+    case "$before" in waiting*) state=working ;; *) exit 0 ;; esac
     ;;
   done)
     # A turn got through, so no limit is in the way now, if it shows that much.

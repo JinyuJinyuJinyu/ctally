@@ -781,6 +781,29 @@ def test_what_an_agent_asks_is_settled_by_that_agent(hook):
     assert asked(hook) is None and hook.state(SID) == "working"
 
 
+def test_an_agent_that_has_finished_has_nothing_still_asked(hook):
+    """Told no, an agent can finish without another tool, and nothing else of the session
+    settles what it asked."""
+    ask = payload(agent_id="a1", agent_type="general-purpose", hook_event_name="PermissionRequest", tool_name="Bash",
+                  tool_input={"command": "rm -rf build"})
+    hook("agent-start", payload(agent_id="a1", agent_type="general-purpose"))
+    hook("agent-start", payload(agent_id="a2", agent_type="Explore"))
+    hook("asking", ask)
+    hook("agent-stop", payload(hook_event_name="SubagentStop", agent_id="a2"))      # another agent's end
+    hook("working", payload(hook_event_name="PreToolUse", tool_name="Read"))        # and Claude itself at work
+    assert (asked(hook), hook.state(SID)) == (ask, "waiting")
+    hook("agent-stop", payload(hook_event_name="SubagentStop", agent_id="a1"))
+    assert asked(hook) is None and hook.state(SID) == "working"
+    assert hook.agents(SID) is None
+
+
+def test_an_agent_finishing_leaves_what_claude_itself_asked(hook):
+    hook("agent-start", payload(agent_id="a1", agent_type="Explore"))
+    hook("asking", ASK)
+    hook("agent-stop", payload(hook_event_name="SubagentStop", agent_id="a1"))
+    assert (asked(hook), hook.state(SID)) == (ASK, "waiting")
+
+
 def test_an_agent_at_work_leaves_the_background_marker_while_a_question_is_up(hook):
     hook("agent-start", payload(agent_id="a1", agent_type="Explore"))
     marker = hook.dir / ".agents" / SID / ".background"
