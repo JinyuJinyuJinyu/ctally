@@ -384,6 +384,8 @@ ctally setup --tmux
 | Hide or show it | Use the hexagon in the menu bar (top bar on Ubuntu), or right-click → Hide CTally. |
 | Change opacity | Menu bar → Settings…, or right-click → Settings… |
 | See your usage limits | Hover over them. Hide them with right-click → Hide Usage Limits, or in Settings. |
+| Take snapshots for after a restart | Right-click → Snapshot Sessions (or the menu bar's), or Snapshots in Settings, where **Every** and **Keep for** set how often and for how long. |
+| Bring your sessions back after a restart | Right-click → Restore Sessions, or `ctally snapshot restore`. |
 | Start or stop it | `ctally run` starts it; Quit in its menu stops it. |
 | Name a session | Run `/rename my-name` in Claude Code. CTally picks the name up within seconds. |
 
