@@ -55,10 +55,12 @@ red at 90%, so you see a session nearing compaction before it gets there. [More 
 - **When a turn finishes**, its row washes green and its mark bounces once; then everything holds still.
 - **Menu bar (or top bar) icon** to show or hide CTally. Off stays off across restarts, and the app sits idle
   with no timers but the snapshots', if they're on.
-- **Settings window** with an on/off switch, an opacity slider (80% by default), and switches for the usage
-  limits, asking Anthropic for them, and the snapshots.
-- **Snapshots for after a restart**: every two minutes, your tmux sessions and the Claude Code sessions in
-  them, and a **Restore Sessions** item in the menus to bring them back. [More below.](#snapshots-for-after-a-restart)
+- **Settings window** with an on/off switch, an opacity slider (80% by default), switches for the usage
+  limits, asking Anthropic for them, and the snapshots, and how often snapshots are taken and how long they're
+  kept.
+- **Snapshots for after a restart**: every two minutes (or as often as you like), your tmux sessions and the
+  Claude Code sessions in them, and a **Restore Sessions** item in the menus to bring them back.
+  [More below.](#snapshots-for-after-a-restart)
 - **Silent**: no sounds, no notifications, no Dock icon.
 - **One Python package**, installed with pipx: the same Qt app on macOS and Linux, and a `ctally` command for
   the terminal and tmux.
@@ -270,8 +272,9 @@ $ ctally jump          # inside tmux: go to the session that needs you
 ### Snapshots, for after a restart
 
 Switch on **Snapshot Sessions** in CTally's menus (or **Snapshots** in its settings) and every two minutes
-it notes your tmux sessions: their windows and layouts, each pane's folder, and the Claude Code session in it
-with the options it was started with, or the background job it shows. After a restart, the menus offer
+(or as often as you set) it notes your tmux sessions: their windows and layouts, each pane's folder, and the
+Claude Code session in it with the options it was started with, or the background job it shows. After a
+restart, the menus offer
 **Restore Sessions (Mon 10:14 pm)**: it makes the tmux sessions that aren't running, lays them out as they
 were, and resumes each Claude Code session in its pane (`claude --resume <id>`), or attaches to its
 background job again (`claude attach <job>`). Their rows turn up in CTally as they start.
@@ -282,8 +285,12 @@ background job again (`claude attach <job>`). Their rows turn up in CTally as th
   tmux session whose folders never come is left out.
 - **The snapshot it restores** is the newest from before the computer started (the ones taken while it came
   up are of nothing much) with a tmux session that isn't running now. Once you've restored, it's the newest.
-- **Kept for three days**, and a snapshot the same as the last isn't saved again. The newest from before the
-  last restart stays however old it is, so a week switched off doesn't lose it.
+- **Kept for three days** (or as many as you set), and a snapshot the same as the last isn't saved again. The
+  newest from before the last restart stays however old it is, so a week switched off doesn't lose it.
+- **How often, and for how long**: in CTally's settings, under Snapshots, **Every** takes one every 1 to 60
+  minutes (2 by default) and **Keep for** keeps them 1 to 30 days (3 by default). A new time between them
+  counts from now; with fewer days to keep, the older snapshots go when the next one is saved. `ctally
+  snapshot save` keeps them as long as the settings say, too.
 - **They're ccsnap's snapshots**, in the same place and form (`~/.local/state/ccsnap/snapshots`, on macOS
   `~/.ccsnap/snapshots`), so if you used ccsnap, its snapshots are there to restore. Switching CTally's on
   switches ccsnap's own timer off (its systemd timer or launchd agent; its files stay, for `ccsnap auto on`).

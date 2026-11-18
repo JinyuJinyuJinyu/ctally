@@ -9,8 +9,9 @@ whenever they're known. While they're looked at, they're asked of Anthropic ever
 minutes, unless that's switched off: see fetch.py.
 
 Snapshots of tmux and its Claude Code sessions, every couple of minutes, are switched on and
-off from the same menus and the settings window; the menus offer to restore one when it has a
-tmux session that isn't running, as after a restart. See snapshots.py.
+off from the same menus and the settings window, which also sets how often they're taken and
+how many days they're kept; the menus offer to restore one when it has a tmux session that
+isn't running, as after a restart. See snapshots.py.
 
 A session waiting on me can be answered from a menu of the choices its tmux pane shows: see
 answer.py.
@@ -159,9 +160,9 @@ class Controller:
         self.frame_timer.setInterval(FRAME_MS)
         self.frame_timer.timeout.connect(self.frame)
         # Snapshots go on whether the indicator shows or not: they're for after a restart.
-        self.keeper = snapshots.Keeper()
+        self.keeper = snapshots.Keeper(snapshots.Snapshots(keep_for=self.snapshot_days * 86400))
         self.snapshot_timer = QTimer()
-        self.snapshot_timer.setInterval(snapshots.EVERY * 1000)
+        self.snapshot_timer.setInterval(self.snapshot_minutes * 60_000)
         self.snapshot_timer.timeout.connect(self.keeper.save_soon)
 
         self.tray = self._make_tray()
@@ -245,7 +246,7 @@ class Controller:
         return bool(self.prefs["snapshots"])
 
     def set_keep_snapshots(self, on: bool) -> None:
-        """On takes one at once, then one every couple of minutes, and switches off ccsnap's
+        """On takes one at once, then one every couple of minutes (as set), and switches off ccsnap's
         own timer, which would only do the same."""
         self.prefs["snapshots"] = bool(on)
         if on:
@@ -254,6 +255,26 @@ class Controller:
             self.snapshot_timer.start()
         else:
             self.snapshot_timer.stop()
+        self.refresh_controls()
+
+    @property
+    def snapshot_minutes(self) -> int:
+        return snapshots.minutes(self.prefs["snapshot_minutes"])
+
+    @property
+    def snapshot_days(self) -> int:
+        return snapshots.days(self.prefs["snapshot_days"])
+
+    def set_snapshot_minutes(self, value: int) -> None:
+        """Takes effect at once: the next snapshot is that long from now."""
+        self.prefs["snapshot_minutes"] = snapshots.minutes(value)
+        self.snapshot_timer.setInterval(self.snapshot_minutes * 60_000)
+        self.refresh_controls()
+
+    def set_snapshot_days(self, value: int) -> None:
+        """Older snapshots go when the next one is saved, as they always do."""
+        self.prefs["snapshot_days"] = snapshots.days(value)
+        self.keeper.store.keep_for = self.snapshot_days * 86400
         self.refresh_controls()
 
     def restore_sessions(self) -> None:
@@ -281,6 +302,7 @@ class Controller:
         if self.settings is not None:
             self.settings.update_state(enabled, self.sessions)
             self.settings.update_snapshots(self.keep_snapshots)
+            self.settings.update_snapshot_times(self.snapshot_minutes, self.snapshot_days)
 
     # MARK: Showing and hiding
 
@@ -325,6 +347,8 @@ class Controller:
             window.usage_toggled.connect(self.set_show_usage)
             window.exact_usage_toggled.connect(self.set_exact_usage)
             window.snapshots_toggled.connect(self.set_keep_snapshots)
+            window.snapshot_minutes_changed.connect(self.set_snapshot_minutes)
+            window.snapshot_days_changed.connect(self.set_snapshot_days)
             window.quit_requested.connect(self.app.quit)
             window.closed.connect(self._settings_closed)
             window.winId()                  # a native window to set the Space behaviour on
@@ -338,6 +362,7 @@ class Controller:
         self.settings.update_usage(self.show_usage)
         self.settings.update_exact_usage(self.exact_usage)
         self.settings.update_snapshots(self.keep_snapshots)
+        self.settings.update_snapshot_times(self.snapshot_minutes, self.snapshot_days)
         if system.MAC:
             mac.activate()
         self.settings.show()

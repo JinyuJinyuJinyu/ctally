@@ -19,8 +19,9 @@
                                 waited on you, prompts, turns finished, sessions, limits hit
   ctally snapshot save|list|restore [N] [--dry-run]
                                 snapshots of tmux and its Claude Code sessions, to bring back after
-                                a restart (the app takes one every 2 minutes while they're on):
-                                take one now, list them, or restore the one marked * (or number N)
+                                a restart (the app takes one every 2 minutes, or as set, while
+                                they're on): take one now, list them, or restore the one marked *
+                                (or number N)
   ctally jump [pane client socket]
                                 switch a tmux client to the session that needs you: waiting first,
                                 then finished, longest-waiting first. Run it again to move on to
@@ -247,7 +248,10 @@ def jump(current: str | None, client: str | None, here: str | None) -> int:
 
 def snapshot(action: str, number: int | None, dry_run: bool) -> int:
     from . import snapshots
-    store, tmux = snapshots.Snapshots(), snapshots.Tmux()
+    from .prefs import Prefs
+    # Kept as long as the settings say, for the one this may save.
+    store = snapshots.Snapshots(keep_for=snapshots.days(Prefs()["snapshot_days"]) * 86400)
+    tmux = snapshots.Tmux()
     if action == "save":
         found = snapshots.capture(tmux)
         if found is None:

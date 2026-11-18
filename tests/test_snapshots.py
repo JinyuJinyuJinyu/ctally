@@ -120,6 +120,29 @@ def test_three_days_are_kept_and_the_last_before_a_restart_whatever_its_age(tmp_
     assert [store.load(p)["sessions"][0]["name"] for p in store.paths()] == ["after-60"]
 
 
+def test_kept_as_many_days_as_set(tmp_path):
+    store = Snapshots(tmp_path, keep_for=DAY)
+    now, boot = 100 * DAY, 50 * DAY                     # no restart among them
+    for age in (2 * DAY, DAY + 60, DAY - 60, 60):
+        store.save([{"name": f"at-{age}", "windows": []}], now - age)
+    assert len(store.prune(now, boot)) == 2
+    assert [store.load(p)["sessions"][0]["name"] for p in store.paths()] == ["at-60", f"at-{DAY - 60}"]
+    # Kept longer from now on: what's there stays.
+    store.keep_for = 7 * DAY
+    assert store.prune(now + 2 * DAY, boot) == []
+
+
+def test_how_often_and_how_long_as_set_within_bounds():
+    assert snapshots.minutes(2) == 2 and snapshots.minutes(15) == 15 and snapshots.minutes(7.9) == 7
+    assert snapshots.minutes(0) == 1 and snapshots.minutes(-5) == 1 and snapshots.minutes(500) == 60
+    assert snapshots.minutes(float("inf")) == 60
+    # A file anyone can edit: what isn't a number is the default.
+    for odd in ("10", None, True, [], float("nan")):
+        assert snapshots.minutes(odd) == 2 and snapshots.days(odd) == 3, odd
+    assert snapshots.days(3) == 3 and snapshots.days(14) == 14
+    assert snapshots.days(0) == 1 and snapshots.days(365) == 30
+
+
 def test_the_one_to_restore(tmp_path, monkeypatch):
     store = Snapshots(tmp_path)
     monkeypatch.setattr(snapshots, "boot_id", lambda: "this-boot")
@@ -293,6 +316,33 @@ def test_the_snapshot_command(private_tmux):
     assert done.returncode == 0 and "made 1 tmux session(s), started 0 Claude Code session(s)" in done.stdout, \
         done.stdout + done.stderr
     assert "work" in private_tmux("list-sessions", "-F", "#{session_name}").split()
+
+
+def test_the_snapshot_command_keeps_them_as_long_as_the_settings_say(private_tmux):
+    from ctally.prefs import Prefs
+
+    def save():
+        env = {**os.environ, "CCSNAP_TMUX_SOCKET": private_tmux.name, "PYTHONPATH": str(ROOT / "src")}
+        done = subprocess.run([sys.executable, "-m", "ctally", "snapshot", "save"], capture_output=True,
+                              text=True, timeout=60, env=env)
+        assert done.returncode == 0 and done.stdout.startswith("saved "), done.stdout + done.stderr
+
+    store = Snapshots()
+    now = time.time()
+    for age in (2.6 * DAY, 2.5 * DAY, 2.4 * DAY):
+        store.save([{"name": f"old-{age}", "windows": []}], now - age)
+
+    def old() -> int:
+        return sum(1 for p in store.paths() if store.load(p)["sessions"][0]["name"].startswith("old-"))
+
+    private_tmux.new_session("one")
+    save()
+    assert old() == 3                   # three days, as it was
+    Prefs()["snapshot_days"] = 1
+    private_tmux.new_session("two")
+    save()
+    # A day: gone, but for the newest from before the computer started, if one of them is.
+    assert old() <= 1 and len(store.paths()) == old() + 2
 
 
 def test_when_it_was_saved():

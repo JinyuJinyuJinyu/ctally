@@ -1,6 +1,6 @@
 """The settings window: CTally on or off, how see-through it is, whether it shows your
 plan's usage limits and asks Anthropic for them, and whether it takes snapshots of tmux for
-after a restart."""
+after a restart, how often, and how many days it keeps them."""
 from __future__ import annotations
 
 import math
@@ -8,9 +8,9 @@ import math
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-                               QSlider, QVBoxLayout, QWidget)
+                               QSlider, QSpinBox, QVBoxLayout, QWidget)
 
-from .. import system
+from .. import snapshots, system
 from ..sessions import BY_URGENCY
 
 OPACITY_RANGE = (0.3, 1.0)
@@ -103,6 +103,8 @@ class SettingsWindow(QWidget):
     usage_toggled = Signal(bool)
     exact_usage_toggled = Signal(bool)
     snapshots_toggled = Signal(bool)
+    snapshot_minutes_changed = Signal(int)
+    snapshot_days_changed = Signal(int)
     quit_requested = Signal()
     closed = Signal()
 
@@ -169,7 +171,7 @@ class SettingsWindow(QWidget):
         self.exact_switch.toggled.connect(self.exact_usage_toggled)
 
         snapshots_title = QLabel("Snapshots")
-        snapshots_hint = QLabel("Every 2 min, to restore tmux after a restart")
+        snapshots_hint = QLabel("To restore tmux after a restart")
         secondary(snapshots_hint)
         snapshots_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         snapshots_labels = QVBoxLayout()
@@ -179,6 +181,23 @@ class SettingsWindow(QWidget):
         self.snapshots_switch = Switch()
         self.snapshots_switch.setAccessibleName("Snapshots")
         self.snapshots_switch.toggled.connect(self.snapshots_toggled)
+
+        # How often, and for how long. Typed numbers count once they're done with (Return, or
+        # moving on), so typing 15 isn't 1 first.
+        every_title = QLabel("Every")
+        self.every_box = QSpinBox()
+        self.every_box.setRange(*snapshots.MINUTES)
+        self.every_box.setSuffix(" min")
+        self.every_box.setAccessibleName("Minutes between snapshots")
+        self.every_box.setKeyboardTracking(False)
+        self.every_box.valueChanged.connect(self.snapshot_minutes_changed)
+        keep_title = QLabel("Keep for")
+        self.keep_box = QSpinBox()
+        self.keep_box.setRange(*snapshots.DAYS)
+        self.keep_box.setSuffix(" days")
+        self.keep_box.setAccessibleName("Days to keep snapshots")
+        self.keep_box.setKeyboardTracking(False)
+        self.keep_box.valueChanged.connect(self._kept)
 
         where = "menu bar" if system.MAC else "top bar"
         hint = QLabel(f"Off stays off, even after a restart. The hexagon icon in the {where} switches it too.")
@@ -220,6 +239,15 @@ class SettingsWindow(QWidget):
         keep.setContentsMargins(52, 0, 0, 0)
         keep.addLayout(snapshots_labels, 1)
         keep.addWidget(self.snapshots_switch, 0, Qt.AlignVCenter)
+        times = QHBoxLayout()
+        times.setSpacing(8)
+        times.setContentsMargins(52, 0, 0, 0)
+        times.addWidget(every_title)
+        times.addWidget(self.every_box)
+        times.addSpacing(16)
+        times.addWidget(keep_title)
+        times.addWidget(self.keep_box)
+        times.addStretch(1)
         footer = QHBoxLayout()
         footer.setSpacing(12)
         footer.addWidget(hint, 1)
@@ -233,11 +261,16 @@ class SettingsWindow(QWidget):
         stack.addLayout(limits)
         stack.addLayout(exact)
         stack.addLayout(keep)
+        stack.addLayout(times)
         stack.addWidget(rule)
         stack.addLayout(footer)
 
         for keys in (QKeySequence(Qt.Key_Escape), QKeySequence("Ctrl+W")):
             QShortcut(keys, self, activated=self.close)
+        # Opened, the window has the focus, not the first box: no ring around it, and nothing
+        # typed into it by the way. A click on the window takes it back, and settles a box.
+        self.setFocusPolicy(Qt.ClickFocus)
+        self.setFocus()
 
         self.setFixedWidth(SettingsWindow.WIDTH)
         self.adjustSize()
@@ -287,6 +320,21 @@ class SettingsWindow(QWidget):
             self.snapshots_switch.blockSignals(False)
             self.snapshots_switch.update()
 
+    def update_snapshot_times(self, minutes: int, days: int) -> None:
+        for box, value in ((self.every_box, minutes), (self.keep_box, days)):
+            if box.value() != value:
+                box.blockSignals(True)
+                box.setValue(value)
+                box.blockSignals(False)
+        self._days_suffix(days)
+
+    def _kept(self, days: int) -> None:
+        self._days_suffix(days)
+        self.snapshot_days_changed.emit(days)
+
+    def _days_suffix(self, days: int) -> None:
+        self.keep_box.setSuffix(" day" if days == 1 else " days")
+
     def _slid(self, percent: int) -> None:
         self.opacity_value.setText(f"{percent}%")
         self.opacity_changed.emit(percent / 100)
@@ -308,6 +356,8 @@ class SettingsWindow(QWidget):
         return SettingsWindow._faded
 
     def closeEvent(self, event) -> None:
+        for box in (self.every_box, self.keep_box):
+            box.interpretText()             # a number typed and not yet done with counts too
         super().closeEvent(event)
         self.closed.emit()
 

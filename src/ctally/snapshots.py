@@ -1,10 +1,11 @@
 """Snapshots of tmux and the Claude Code sessions in it, to bring them back after a restart.
 
-While it's switched on, CTally notes every couple of minutes each tmux session: its windows,
-their layouts and sizes, and each pane's folder and what Claude Code runs there, the session
-and the options it was started with, or the background job the pane shows. A snapshot the same
-as the last isn't saved again. They go after three days, except the newest from before the
-last restart: that's the one to bring back, however long the computer was off.
+While it's switched on, CTally notes every couple of minutes (or as often as it's set to) each
+tmux session: its windows, their layouts and sizes, and each pane's folder and what Claude Code
+runs there, the session and the options it was started with, or the background job the pane
+shows. A snapshot the same as the last isn't saved again. They go after three days (or as many
+as they're set to be kept), except the newest from before the last restart: that's the one to
+bring back, however long the computer was off.
 
 Restoring makes each tmux session of a snapshot that isn't running now, lays out its windows
 and panes as they were, and in each pane resumes its Claude Code session with the options it
@@ -34,11 +35,30 @@ from typing import Callable, NamedTuple
 
 from . import system
 
-EVERY = 120                 # seconds between snapshots
-KEEP_FOR = 3 * 86400        # how far back they go
+EVERY = 120                 # seconds between snapshots, unless set otherwise
+KEEP_FOR = 3 * 86400        # how far back they go, unless set otherwise
+MINUTES = (1, 60)           # what the time between them can be set to, in minutes
+DAYS = (1, 30)              # and how long they're kept, in days
 WAIT = 300                  # how long a restore waits for a missing folder
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def minutes(value) -> int:
+    """The time between snapshots, in minutes, from a setting: what's stored is a file anyone
+    can edit, so anything else is the default and too much or too little the nearest allowed."""
+    return _within(value, MINUTES, EVERY // 60)
+
+
+def days(value) -> int:
+    """How many days snapshots are kept, from a setting, as for minutes()."""
+    return _within(value, DAYS, KEEP_FOR // 86400)
+
+
+def _within(value, bounds: tuple[int, int], default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+        return default
+    return int(min(max(value, bounds[0]), bounds[1]))
 
 
 def home() -> Path:
@@ -308,8 +328,9 @@ def boot_id() -> str:
 class Snapshots:
     """The snapshot files: <when>.json, {"version": 1, "saved_at": <Unix time>, "sessions": [...]}."""
 
-    def __init__(self, folder: Path | None = None):
+    def __init__(self, folder: Path | None = None, keep_for: float = KEEP_FOR):
         self.home = folder or home()
+        self.keep_for = keep_for            # seconds
         self.dir = self.home / "snapshots"
         self.marker = self.home / "restored-boot"
         self._loaded: dict[str, tuple[float, dict | None]] = {}
@@ -365,15 +386,15 @@ class Snapshots:
         return path
 
     def prune(self, now: float | None = None, boot: float | None = None) -> list[Path]:
-        """Deletes the snapshots more than three days old, but never the newest from before the
-        computer last started. Returns those deleted."""
+        """Deletes the snapshots older than they're kept for (three days, unless set otherwise),
+        but never the newest from before the computer last started. Returns those deleted."""
         now = time.time() if now is None else now
         boot = boot_time() if boot is None else boot
         entries = self.entries()
         keep = next((path for path, data in entries if data["saved_at"] < boot), None)
         gone = []
         for path, data in entries:
-            if path != keep and data["saved_at"] < now - KEEP_FOR:
+            if path != keep and data["saved_at"] < now - self.keep_for:
                 try:
                     path.unlink()
                     gone.append(path)
@@ -544,8 +565,8 @@ def saved_when(moment: float, now: float) -> str:
 
 
 class Keeper:
-    """For the app: a snapshot when asked (every couple of minutes, while switched on), and a
-    restore, each off the main thread and one at a time. What they do goes to the log."""
+    """For the app: a snapshot when asked (every couple of minutes, or as set, while switched
+    on), and a restore, each off the main thread and one at a time. What they do goes to the log."""
 
     def __init__(self, store: Snapshots | None = None, tmux: Tmux | None = None, places: Places = Places(),
                  log: Callable[[str], None] | None = None):

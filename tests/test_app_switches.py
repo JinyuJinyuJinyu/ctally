@@ -1,5 +1,5 @@
-"""The app's switches for Exact usage and Snapshots, from the settings window, and the Restore
-Sessions item. Qt runs in a separate process, as in the view tests; its tmux server, snapshots,
+"""The app's switches for Exact usage and Snapshots, from the settings window, how often
+snapshots are taken and how long they're kept, and the Restore Sessions item. Qt runs in a separate process, as in the view tests; its tmux server, snapshots,
 settings and Claude Code folder are this test's own (see conftest), and ccsnap's timer is left
 alone."""
 from __future__ import annotations
@@ -66,6 +66,25 @@ SCRIPT = textwrap.dedent('''
     assert until(lambda: stopped and c.keeper.store.paths()), (stopped, c.keeper.store.home)
     assert str(c.keeper.store.home) == os.environ["CCSNAP_HOME"]
 
+    # How often, and for how long: every 2 minutes and for 3 days to begin with, as set from
+    # the window, at once.
+    assert c.snapshot_timer.interval() == 2 * 60_000 and c.keeper.store.keep_for == 3 * 86400
+    assert window.every_box.value() == 2 and window.keep_box.value() == 3
+    assert window.keep_box.suffix() == " days"
+    window.every_box.setValue(15)
+    assert c.snapshot_timer.interval() == 15 * 60_000 and c.snapshot_timer.isActive()
+    assert prefs.Prefs()["snapshot_minutes"] == 15
+    window.keep_box.setValue(1)
+    assert c.keeper.store.keep_for == 86400 and prefs.Prefs()["snapshot_days"] == 1
+    assert window.keep_box.suffix() == " day"
+    # From elsewhere, and too much or too little: the nearest allowed, and the window follows.
+    c.set_snapshot_minutes(500)
+    c.set_snapshot_days(0)
+    assert c.snapshot_timer.interval() == 60 * 60_000 and window.every_box.value() == 60
+    assert c.keeper.store.keep_for == 86400 and window.keep_box.value() == 1
+    c.set_snapshot_days(14)
+    assert window.keep_box.value() == 14 and window.keep_box.suffix() == " days"
+
     # Restore Sessions: hidden while everything in the snapshot is running...
     restore = QAction("Restore Sessions")
     c._offer_restore(restore)
@@ -90,6 +109,18 @@ SCRIPT = textwrap.dedent('''
 
     window.snapshots_switch.click()
     assert not c.keep_snapshots and not c.snapshot_timer.isActive() and prefs.Prefs()["snapshots"] is False
+    assert c.snapshot_timer.interval() == 60 * 60_000           # kept for next time
+
+    # A number typed counts once it's done with, or as the window closes.
+    window.every_box.lineEdit().setText("5 min")
+    assert prefs.Prefs()["snapshot_minutes"] == 60
+    window.close()
+    assert prefs.Prefs()["snapshot_minutes"] == 5 and c.snapshot_timer.interval() == 5 * 60_000
+
+    # Started again, it's as it was set.
+    app.processEvents()
+    again = Controller(app, QLocalServer())
+    assert again.snapshot_timer.interval() == 5 * 60_000 and again.keeper.store.keep_for == 14 * 86400
     print("ok")
 ''')
 
