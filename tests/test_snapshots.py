@@ -65,6 +65,14 @@ def window(panes: list[dict], index: int = 0, name: str = "claude", active: bool
             "auto_rename": False, "panes": panes}
 
 
+def fake_claude(folder: Path) -> tuple[Path, Path]:
+    """A claude that only notes where it was started and with what, and where it notes it."""
+    record, fake = folder / "started.txt", folder / "fake-claude"
+    fake.write_text(f"#!/bin/sh\necho \"$PWD: $*\" >> '{record}'\n")
+    fake.chmod(0o755)
+    return record, fake
+
+
 # MARK: Which options a session is resumed with
 
 def test_options_keep_the_settings_and_drop_what_picks_a_session():
@@ -259,9 +267,11 @@ def test_a_restore_makes_what_is_missing_and_starts_claude_code_in_it(private_tm
     said = []
     done = restore(store, Tmux(private_tmux.name), places=places, wait=0, claude=str(fake),
                    settle=0.5, stagger=0, say=said.append)
-    assert done.made == ["cb"]
-    assert sorted(done.skipped) == ["lost: no folder " + str(tmp_path / "not-mounted"),
-                                    "running: a tmux session of that name is running"]
+    assert done.made == ["cb", "lost"]
+    assert done.skipped == ["running: a tmux session of that name is running"]
+    # A plain shell whose folder is gone opens in the nearest one above it, and says so.
+    assert private_tmux.pane("lost:0.0", "#{pane_current_path}") == str(tmp_path)
+    assert f"lost:0.0  (no folder {tmp_path / 'not-mounted'}: opens in {tmp_path})" in said
     assert private_tmux("list-windows", "-t", "cb", "-F", "#{window_index} #{window_name} #{window_panes}") \
         .splitlines() == ["0 claude 2", "3 notes 1"]
     assert private_tmux("display-message", "-p", "-t", "cb", "#{window_index}") == "3"     # the active window
@@ -305,19 +315,135 @@ def test_one_that_cannot_be_made_does_not_stop_the_rest_and_is_not_left_half_mad
     assert not again.restored_this_boot()
 
 
+def test_only_the_tmux_session_whose_claude_code_needs_a_folder_waits_for_it(private_tmux, places, tmp_path):
+    private_tmux.new_session("running")
+    record, fake = fake_claude(tmp_path)
+    here, late = tmp_path / "here", tmp_path / "disk" / "project"
+    here.mkdir()
+    late.parent.mkdir()                 # where the disk goes: there, and empty until it's mounted
+    transcript(places, "s1")
+    transcript(places, "s2")
+    store = Snapshots(tmp_path / "state")
+    store.save([
+        {"name": "slow", "windows": [window([pane(str(late), {"session_id": "s1", "name": "cb1", "cwd": str(late),
+                                                              "args": []})])]},
+        {"name": "ready", "windows": [window([
+            pane(str(here), {"session_id": "s2", "name": "cb2", "cwd": str(here), "args": []}),
+            pane(str(tmp_path / "gone" / "build"), index=1, active=False)])]},      # a shell's folder: not waited for
+    ], 1000)
+    seen, said = [], []
+
+    def mounted() -> None:
+        """The disk comes up once the others are back and it's being waited for, not before."""
+        wait_for(lambda: any(line.startswith("waiting") for line in said), timeout=30)
+        seen.append(sorted(private_tmux("list-sessions", "-F", "#{session_name}").split()))
+        late.mkdir(parents=True)
+    threading.Thread(target=mounted, daemon=True).start()
+    done = restore(store, Tmux(private_tmux.name), places=places, wait=60, claude=str(fake), settle=0.5, stagger=0,
+                   say=said.append)
+    assert seen == [["ready", "running"]]                       # made at once, while the other waited
+    assert done.made == ["ready", "slow"] and done.skipped == []
+    assert done.started == ["ready:0.0  cb2", "slow:0.0  cb1"]
+    assert f"waiting up to 60 s for 1 folder(s): {late}" in said
+    assert private_tmux.pane("ready:0.1", "#{pane_current_path}") == str(tmp_path)
+    assert wait_for(lambda: record.exists() and sorted(record.read_text().splitlines()) == sorted(
+        [f"{here}: --resume s2", f"{late}: --resume s1"]), timeout=10), record.read_text() if record.exists() else ""
+
+
+def test_a_folder_may_yet_come_or_is_gone_for_good(tmp_path, monkeypatch):
+    from ctally.snapshots import _may_come
+    (tmp_path / "projects" / "kept").mkdir(parents=True)
+    (tmp_path / "disk").mkdir()
+    assert not _may_come(str(tmp_path / "projects" / "removed"))        # what was beside it is still there
+    assert not _may_come(str(tmp_path / "projects" / "removed" / "deeper"))
+    assert _may_come(str(tmp_path / "disk" / "project"))                # an empty place: a disk not on it yet
+    assert _may_come("/Volumes/ctally-no-such-disk/project") and _may_come("/mnt/ctally-no-such-disk/project")
+    assert _may_come("/media/someone/ctally-no-such-disk/project")
+    assert _may_come("/ctally-no-such-top-folder/project")              # nothing of it at all
+
+    # Where disks are put: a place there with no disk on it may get one, whatever was left in
+    # it; with its disk on it, a folder missing from it was deleted.
+    volumes = tmp_path / "Volumes"
+    (volumes / "data" / "kept").mkdir(parents=True)
+    (volumes / "someone").mkdir()
+    monkeypatch.setattr(snapshots, "MOUNTS", (str(volumes),))
+    assert _may_come(str(volumes / "other" / "project"))
+    assert _may_come(str(volumes / "data" / "project"))
+    assert _may_come(str(volumes / "someone" / "disk" / "project"))
+    monkeypatch.setattr(snapshots.os.path, "ismount", lambda path: Path(path) == volumes / "data")
+    assert not _may_come(str(volumes / "data" / "project"))
+    assert _may_come(str(volumes / "someone" / "disk" / "project"))
+
+
+def test_a_deleted_folder_is_not_waited_for(private_tmux, places, tmp_path):
+    private_tmux.new_session("running")
+    record, fake = fake_claude(tmp_path)
+    removed = tmp_path / "removed"                              # beside the rest of the test's files
+    transcript(places, "s1")
+    store = Snapshots(tmp_path / "state")
+    store.save([{"name": "cb", "windows": [window([pane(str(removed), {"session_id": "s1", "name": "cb1",
+                                                                       "cwd": str(removed), "args": []})])]}], 1000)
+    said, began = [], time.monotonic()
+    done = restore(store, Tmux(private_tmux.name), places=places, wait=60, claude=str(fake), settle=0.5, stagger=0,
+                   say=said.append)
+    assert time.monotonic() - began < 20 and not any(line.startswith("waiting") for line in said)
+    assert done.made == ["cb"] and done.started == [] and done.skipped == []
+    assert f"typed cb:0.0  cb1  (no folder {removed}: not started)" in said
+    time.sleep(0.5)
+    assert not record.exists()
+
+
+def test_a_folder_that_never_comes_leaves_its_session_typed_and_not_started(private_tmux, places, tmp_path):
+    """Never Claude Code in the wrong folder, and no tmux session left out for one folder's sake."""
+    private_tmux.new_session("running")
+    record, fake = fake_claude(tmp_path)
+    here, never = tmp_path / "disk" / "here", tmp_path / "other-disk" / "project"
+    here.mkdir(parents=True)
+    never.parent.mkdir()                # where a disk goes that never gets there
+    transcript(places, "s1")
+    transcript(places, "s2")
+    job(places, "f2b0a87f", "s7", "cb7", str(never))
+    store = Snapshots(tmp_path / "state")
+    store.save([{"name": "cb", "windows": [window([
+        pane(str(never), {"session_id": "s1", "name": "cb1", "cwd": str(never), "args": ["--model", "opus"]}),
+        pane(str(here), {"session_id": "s2", "name": "cb2", "cwd": str(here), "args": []}, index=1, active=False),
+        # A look at a background job needs no folder of its own.
+        pane(str(never), {"job_id": "f2b0a87f", "job_name": "cb7", "session_id": None, "cwd": str(never),
+                          "args": [], "attach": True}, index=2, active=False)])]}], 1000)
+    said, began = [], time.monotonic()
+    done = restore(store, Tmux(private_tmux.name), places=places, wait=3, claude=str(fake), settle=0.5, stagger=0,
+                   say=said.append)
+    assert 3 <= time.monotonic() - began < 20                   # waited for, as long as it was told to
+    assert done.made == ["cb"] and done.skipped == []
+    assert done.started == ["cb:0.1  cb2", "cb:0.2  background job cb7"]
+    assert f"typed cb:0.0  cb1  (no folder {never}: not started)" in said
+    assert private_tmux.pane("cb:0.0", "#{pane_current_path}") == str(never.parent)
+    # The way to its folder and the session are typed there, for when the folder is back.
+    typed = "".join(f"cd {never} && {fake} --resume s1 --model opus".split())
+    shown = lambda: "".join(private_tmux("capture-pane", "-p", "-J", "-t", "cb:0.0").split())
+    assert wait_for(lambda: typed in shown(), timeout=10), shown()
+    assert wait_for(lambda: record.exists() and sorted(record.read_text().splitlines()) == sorted(
+        [f"{here}: --resume s2", f"{never.parent}: attach f2b0a87f"]), timeout=10), record.read_text() if record.exists() else ""
+    assert store.restored_this_boot()
+
+
 def test_a_session_started_by_hand_while_a_folder_was_waited_for_is_left_alone(private_tmux, places, tmp_path):
     private_tmux.new_session("running")
-    late = tmp_path / "late"
+    late = tmp_path / "disk" / "late"
+    late.parent.mkdir()
+    transcript(places, "s1")
+    transcript(places, "s2")
     store = Snapshots(tmp_path / "state")
-    store.save([{"name": "mine", "windows": [window([pane(str(tmp_path))])]},
-                {"name": "slow", "windows": [window([pane(str(late))])]}], 1000)
+    store.save([{"name": "mine", "windows": [window([pane(str(late), {"session_id": "s1", "cwd": str(late), "args": []})])]},
+                {"name": "slow", "windows": [window([pane(str(late), {"session_id": "s2", "cwd": str(late), "args": []})])]}],
+               1000)
 
     def meanwhile() -> None:
         time.sleep(0.5)
         private_tmux.new_session("mine")
         late.mkdir()
     threading.Thread(target=meanwhile, daemon=True).start()
-    done = restore(store, Tmux(private_tmux.name), places=places, wait=20)
+    done = restore(store, Tmux(private_tmux.name), places=places, wait=20, claude="true", settle=0.2, stagger=0)
     assert done.made == ["slow"] and done.skipped == ["mine: a tmux session of that name is running"]
 
 
@@ -330,6 +456,20 @@ def test_a_dry_run_changes_nothing(private_tmux, places, tmp_path):
     assert done.made == ["cb"] and private_tmux("has-session", "-t", "=cb", check=False) == ""
     assert "cb" not in private_tmux("list-sessions", "-F", "#{session_name}").split()
     assert not store.restored_this_boot()
+    # It says what would wait for its folder, and what would open somewhere else.
+    transcript(places, "s1")
+    gone, disk = tmp_path / "gone", tmp_path / "disk"
+    disk.mkdir()
+    other = Snapshots(tmp_path / "other")
+    other.save([{"name": "cb", "windows": [window([
+        pane(str(disk / "late"), {"session_id": "s1", "name": "cb1", "cwd": str(disk / "late"), "args": []}),
+        pane(str(gone), {"session_id": "s1", "name": "cb1", "cwd": str(gone), "args": []}, index=1, active=False),
+        pane(str(gone / "build"), index=2, active=False)])]}], 1000)
+    said = []
+    assert restore(other, Tmux(private_tmux.name), places=places, wait=30, dry_run=True, say=said.append).made == ["cb"]
+    assert said[1:] == [f"cb:0.0  claude --resume s1  cb1  (no folder {disk / 'late'} yet: waited for)",
+                        f"cb:0.1  cd {gone} && claude --resume s1  cb1  (no folder {gone}: not started)",
+                        f"cb:0.2  shell  (no folder {gone / 'build'}: opens in {tmp_path})"]
 
 
 def test_the_app_finds_what_there_is_to_restore_and_takes_snapshots(private_tmux, places, tmp_path):

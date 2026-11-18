@@ -285,8 +285,14 @@ background job again (`claude attach <job>`). Their rows turn up in CTally as th
 - **The options it was started with** come back with a session (`--dangerously-skip-permissions`,
   `--model`, a system prompt), not the ones that pick a session, nor a prompt, which would be sent again. An
   option CTally doesn't know, followed by something that could be its value or a prompt, is left out.
-- **A folder that isn't there yet**, on a disk still being mounted, is waited for for up to five minutes; a
-  tmux session whose folders never come is left out.
+- **Never Claude Code in the wrong folder.** A session whose folder isn't there yet, on a disk still being
+  mounted, is waited for for up to five minutes, by its own tmux session only: the others are restored at
+  once. If the folder never comes, or has been deleted, the tmux session is made all the same, with
+  `cd <folder> && claude --resume <id>` typed into that pane and not started: press Return once the folder is
+  back. A plain shell whose folder is gone opens in the nearest one above it.
+- **Not yet, or gone?** A folder may yet come when the nearest folder above it that's there is empty (where
+  a disk goes, before the disk is on it), or is where disks are put (`/Volumes`, `/media`, `/run/media`,
+  `/mnt`) or a place there with no disk on it. Otherwise it's taken as deleted, and isn't waited for.
 - **The snapshot it restores** is the newest from before the computer started (the ones taken while it came
   up are of nothing much) with a tmux session that isn't running now. Once you've restored, it's the newest.
 - **Kept for three days** (or as many as you set), and a snapshot the same as the last isn't saved again. The

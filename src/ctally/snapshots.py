@@ -10,10 +10,13 @@ bring back, however long the computer was off.
 Restoring makes each tmux session of a snapshot that isn't running now, lays out its windows
 and panes as they were, and in each pane resumes its Claude Code session with the options it
 had (`claude --resume <id> ...`), or attaches to its background job again (`claude attach
-<job>`). A folder that isn't there yet, on a disk still being mounted, is waited for a few
-minutes; a session whose folders never come is left out. Until something has been restored
-since the computer started, the snapshot to restore is the newest from before then: the
-snapshots taken while it came up are of nothing much.
+<job>`). A Claude Code session is never started in the wrong folder: one whose folder isn't
+there yet, on a disk still being mounted, is waited for a few minutes by its tmux session (the
+others are made at once), and if it never comes, or has been deleted, the session is typed
+into its pane and not started. A plain shell whose folder is gone opens in the nearest one
+above it. Until something
+has been restored since the computer started, the snapshot to restore is the newest from
+before then: the snapshots taken while it came up are of nothing much.
 
 The snapshots are ccsnap's, in the same place and the same form, so either reads the other's:
 ~/.local/state/ccsnap/snapshots (~/.ccsnap/snapshots on macOS), or $CCSNAP_HOME/snapshots.
@@ -39,7 +42,8 @@ EVERY = 120                 # seconds between snapshots, unless set otherwise
 KEEP_FOR = 3 * 86400        # how far back they go, unless set otherwise
 MINUTES = (1, 60)           # what the time between them can be set to, in minutes
 DAYS = (1, 30)              # and how long they're kept, in days
-WAIT = 300                  # how long a restore waits for a missing folder
+WAIT = 300                  # how long a restore waits for a folder a Claude Code session needs
+MOUNTS = ("/Volumes", "/media", "/run/media", "/mnt")       # where disks are put, on macOS and Linux
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
@@ -484,8 +488,66 @@ def launch(pane: dict, places: Places = Places(), claude: str = "claude") -> tup
     return " ".join(parts), note
 
 
-def _folders(session: dict) -> set[str]:
-    return {p["claude"]["cwd"] if "claude" in p else p["cwd"] for w in session["windows"] for p in w["panes"]}
+class _Pane(NamedTuple):
+    """How a pane of a snapshot comes back."""
+    folder: str             # where it opens: its own folder, or the nearest above it that's there
+    command: str | None     # what to type into it: None for a plain shell
+    start: bool             # whether to press Return after it
+    label: str              # what it is, and why it isn't started or where it opens instead
+    awaits: str | None      # its folder, if Claude Code can't start without it and it may yet come
+
+
+def _nearest(folder: str) -> str:
+    """A folder, or the nearest above it that's there, home rather than the top of the disk:
+    where a pane opens when its own is gone."""
+    path = Path(folder)
+    if path.is_dir():
+        return folder
+    for parent in path.parents:
+        if parent.is_dir():
+            return str(parent) if parent != Path(parent.anchor) else str(Path.home())
+    return str(Path.home())
+
+
+def _may_come(folder: str) -> bool:
+    """Whether a folder that isn't there may yet be, on a disk still being mounted, rather than
+    deleted. Where a disk goes is an empty folder until the disk is on it, or isn't there at
+    all under where disks are put; a deleted folder leaves behind what was beside it."""
+    for parent in Path(folder).parents:
+        if not parent.is_dir():
+            continue
+        if parent == Path(parent.anchor) or str(parent) in MOUNTS:
+            return True
+        # Under where disks are put, and no disk on it: a place for one (/mnt/data), or for
+        # one user's (/media/<user>). With a disk on it, the folder was deleted from the disk.
+        if str(parent.parent) in MOUNTS and not os.path.ismount(parent):
+            return True
+        try:
+            return not any(parent.iterdir())
+        except OSError:
+            return True                 # can't look, so can't say it's gone
+    return True
+
+
+def _plan(pane: dict, places: Places, claude: str, live: frozenset | set = frozenset()) -> _Pane:
+    """Never Claude Code in the wrong folder: a session is resumed where it was, so with its
+    folder gone it's typed into its pane, after a cd there, and not started; one that may yet
+    come is worth waiting for first. A plain shell can open anywhere, and so can a look at a
+    background job."""
+    wanted = pane["claude"]["cwd"] if "claude" in pane else pane["cwd"]
+    there = os.path.isdir(wanted)
+    folder = wanted if there else _nearest(wanted)
+    command, note = launch(pane, places, claude)
+    if command is None:
+        return _Pane(folder, None, False, "" if there else f"(no folder {wanted}: opens in {folder})", None)
+    start, why, awaits = True, "", None
+    if not there and not command.startswith(f"{claude} attach "):
+        command, start = f"cd {shlex.quote(wanted)} && {command}", False
+        awaits, why = wanted if _may_come(wanted) else None, f"(no folder {wanted}: not started)"
+    elif not pane["claude"].get("job_id") and pane["claude"].get("session_id") in live:
+        # A session already running elsewhere is typed but not started: two of one is trouble.
+        start, why = False, "(running elsewhere: not started)"
+    return _Pane(folder, command, start, "  ".join(part for part in (note, why) if part), awaits)
 
 
 class Restored(NamedTuple):
@@ -509,55 +571,83 @@ def restore(store: Snapshots, tmux: Tmux, path: Path | None = None, places: Plac
                if s["name"] in running]
     todo = [s for s in snapshot["sessions"] if s["name"] not in running]
 
-    # Never Claude Code in the wrong folder: wait for one that isn't there yet.
-    def missing() -> set[str]:
-        return {d for s in todo for d in _folders(s) if not os.path.isdir(d)}
-    gone, waited = missing(), False
-    if gone and wait > 0 and not dry_run:
-        say(f"waiting up to {int(wait)} s for {len(gone)} folder(s): {', '.join(sorted(gone)[:3])}")
-        deadline, waited = time.monotonic() + wait, True
-        while gone and time.monotonic() < deadline:
-            time.sleep(2)
-            gone = missing()
-    skipped += [f"{s['name']}: no folder {', '.join(sorted(_folders(s) & gone))}" for s in todo if _folders(s) & gone]
-    todo = [s for s in todo if not _folders(s) & gone]
-    if dry_run or not todo:
+    def awaited(s: dict) -> set[str]:
+        """The folders a tmux session's Claude Code sessions need, that aren't there and may yet be."""
+        try:
+            plans = [_plan(p, places, claude) for w in s["windows"] for p in w["panes"]]
+        except Exception:               # not as a snapshot should be: making it says what's wrong
+            return set()
+        return {plan.awaits for plan in plans if plan.awaits}
+
+    if dry_run:
         for s in todo:
             for w in s["windows"]:
                 for p in w["panes"]:
+                    plan = _plan(p, places, claude)
                     command, note = launch(p, places, claude)
-                    say(f"{s['name']}:{w['index']}.{p['index']}  {command or 'shell'}  {note}".rstrip())
-        return Restored([s["name"] for s in todo] if dry_run else [], [], skipped)
+                    # One waited for is started as ever if it comes.
+                    shown, why = (command, f"(no folder {plan.awaits} yet: waited for)") if plan.awaits \
+                        else (plan.command, plan.label[len(note):].strip())
+                    say("  ".join(part for part in (f"{s['name']}:{w['index']}.{p['index']}", shown or "shell",
+                                                    note, why) if part))
+        return Restored([s["name"] for s in todo], [], skipped)
 
-    if waited:
-        # One started by hand while this waited is left as it is.
-        running = tmux.sessions()
-        skipped += [f"{s['name']}: a tmux session of that name is running" for s in todo if s["name"] in running]
-        todo = [s for s in todo if s["name"] not in running]
+    made, started = [], []
 
-    live = {record.get("sessionId") for record in _running(places.registry).values()}
-    made, launches, started = [], [], []    # launches: (pane id, command, whether to press Enter, label)
-    for s in todo:
-        try:
-            launches += _make(tmux, s, places, claude, live)
-        except Exception as error:      # one that can't be made is no reason to leave the others
-            skipped.append(f"{s['name']}: couldn't be made ({error})")
-            continue
-        made.append(s["name"])
-        say(f"made {s['name']}: {len(s['windows'])} window(s), {sum(len(w['panes']) for w in s['windows'])} pane(s)")
-
-    if launches:
-        time.sleep(settle)          # the new shells start before anything is typed into them
-        for pane, command, enter, label in launches:
-            # A pane closed since is no reason not to start the rest.
-            if tmux("send-keys", "-t", pane, "-l", command, check=False).returncode != 0:
-                say(f"couldn't type into {label}")
+    def bring(sessions: list[dict], again: bool = False) -> None:
+        """Makes these tmux sessions, and starts Claude Code in their panes."""
+        if again and sessions:
+            # One started by hand while this waited is left as it is.
+            now = tmux.sessions()
+            skipped.extend(f"{s['name']}: a tmux session of that name is running" for s in sessions if s["name"] in now)
+            sessions = [s for s in sessions if s["name"] not in now]
+        live = {record.get("sessionId") for record in _running(places.registry).values()}
+        launches = []       # (pane id, command, whether to press Enter, label)
+        for s in sessions:
+            try:
+                launches += _make(tmux, s, places, claude, live, say)
+            except Exception as error:      # one that can't be made is no reason to leave the others
+                skipped.append(f"{s['name']}: couldn't be made ({error})")
                 continue
-            if enter:
-                tmux("send-keys", "-t", pane, "Enter", check=False)
-                started.append(label)
-                time.sleep(stagger)
-            say(("started " if enter else "typed ") + label)
+            made.append(s["name"])
+            say(f"made {s['name']}: {len(s['windows'])} window(s), {sum(len(w['panes']) for w in s['windows'])} pane(s)")
+        if launches:
+            time.sleep(settle)          # the new shells start before anything is typed into them
+            for pane, command, enter, label in launches:
+                # A pane closed since is no reason not to start the rest.
+                if tmux("send-keys", "-t", pane, "-l", command, check=False).returncode != 0:
+                    say(f"couldn't type into {label}")
+                    continue
+                if enter:
+                    tmux("send-keys", "-t", pane, "Enter", check=False)
+                    started.append(label)
+                    time.sleep(stagger)
+                say(("started " if enter else "typed ") + label)
+
+    # A tmux session with a Claude Code session whose folder isn't there yet (a disk still
+    # being mounted) waits for it. The rest are made at once, those with one whose folder is
+    # gone for good among them.
+    deadline, told = time.monotonic() + wait, False
+    late = [s for s in todo if awaited(s)]
+    waiting = {s["name"] for s in late}
+    bring([s for s in todo if s["name"] not in waiting])
+    while late:
+        here = [s for s in late if not awaited(s)]
+        if here:
+            names = {s["name"] for s in here}
+            late = [s for s in late if s["name"] not in names]
+            bring(here, again=True)
+            continue
+        if time.monotonic() >= deadline:
+            break
+        if not told:
+            gone = sorted(set().union(*(awaited(s) for s in late)))
+            if gone:
+                say(f"waiting up to {int(wait)} s for {len(gone)} folder(s): {', '.join(gone[:3])}")
+                told = True
+        time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+    # One whose folder never came is made all the same, that session typed and not started.
+    bring(late, again=True)
     if made:
         try:
             store.home.mkdir(parents=True, exist_ok=True)
@@ -567,51 +657,48 @@ def restore(store: Snapshots, tmux: Tmux, path: Path | None = None, places: Plac
     return Restored(made, started, skipped)
 
 
-def _make(tmux: Tmux, s: dict, places: Places, claude: str, live: set) -> list[tuple[str, str, bool, str]]:
+def _make(tmux: Tmux, s: dict, places: Places, claude: str, live: set,
+          say: Callable[[str], None] = lambda _: None) -> list[tuple[str, str, bool, str]]:
     """Makes one tmux session as a snapshot has it, and returns what to type into its panes.
     One that can't be finished isn't left half-made, so a later restore can make it whole."""
     windows = [w for w in s["windows"] if w["panes"]]       # one caught as it closed has none
     if not windows:
         raise RuntimeError("no window with a pane in it")
-    launches, chosen, fmt = [], None, "#{window_id}\t#{pane_id}"
-
-    def folders_of(w: dict) -> list[str]:
-        return [p["claude"]["cwd"] if "claude" in p else p["cwd"] for p in w["panes"]]
+    planned = [[_plan(p, places, claude, live) for p in w["panes"]] for w in windows]
+    launches, notes, chosen, fmt = [], [], None, "#{window_id}\t#{pane_id}"
 
     w = windows[0]
     out = tmux("new-session", "-d", "-P", "-F", fmt, "-s", s["name"], "-n", w["name"],
-               "-c", folders_of(w)[0], "-x", w["width"], "-y", w["height"]).stdout
+               "-c", planned[0][0].folder, "-x", w["width"], "-y", w["height"]).stdout
     try:
-        for n, w in enumerate(windows):
-            folders = folders_of(w)
+        for n, (w, plans) in enumerate(zip(windows, planned)):
             if n == 0:
                 window, first = out.strip().split("\t")
                 if tmux("display", "-p", "-t", window, "#{window_index}").stdout.strip() != str(w["index"]):
                     tmux("move-window", "-s", window, "-t", f"={s['name']}:{w['index']}")
             else:
                 out = tmux("new-window", "-d", "-P", "-F", fmt, "-t", f"={s['name']}:{w['index']}",
-                           "-n", w["name"], "-c", folders[0]).stdout
+                           "-n", w["name"], "-c", plans[0].folder).stdout
                 window, first = out.strip().split("\t")
             tmux("resize-window", "-t", window, "-x", w["width"], "-y", w["height"], check=False)
             made, last = [first], first
-            for folder in folders[1:]:
+            for plan in plans[1:]:
                 # Split the last pane each time, so the panes come in the order they were.
-                last = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", last, "-c", folder).stdout.strip()
+                last = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", last, "-c", plan.folder).stdout.strip()
                 made.append(last)
                 tmux("select-layout", "-t", window, "tiled", check=False)
             tmux("select-layout", "-t", window, w["layout"], check=False)
             tmux("set-option", "-w", "-u", "-t", window, "window-size", check=False)
             if w.get("auto_rename"):
                 tmux("set-option", "-w", "-t", window, "automatic-rename", "on", check=False)
-            for p, pane in zip(w["panes"], made):
+            for p, plan, pane in zip(w["panes"], plans, made):
                 if p.get("active"):
                     tmux("select-pane", "-t", pane, check=False)
-                command, note = launch(p, places, claude)
-                if command:
-                    # A session already running elsewhere is typed but not started: two of one is trouble.
-                    twice = not p["claude"].get("job_id") and p["claude"].get("session_id") in live
-                    label = f"{s['name']}:{w['index']}.{p['index']}  {note}".rstrip()
-                    launches.append((pane, command, not twice, label + ("  (running elsewhere: not started)" if twice else "")))
+                label = f"{s['name']}:{w['index']}.{p['index']}  {plan.label}".rstrip()
+                if plan.command:
+                    launches.append((pane, plan.command, plan.start, label))
+                elif plan.label:
+                    notes.append(label)
             if w.get("active"):
                 chosen = window
         if chosen:
@@ -619,6 +706,8 @@ def _make(tmux: Tmux, s: dict, places: Places, claude: str, live: set) -> list[t
     except Exception:
         tmux("kill-session", "-t", f"={s['name']}", check=False)
         raise
+    for note in notes:
+        say(note)
     return launches
 
 
