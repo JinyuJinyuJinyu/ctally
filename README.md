@@ -290,9 +290,10 @@ background job again (`claude attach <job>`). Their rows turn up in CTally as th
   once. If the folder never comes, or has been deleted, the tmux session is made all the same, with
   `cd <folder> && claude --resume <id>` typed into that pane and not started: press Return once the folder is
   back. A plain shell whose folder is gone opens in the nearest one above it.
-- **Not yet, or gone?** A folder may yet come when the nearest folder above it that's there is empty (where
-  a disk goes, before the disk is on it), or is where disks are put (`/Volumes`, `/media`, `/run/media`,
-  `/mnt`) or a place there with no disk on it. Otherwise it's taken as deleted, and isn't waited for.
+- **Not yet, or gone?** A folder may yet come when it's on one of the computer's own disks that isn't
+  mounted (as `/etc/fstab` lists them), or under where disks are put (`/Volumes`, `/media`, `/run/media`,
+  `/mnt`) with no disk mounted on the way down to it. Otherwise it's taken as deleted, and isn't waited for.
+  Only what's mounted is asked: no folder of yours is looked into for this.
 - **The snapshot it restores** is the newest from before the computer started (the ones taken while it came
   up are of nothing much) with a tmux session that isn't running now. Once you've restored, it's the newest.
 - **Kept for three days** (or as many as you set), and a snapshot the same as the last isn't saved again. The

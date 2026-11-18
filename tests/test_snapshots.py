@@ -315,12 +315,13 @@ def test_one_that_cannot_be_made_does_not_stop_the_rest_and_is_not_left_half_mad
     assert not again.restored_this_boot()
 
 
-def test_only_the_tmux_session_whose_claude_code_needs_a_folder_waits_for_it(private_tmux, places, tmp_path):
+def test_only_the_tmux_session_whose_claude_code_needs_a_folder_waits_for_it(private_tmux, places, tmp_path,
+                                                                             monkeypatch):
     private_tmux.new_session("running")
     record, fake = fake_claude(tmp_path)
-    here, late = tmp_path / "here", tmp_path / "disk" / "project"
+    monkeypatch.setattr(snapshots, "MOUNTS", (str(tmp_path / "mnt"),))      # where disks are put
+    here, late = tmp_path / "here", tmp_path / "mnt" / "disk" / "project"
     here.mkdir()
-    late.parent.mkdir()                 # where the disk goes: there, and empty until it's mounted
     transcript(places, "s1")
     transcript(places, "s2")
     store = Snapshots(tmp_path / "state")
@@ -353,26 +354,92 @@ def test_only_the_tmux_session_whose_claude_code_needs_a_folder_waits_for_it(pri
 def test_a_folder_may_yet_come_or_is_gone_for_good(tmp_path, monkeypatch):
     from ctally.snapshots import _may_come
     (tmp_path / "projects" / "kept").mkdir(parents=True)
-    (tmp_path / "disk").mkdir()
-    assert not _may_come(str(tmp_path / "projects" / "removed"))        # what was beside it is still there
-    assert not _may_come(str(tmp_path / "projects" / "removed" / "deeper"))
-    assert _may_come(str(tmp_path / "disk" / "project"))                # an empty place: a disk not on it yet
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(snapshots, "FSTAB", tmp_path / "no-fstab")
+    # Anywhere else than where disks go, a folder that isn't there was deleted, whatever is
+    # or isn't left beside it.
+    assert not _may_come(str(tmp_path / "projects" / "removed"))
+    assert not _may_come(str(tmp_path / "empty" / "removed" / "deeper"))
+    assert not _may_come("/ctally-no-such-top-folder/project")
+
+    # Where disks are put: with no disk on the way down to it, one may yet be put there.
     assert _may_come("/Volumes/ctally-no-such-disk/project") and _may_come("/mnt/ctally-no-such-disk/project")
     assert _may_come("/media/someone/ctally-no-such-disk/project")
-    assert _may_come("/ctally-no-such-top-folder/project")              # nothing of it at all
-
-    # Where disks are put: a place there with no disk on it may get one, whatever was left in
-    # it; with its disk on it, a folder missing from it was deleted.
+    assert _may_come("/run/media/someone/ctally-no-such-disk/project")     # though /run/media isn't there yet
     volumes = tmp_path / "Volumes"
     (volumes / "data" / "kept").mkdir(parents=True)
-    (volumes / "someone").mkdir()
+    (volumes / "someone" / "disk" / "kept").mkdir(parents=True)
     monkeypatch.setattr(snapshots, "MOUNTS", (str(volumes),))
     assert _may_come(str(volumes / "other" / "project"))
-    assert _may_come(str(volumes / "data" / "project"))
+    assert _may_come(str(volumes / "data" / "project"))                 # a place left there, no disk on it
     assert _may_come(str(volumes / "someone" / "disk" / "project"))
-    monkeypatch.setattr(snapshots.os.path, "ismount", lambda path: Path(path) == volumes / "data")
+    assert not _may_come(str(volumes))
+    # With its disk there, a folder missing from it was deleted.
+    mounted = {str(volumes / "data"), str(volumes / "someone" / "disk")}
+    monkeypatch.setattr(snapshots.os.path, "ismount", lambda path: str(path) in mounted)
     assert not _may_come(str(volumes / "data" / "project"))
-    assert _may_come(str(volumes / "someone" / "disk" / "project"))
+    assert not _may_come(str(volumes / "someone" / "disk" / "project" / "deeper"))
+    assert _may_come(str(volumes / "someone" / "other" / "project"))
+
+
+def test_a_disk_of_the_computer_s_own_is_told_from_its_fstab(tmp_path, monkeypatch):
+    from ctally.snapshots import _awaited, _listed_disks, _may_come
+    data, spaced = tmp_path / "data", tmp_path / "my disk"
+    data.mkdir()                                        # where it goes: there, and empty until it's mounted
+    fstab = tmp_path / "fstab"
+    fstab.write_text(f"# /etc/fstab\nUUID=1 / ext4 errors=remount-ro 0 1\nUUID=2 {data}/ ext4 defaults 0 2\n"
+                     + f"/dev/sdb1 {spaced} ext4 defaults 0 2\n".replace("my disk", "my\\040disk")
+                     + f"UUID=3 none swap sw 0 0\n# UUID=4 {tmp_path}/off ext4 defaults 0 2\n")
+    monkeypatch.setattr(snapshots, "FSTAB", fstab)
+    assert _listed_disks() == [str(data), str(spaced)]
+    assert _may_come(str(data / "project")) and _may_come(str(spaced / "project"))
+    assert not _may_come(str(tmp_path / "off" / "project")) and not _may_come(str(tmp_path / "database" / "x"))
+    # The place itself is there before the disk is, and isn't the folder meant.
+    assert _awaited(str(data)) and not _awaited(str(tmp_path))
+    monkeypatch.setattr(snapshots.os.path, "ismount", lambda path: str(path) == str(data))
+    assert not _may_come(str(data / "project")) and not _awaited(str(data))
+    monkeypatch.setattr(snapshots, "FSTAB", tmp_path / "no-fstab")
+    assert _listed_disks() == []
+
+
+def test_a_session_is_not_started_where_its_disk_goes_before_the_disk_is_there(private_tmux, places, tmp_path,
+                                                                               monkeypatch):
+    """The place for a disk is a folder too, an empty one, until the disk is on it."""
+    private_tmux.new_session("running")
+    record, fake = fake_claude(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir()
+    fstab = tmp_path / "fstab"
+    fstab.write_text(f"UUID=2 {data} ext4 defaults 0 2\n")
+    monkeypatch.setattr(snapshots, "FSTAB", fstab)
+    transcript(places, "s1")
+    store = Snapshots(tmp_path / "state")
+    store.save([{"name": "cb", "windows": [window([pane(str(data), {"session_id": "s1", "name": "cb1",
+                                                                    "cwd": str(data), "args": []})])]}], 1000)
+    said = []
+    assert restore(store, Tmux(private_tmux.name), places=places, dry_run=True, say=said.append).made == ["cb"]
+    assert said[1:] == [f"cb:0.0  claude --resume s1  cb1  (no disk on {data} yet: waited for)"]
+    said.clear()
+    done = restore(store, Tmux(private_tmux.name), places=places, wait=3, claude=str(fake), settle=0.5, stagger=0,
+                   say=said.append)
+    assert done.made == ["cb"] and done.started == []
+    assert f"waiting up to 3 s for 1 folder(s): {data}" in said
+    assert f"typed cb:0.0  cb1  (no disk on {data} yet: not started)" in said
+    time.sleep(0.5)
+    assert not record.exists()
+
+
+def test_a_folder_that_cannot_be_looked_into_is_no_trouble(tmp_path):
+    """Under a folder that isn't mine to enter, a path can't be told to be there or not."""
+    from ctally.snapshots import _may_come, _nearest
+    locked = tmp_path / "locked"
+    (locked / "inner").mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        assert _nearest(str(locked / "inner" / "gone")) in (str(locked), str(locked / "inner"))
+        assert not _may_come(str(locked / "inner" / "gone"))
+    finally:
+        locked.chmod(0o700)
 
 
 def test_a_deleted_folder_is_not_waited_for(private_tmux, places, tmp_path):
@@ -393,13 +460,15 @@ def test_a_deleted_folder_is_not_waited_for(private_tmux, places, tmp_path):
     assert not record.exists()
 
 
-def test_a_folder_that_never_comes_leaves_its_session_typed_and_not_started(private_tmux, places, tmp_path):
+def test_a_folder_that_never_comes_leaves_its_session_typed_and_not_started(private_tmux, places, tmp_path,
+                                                                            monkeypatch):
     """Never Claude Code in the wrong folder, and no tmux session left out for one folder's sake."""
     private_tmux.new_session("running")
     record, fake = fake_claude(tmp_path)
-    here, never = tmp_path / "disk" / "here", tmp_path / "other-disk" / "project"
-    here.mkdir(parents=True)
-    never.parent.mkdir()                # where a disk goes that never gets there
+    monkeypatch.setattr(snapshots, "MOUNTS", (str(tmp_path / "mnt"),))      # where disks are put
+    here, never = tmp_path / "here", tmp_path / "mnt" / "other" / "project"
+    here.mkdir()
+    never.parent.mkdir(parents=True)    # where a disk goes that never gets there
     transcript(places, "s1")
     transcript(places, "s2")
     job(places, "f2b0a87f", "s7", "cb7", str(never))
@@ -427,10 +496,11 @@ def test_a_folder_that_never_comes_leaves_its_session_typed_and_not_started(priv
     assert store.restored_this_boot()
 
 
-def test_a_session_started_by_hand_while_a_folder_was_waited_for_is_left_alone(private_tmux, places, tmp_path):
+def test_a_session_started_by_hand_while_a_folder_was_waited_for_is_left_alone(private_tmux, places, tmp_path,
+                                                                               monkeypatch):
     private_tmux.new_session("running")
-    late = tmp_path / "disk" / "late"
-    late.parent.mkdir()
+    monkeypatch.setattr(snapshots, "MOUNTS", (str(tmp_path / "mnt"),))
+    late = tmp_path / "mnt" / "disk" / "late"
     transcript(places, "s1")
     transcript(places, "s2")
     store = Snapshots(tmp_path / "state")
@@ -441,13 +511,13 @@ def test_a_session_started_by_hand_while_a_folder_was_waited_for_is_left_alone(p
     def meanwhile() -> None:
         time.sleep(0.5)
         private_tmux.new_session("mine")
-        late.mkdir()
+        late.mkdir(parents=True)
     threading.Thread(target=meanwhile, daemon=True).start()
     done = restore(store, Tmux(private_tmux.name), places=places, wait=20, claude="true", settle=0.2, stagger=0)
     assert done.made == ["slow"] and done.skipped == ["mine: a tmux session of that name is running"]
 
 
-def test_a_dry_run_changes_nothing(private_tmux, places, tmp_path):
+def test_a_dry_run_changes_nothing(private_tmux, places, tmp_path, monkeypatch):
     private_tmux.new_session("running")
     store = Snapshots(tmp_path / "state")
     store.save([{"name": "cb", "windows": [window([pane(str(tmp_path))])]}], 1000)
@@ -458,8 +528,8 @@ def test_a_dry_run_changes_nothing(private_tmux, places, tmp_path):
     assert not store.restored_this_boot()
     # It says what would wait for its folder, and what would open somewhere else.
     transcript(places, "s1")
-    gone, disk = tmp_path / "gone", tmp_path / "disk"
-    disk.mkdir()
+    gone, disk = tmp_path / "gone", tmp_path / "mnt" / "disk"
+    monkeypatch.setattr(snapshots, "MOUNTS", (str(tmp_path / "mnt"),))
     other = Snapshots(tmp_path / "other")
     other.save([{"name": "cb", "windows": [window([
         pane(str(disk / "late"), {"session_id": "s1", "name": "cb1", "cwd": str(disk / "late"), "args": []}),

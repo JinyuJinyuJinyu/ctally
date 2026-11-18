@@ -13,8 +13,8 @@ had (`claude --resume <id> ...`), or attaches to its background job again (`clau
 <job>`). A Claude Code session is never started in the wrong folder: one whose folder isn't
 there yet, on a disk still being mounted, is waited for a few minutes by its tmux session (the
 others are made at once), and if it never comes, or has been deleted, the session is typed
-into its pane and not started. A plain shell whose folder is gone opens in the nearest one
-above it. Until something
+into its pane and not started. Which of the two is told by what's mounted: see _may_come(). A
+plain shell whose folder is gone opens in the nearest one above it. Until something
 has been restored since the computer started, the snapshot to restore is the newest from
 before then: the snapshots taken while it came up are of nothing much.
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -44,6 +45,7 @@ MINUTES = (1, 60)           # what the time between them can be set to, in minut
 DAYS = (1, 30)              # and how long they're kept, in days
 WAIT = 300                  # how long a restore waits for a folder a Claude Code session needs
 MOUNTS = ("/Volumes", "/media", "/run/media", "/mnt")       # where disks are put, on macOS and Linux
+FSTAB = Path("/etc/fstab")  # and where each of the computer's own goes
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
@@ -466,15 +468,22 @@ class Snapshots:
 
 def launch(pane: dict, places: Places = Places(), claude: str = "claude") -> tuple[str | None, str]:
     """What to type into a restored pane, and a word on what it is: None for a plain shell."""
+    return _launch(pane, places, claude)[:2]
+
+
+def _launch(pane: dict, places: Places, claude: str) -> tuple[str | None, str, bool]:
+    """launch(), and whether what it starts has to be in its own folder: a session is resumed
+    where it was, while a background job can be looked at from anywhere."""
     c = pane.get("claude")
     if not c:
-        return None, ""
+        return None, "", False
     if c.get("job_id"):
         if (places.jobs / c["job_id"]).is_dir():
-            return f"{claude} attach {shlex.quote(c['job_id'])}", f"background job {c.get('job_name') or ''}".strip()
+            return (f"{claude} attach {shlex.quote(c['job_id'])}", f"background job {c.get('job_name') or ''}".strip(),
+                    False)
         sid = c.get("job_session_id") or c.get("session_id")
         if not sid:                 # a job it can't place: let `claude attach` make what it can of it
-            return f"{claude} attach {shlex.quote(c['job_id'])}", "background job"
+            return f"{claude} attach {shlex.quote(c['job_id'])}", "background job", False
     else:
         sid = c.get("session_id")
     parts, note = [claude], c.get("name") or ""
@@ -485,7 +494,7 @@ def launch(pane: dict, places: Places = Places(), claude: str = "claude") -> tup
         if c.get("name") and c.get("name_source") == "user":
             parts += ["-n", shlex.quote(c["name"])]     # a resumed one has its name in its transcript
     parts += [shlex.quote(x) for x in c.get("args", [])]
-    return " ".join(parts), note
+    return " ".join(parts), note, True
 
 
 class _Pane(NamedTuple):
@@ -493,61 +502,97 @@ class _Pane(NamedTuple):
     folder: str             # where it opens: its own folder, or the nearest above it that's there
     command: str | None     # what to type into it: None for a plain shell
     start: bool             # whether to press Return after it
-    label: str              # what it is, and why it isn't started or where it opens instead
-    awaits: str | None      # its folder, if Claude Code can't start without it and it may yet come
+    note: str               # a word on what it is: "cb5", "background job cb7"
+    why: str                # why it isn't started, or where it opens instead
+    needs: str | None       # its folder, if Claude Code can't start anywhere else
+    plain: str | None       # what's typed when that folder is there
+
+    @property
+    def label(self) -> str:
+        return "  ".join(part for part in (self.note, self.why) if part)
 
 
 def _nearest(folder: str) -> str:
     """A folder, or the nearest above it that's there, home rather than the top of the disk:
     where a pane opens when its own is gone."""
-    path = Path(folder)
-    if path.is_dir():
+    if os.path.isdir(folder):
         return folder
-    for parent in path.parents:
-        if parent.is_dir():
-            return str(parent) if parent != Path(parent.anchor) else str(Path.home())
+    parent = os.path.dirname(os.path.normpath(folder))
+    while parent and parent != os.path.dirname(parent):
+        if os.path.isdir(parent):
+            return parent
+        parent = os.path.dirname(parent)
     return str(Path.home())
+
+
+def _listed_disks() -> list[str]:
+    """Where /etc/fstab says the computer's disks go. One still being checked or mounted as
+    the computer comes up isn't on its place yet."""
+    try:
+        lines = FSTAB.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    places = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) > 1 and not parts[0].startswith("#") and parts[1].startswith("/"):
+            # A space in a name is written \040, and so on.
+            place = os.path.normpath(re.sub(r"\\([0-7]{3})", lambda found: chr(int(found.group(1), 8)), parts[1]))
+            if place != "/":
+                places.append(place)
+    return places
+
+
+def _disk_not_on(folder: str) -> bool:
+    """Whether a folder is where one of the computer's disks goes, or on it, and the disk
+    isn't there yet. What's there meanwhile, an empty folder as a rule, isn't the folder meant."""
+    path = os.path.normpath(folder)
+    return any((path == place or path.startswith(place + "/")) and not os.path.ismount(place)
+               for place in _listed_disks())
 
 
 def _may_come(folder: str) -> bool:
     """Whether a folder that isn't there may yet be, on a disk still being mounted, rather than
-    deleted. Where a disk goes is an empty folder until the disk is on it, or isn't there at
-    all under where disks are put; a deleted folder leaves behind what was beside it."""
-    for parent in Path(folder).parents:
-        if not parent.is_dir():
-            continue
-        if parent == Path(parent.anchor) or str(parent) in MOUNTS:
+    deleted: one on a disk of the computer's that isn't on its place, or under where disks are
+    put (/Volumes, /media, /mnt) with no disk on the way down to it. No folder is looked into
+    for this: only what's mounted is asked."""
+    path = os.path.normpath(folder)
+    if _disk_not_on(path):
+        return True
+    for root in MOUNTS:
+        if path.startswith(root + "/"):
+            parent = os.path.dirname(path)
+            while len(parent) > len(root):
+                if os.path.ismount(parent):
+                    return False        # its disk is there, and the folder isn't on it
+                parent = os.path.dirname(parent)
             return True
-        # Under where disks are put, and no disk on it: a place for one (/mnt/data), or for
-        # one user's (/media/<user>). With a disk on it, the folder was deleted from the disk.
-        if str(parent.parent) in MOUNTS and not os.path.ismount(parent):
-            return True
-        try:
-            return not any(parent.iterdir())
-        except OSError:
-            return True                 # can't look, so can't say it's gone
-    return True
+    return False
+
+
+def _awaited(folder: str) -> bool:
+    """Whether a folder a Claude Code session needs isn't ready for it, and may yet be."""
+    return _disk_not_on(folder) if os.path.isdir(folder) else _may_come(folder)
 
 
 def _plan(pane: dict, places: Places, claude: str, live: frozenset | set = frozenset()) -> _Pane:
     """Never Claude Code in the wrong folder: a session is resumed where it was, so with its
-    folder gone it's typed into its pane, after a cd there, and not started; one that may yet
-    come is worth waiting for first. A plain shell can open anywhere, and so can a look at a
-    background job."""
+    folder gone, or its disk not on it yet, it's typed into its pane, after a cd there, and
+    not started; one that may yet come is worth waiting for first. A plain shell can open
+    anywhere, and so can a look at a background job."""
     wanted = pane["claude"]["cwd"] if "claude" in pane else pane["cwd"]
     there = os.path.isdir(wanted)
     folder = wanted if there else _nearest(wanted)
-    command, note = launch(pane, places, claude)
+    command, note, needs = _launch(pane, places, claude)
     if command is None:
-        return _Pane(folder, None, False, "" if there else f"(no folder {wanted}: opens in {folder})", None)
-    start, why, awaits = True, "", None
-    if not there and not command.startswith(f"{claude} attach "):
-        command, start = f"cd {shlex.quote(wanted)} && {command}", False
-        awaits, why = wanted if _may_come(wanted) else None, f"(no folder {wanted}: not started)"
-    elif not pane["claude"].get("job_id") and pane["claude"].get("session_id") in live:
+        return _Pane(folder, None, False, "", "" if there else f"(no folder {wanted}: opens in {folder})", None, None)
+    if needs and not (there and not _disk_not_on(wanted)):
+        why = f"(no folder {wanted}: not started)" if not there else f"(no disk on {wanted} yet: not started)"
+        return _Pane(folder, f"cd {shlex.quote(wanted)} && {command}", False, note, why, wanted, command)
+    if not pane["claude"].get("job_id") and pane["claude"].get("session_id") in live:
         # A session already running elsewhere is typed but not started: two of one is trouble.
-        start, why = False, "(running elsewhere: not started)"
-    return _Pane(folder, command, start, "  ".join(part for part in (note, why) if part), awaits)
+        return _Pane(folder, command, False, note, "(running elsewhere: not started)", wanted if needs else None, command)
+    return _Pane(folder, command, True, note, "", wanted if needs else None, command)
 
 
 class Restored(NamedTuple):
@@ -571,26 +616,32 @@ def restore(store: Snapshots, tmux: Tmux, path: Path | None = None, places: Plac
                if s["name"] in running]
     todo = [s for s in snapshot["sessions"] if s["name"] not in running]
 
-    def awaited(s: dict) -> set[str]:
-        """The folders a tmux session's Claude Code sessions need, that aren't there and may yet be."""
-        try:
-            plans = [_plan(p, places, claude) for w in s["windows"] for p in w["panes"]]
-        except Exception:               # not as a snapshot should be: making it says what's wrong
-            return set()
-        return {plan.awaits for plan in plans if plan.awaits}
-
     if dry_run:
         for s in todo:
             for w in s["windows"]:
                 for p in w["panes"]:
                     plan = _plan(p, places, claude)
-                    command, note = launch(p, places, claude)
-                    # One waited for is started as ever if it comes.
-                    shown, why = (command, f"(no folder {plan.awaits} yet: waited for)") if plan.awaits \
-                        else (plan.command, plan.label[len(note):].strip())
+                    shown, why = plan.command, plan.why
+                    if plan.needs and not plan.start and _awaited(plan.needs):
+                        # One waited for is started as ever if it comes.
+                        what = "disk on" if os.path.isdir(plan.needs) else "folder"
+                        shown, why = plan.plain, f"(no {what} {plan.needs} yet: waited for)"
                     say("  ".join(part for part in (f"{s['name']}:{w['index']}.{p['index']}", shown or "shell",
-                                                    note, why) if part))
+                                                    plan.note, why) if part))
         return Restored([s["name"] for s in todo], [], skipped)
+
+    # The folders each tmux session's Claude Code sessions can't start without, worked out once.
+    needed: dict[str, set[str]] = {}
+    for s in todo:
+        try:
+            needed[s["name"]] = {plan.needs for w in s["windows"] for p in w["panes"]
+                                 if (plan := _plan(p, places, claude)).needs}
+        except Exception:               # not as a snapshot should be: making it says what's wrong
+            needed[s["name"]] = set()
+
+    def awaited(s: dict) -> set[str]:
+        """Those of them that aren't ready, and may yet be."""
+        return {folder for folder in needed[s["name"]] if _awaited(folder)}
 
     made, started = [], []
 
@@ -601,6 +652,8 @@ def restore(store: Snapshots, tmux: Tmux, path: Path | None = None, places: Plac
             now = tmux.sessions()
             skipped.extend(f"{s['name']}: a tmux session of that name is running" for s in sessions if s["name"] in now)
             sessions = [s for s in sessions if s["name"] not in now]
+        if not sessions:
+            return
         live = {record.get("sessionId") for record in _running(places.registry).values()}
         launches = []       # (pane id, command, whether to press Enter, label)
         for s in sessions:
