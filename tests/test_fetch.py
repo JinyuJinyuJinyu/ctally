@@ -251,6 +251,57 @@ def test_turned_away_it_waits_for_a_new_sign_in_and_told_to_wait_it_waits(own_us
     assert "run out" in fetcher.problem
 
 
+def test_after_the_account_changes_it_waits_for_the_sign_in_to_follow(tmp_path):
+    """A tool that swaps accounts changes the name in ~/.claude.json and the sign-in one after
+    the other: asked in between, the first account's numbers would be kept as the second's."""
+    asks = Asks(utilization(1, 1), utilization(2, 2))
+    fetcher = Fetcher(asks.sign_in, asks.ask, log=lambda _: None)
+    fetcher.poll("account-a", tmp_path / "a", None, None)       # the first look: nothing to wait for
+    fetcher._asking.result(timeout=5)
+    assert asks.tokens == ["token-1"]
+    fetcher._not_before = 0.0                                   # five minutes on
+    fetcher.poll("account-b", tmp_path / "b", None, None)
+    assert asks.tokens == ["token-1"] and not (tmp_path / "b").exists()
+    now = time.time()
+    assert not fetcher.due(None, None, now + fetch.SETTLE - 2) and fetcher.due(None, None, now + fetch.SETTLE + 1)
+    fetcher._not_before = 0.0                                   # ten seconds on
+    fetcher.poll("account-b", tmp_path / "b", None, None)
+    fetcher._asking.result(timeout=5)
+    assert asks.tokens == ["token-1", "token-1"] and (tmp_path / "b").exists()
+
+
+def test_an_answer_on_its_way_while_the_account_changed_is_not_kept(tmp_path):
+    asks = Asks(utilization(1, 1), utilization(2, 2))
+    said = []
+    fetcher = Fetcher(asks.sign_in, asks.ask, log=said.append)
+    assert not fetcher.once("account-a", tmp_path / "a", lambda who: False)
+    assert not (tmp_path / "a").exists() and said == ["the account signed in changed while asking"]
+    assert not fetcher.due(None, None, time.time() + fetch.SETTLE - 2)
+    assert fetcher.once("account-a", tmp_path / "a", lambda who: who == "account-a") and (tmp_path / "a").exists()
+
+    signed_in = tmp_path / ".claude.json"
+    assert usage.still_signed_in(signed_in, "account-a")                # nothing there to say it isn't
+    signed_in.write_text(json.dumps({"oauthAccount": {"accountUuid": "account-a"}}))
+    assert usage.still_signed_in(signed_in, "account-a") and not usage.still_signed_in(signed_in, "account-b")
+    signed_in.write_text('{"oauthAccount": {"accountU')                 # caught halfway through being written
+    assert usage.still_signed_in(signed_in, "account-b")
+
+
+def test_an_answer_with_no_limits_in_it_is_an_answer_all_the_same(tmp_path):
+    """A plan without them leaves nothing to read, which isn't a reason to ask every five minutes."""
+    asks = Asks({}, {})
+    fetcher = Fetcher(asks.sign_in, asks.ask, log=lambda _: None)
+    fetcher.poll(ACCOUNT, tmp_path / "f", None, None)
+    fetcher._asking.result(timeout=5)
+    fetcher._not_before = 0.0
+    fetcher._heard[ACCOUNT] -= EVERY + 60                       # six minutes on, and no replies
+    fetcher.poll(ACCOUNT, tmp_path / "f", None, None)
+    assert asks.tokens == ["token-1"]
+    fetcher.poll(ACCOUNT, tmp_path / "f", None, time.time())    # Claude Code has replied since
+    fetcher._asking.result(timeout=5)
+    assert asks.tokens == ["token-1", "token-1"]
+
+
 def test_the_reader_asks_in_the_background_and_shows_the_answer(own_usage_and_prefs, monkeypatch):
     home = own_usage_and_prefs
     claude_json(home)
@@ -284,10 +335,18 @@ def test_ctally_usage_asks_first_unless_switched_off(own_usage_and_prefs, monkey
     assert cli.main(["usage"]) == 0
     out, err = capsys.readouterr()
     assert "88%" in out and "couldn't ask Anthropic for the latest (asked too often)" in err
+    # Told to wait, it does, run again or not: a command doesn't remember, so a file does.
+    target = usage.fetched_file(usage.STATUS_LINE, ACCOUNT)
+    assert cli.main(["usage"]) == 0
+    out, err = capsys.readouterr()
+    assert "88%" in out and "(asked too often)" in err and asks.tokens == ["token-1"]
+    until, why = fetch.wait_file(target).read_text().split(None, 1)
+    assert fetch.SLOW_DOWN - 5 < int(until) - time.time() <= fetch.SLOW_DOWN + 1 and why == "asked too often\n"
+    fetch.note_wait(target, time.time() - 1, "asked too often")         # a quarter of an hour on
     assert cli.main(["usage"]) == 0
     out, err = capsys.readouterr()
     assert "Current week (Fable)       ████░░░░░░  42%" in out and err == ""
-    assert asks.tokens == ["token-1", "token-1"]
+    assert asks.tokens == ["token-1", "token-1"] and not fetch.wait_file(target).exists()
     (usage.fetched_file(usage.STATUS_LINE, ACCOUNT)).unlink()
     Prefs()["exact_usage"] = False
     assert cli.main(["usage"]) == 0

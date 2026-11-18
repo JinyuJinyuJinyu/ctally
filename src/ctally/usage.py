@@ -122,16 +122,26 @@ def refresh(path: Path | None = None, live: Path | None = None,
             fetcher: fetch.Fetcher | None = None) -> str | None:
     """`ctally usage`: asks Anthropic first, if the newest numbers are a few minutes old. Why
     it couldn't, if it couldn't."""
-    config = _load(path or CLAUDE_JSON)
+    source = path or CLAUDE_JSON
+    config = _load(source)
     who = account(config)
     target = fetched_file(live or STATUS_LINE, who)
     if who is None or target is None:
         return None
+    now = time.time()
     have = newest(parse(config), read_fetched(target))
-    if have is not None and time.time() - have.fetched_at < fetch.EVERY:
+    if have is not None and now - have.fetched_at < fetch.EVERY:
         return None
+    waiting = fetch.told_to_wait(target, now)
+    if waiting:
+        return waiting
     fetcher = fetcher or fetch.Fetcher(log=lambda _: None)
-    return None if fetcher.once(who, target) else fetcher.problem
+    if fetcher.once(who, target, lambda who: still_signed_in(source, who)):
+        fetch.wait_file(target).unlink(missing_ok=True)
+        return None
+    if fetcher.wait_until > now:
+        fetch.note_wait(target, fetcher.wait_until, fetcher.problem or "asked too often")
+    return fetcher.problem
 
 
 def _load(path: Path):
@@ -139,6 +149,13 @@ def _load(path: Path):
         return json.loads(path.read_text())
     except (OSError, ValueError):
         return None
+
+
+def still_signed_in(path: Path, who: str) -> bool:
+    """Whether an account is still the one ~/.claude.json names. A file caught halfway through
+    being written doesn't say it isn't."""
+    config = _load(path)
+    return config is None or account(config) == who
 
 
 def account(config) -> str | None:
@@ -469,7 +486,8 @@ class UsageReader:
             cached = newest(cached, self._fetched.poll() if self._fetched else None)
             if self.fetcher is not None:
                 self.fetcher.poll(who, asked, cached.fetched_at if cached else None,
-                                  latest.fetched_at if latest else None)
+                                  latest.fetched_at if latest else None,
+                                  lambda who: still_signed_in(self._cache.path, who))
             self._usage = with_hit(merge(in_force(cached, latest, at), latest), read_limit(self._hits), at, who)
         return self._usage
 
