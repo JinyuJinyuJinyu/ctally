@@ -191,19 +191,46 @@ def test_asks_when_the_numbers_are_old_and_claude_code_has_replied_since():
     assert fetcher.due(now - QUIET_EVERY - 5, None, now)                    # an hour on, ask anyway
 
 
-def test_a_reset_is_told_by_less_used_before_the_window_ends():
-    """A window only fills up until it ends: less used in it than the last answer said, by a
-    reply since, means the limits were reset."""
+def test_a_reset_is_told_by_the_week():
+    """A week only fills up until it ends: less of it used than the last answer said, by a
+    reply since, or the week ending later, means the weeks were reset."""
     from ctally.usage import Limit, Usage, reset_since
 
     def week(percent, resets=2_000_000.0):
         return Limit(("week",), "Current week (all models)", "Week", "7d", percent, resets)
-    answer = Usage((week(65),), 1000.0)
+
+    def session(percent):
+        return Limit(("session",), "Current session", "Session", "5h", percent, 1_500_000.0)
+    answer = Usage((session(70), week(65)), 1000.0)
     assert reset_since(answer, Usage((week(15),), 1100.0))
+    assert reset_since(Usage((week(3),), 1000.0), Usage((week(0, 2_600_000.0),), 1100.0))   # little used, a new end
     assert not reset_since(answer, Usage((week(62),), 1100.0))                 # a reply a moment behind
+    assert not reset_since(answer, Usage((week(65, 2_000_001.0),), 1100.0))    # its end as given, to the second
+    assert not reset_since(answer, Usage((session(40), week(65)), 1100.0))     # a long reply's session: not the week
     assert not reset_since(answer, Usage((week(15),), 900.0))                  # from before the answer
     assert not reset_since(Usage((week(65, 1050.0),), 1000.0), Usage((week(15),), 1100.0))  # a new week
     assert not reset_since(None, Usage((week(15),), 1100.0)) and not reset_since(answer, None)
+
+
+def test_a_week_from_before_a_reset_says_so_and_the_rest_dont():
+    """Only the weeks go with a reset: credits, say, aren't dimmed. A limit hit noted on top
+    keeps the reset as well."""
+    from ctally.sessions import LimitHit
+    from ctally.usage import Limit, Usage, describe, merge, with_hit
+    end = time.time() + 3 * 86400
+    answer = Usage((Limit(("week",), "Current week (all models)", "Week", "7d", 65, end, seen=1000.0),
+                    Limit(("week", "fable"), "Current week (Fable)", "Week · Fable", "", 99, end, seen=1000.0),
+                    Limit(("credits",), "Usage credits", "Credits", "", 20, None, detail="$10.00 of $50.00",
+                          seen=1000.0)), 1000.0)
+    reply = Usage((Limit(("week",), "Current week (all models)", "Week", "7d", 15, end, seen=1100.0),), 1100.0)
+    found = merge(answer, reply)
+    assert [(l.short, l.percent, found.behind(l), found.before_reset(l)) for l in found.limits] == [
+        ("Week", 15, False, False), ("Week · Fable", 99, True, True), ("Credits", 20, False, False)]
+    assert "Current week (Fable): 99% used · resets" in "\n".join(describe(found, 1200.0))
+    assert describe(found, 1200.0)[1].endswith("before a reset")
+    hit = with_hit(found, LimitHit(end - 3600, "You've hit your session limit", 1150.0), 1200.0)
+    fable = next(limit for limit in hit.limits if limit.key == ("week", "fable"))
+    assert ("session",) in [limit.key for limit in hit.limits] and hit.before_reset(fable)
 
 
 class Asks:
@@ -382,12 +409,38 @@ def test_a_reset_is_asked_about_once_in_five_minutes_and_never_while_told_to_wai
     assert not fetcher.due(have, time.time(), time.time(), reset=True)
 
 
+def test_while_asking_fails_a_reset_is_asked_about_once_in_five_minutes(tmp_path):
+    """Each ask about it counts, the regular one as well, so failing asks don't come in twos."""
+    down = Refused("couldn't reach Anthropic")
+    asks = Asks(down, down, down)
+    fetcher = Fetcher(asks.sign_in, asks.ask, log=lambda _: None)
+    path, have = tmp_path / "f", time.time() - 60
+
+    def later(seconds):
+        fetcher._tried -= seconds
+        fetcher._early -= seconds
+        fetcher._not_before -= seconds
+
+    def look():
+        fetcher.poll(ACCOUNT, path, have, time.time(), reset=True)
+        if fetcher._asking is not None:
+            fetcher._asking.result(timeout=5)
+    look()
+    assert len(asks.tokens) == 1
+    later(EVERY)
+    look()
+    assert len(asks.tokens) == 2
+    later(fetch.SOON)
+    look()
+    assert len(asks.tokens) == 2
+
+
 # MARK: ctally usage
 
 def test_ctally_usage_asks_at_once_after_a_reset(own_usage_and_prefs, monkeypatch, capsys):
     home = own_usage_and_prefs
     claude_json(home, week=65, fable=99, age=60)
-    asks = Asks(utilization(15, 0))
+    asks = Asks(Refused("HTTP 500", 500), utilization(15, 0))
     monkeypatch.setattr(fetch, "sign_in", asks.sign_in)
     monkeypatch.setattr(fetch, "ask", asks.ask)
     assert cli.main(["usage"]) == 0
@@ -395,8 +448,12 @@ def test_ctally_usage_asks_at_once_after_a_reset(own_usage_and_prefs, monkeypatc
     usage.STATUS_LINE.write_text(json.dumps({"rate_limits": {
         "seven_day": {"used_percentage": 15, "resets_at": 4070939400}}}))
     assert cli.main(["usage"]) == 0
+    out = capsys.readouterr().out                                          # it couldn't: says how old
+    assert "Current week (Fable)       ██████████  99%  resets" in out and "before a reset" in out
+    assert asks.tokens == ["token-1"]
+    assert cli.main(["usage"]) == 0
     out = capsys.readouterr().out
-    assert "Current week (Fable)       ░░░░░░░░░░   0%" in out and asks.tokens == ["token-1"]
+    assert "Current week (Fable)       ░░░░░░░░░░   0%" in out and asks.tokens == ["token-1", "token-1"]
 
 def test_ctally_usage_asks_first_unless_switched_off(own_usage_and_prefs, monkeypatch, capsys):
     from ctally.prefs import Prefs

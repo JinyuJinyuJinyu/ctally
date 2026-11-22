@@ -12,9 +12,10 @@ CTally asks the same place /usage does:
 - At most every five minutes, the time Claude Code itself trusts a copy for, and then only if
   Claude Code has replied since the last answer, or that answer is an hour old. Nothing
   waits on it: the app asks in the background, `ctally usage` asks when it's run.
-- Sooner when a reply shows the limits were reset (less of the week used than the last answer
-  said, say): a model's week in that answer is from before it. Then it asks at once, half a
-  minute after the last ask at the soonest, and early like that once in five minutes.
+- Sooner when a reply shows the weeks were reset (less of the week used than the last answer
+  said, or the week ending later): a model's week in that answer is from before it. Then it
+  asks at once, half a minute after the last ask at the soonest, and early like that once in
+  five minutes.
 - The answer goes in ~/.claude/ctally.d/.fetched/<account id>, in the shape ~/.claude.json
   keeps it in, and usage.py reads both, the newer winning.
 - Told to slow down, it waits as long as it's told, or a quarter of an hour, and `ctally
@@ -241,8 +242,8 @@ class Fetcher:
         if heard is not None and (have is None or heard > have):
             have = heard
         if self.due(have, replied, now, reset):
-            if now < self._not_before:
-                self._early = now               # ahead of time, for a reset
+            if reset:
+                self._early = now               # asked about the reset, on time or not
             self._tried = now
             self._not_before = now + EVERY      # however it goes, not again straight away
             self._asking = self._pool.submit(self.once, who, path, still)
@@ -268,16 +269,15 @@ class Fetcher:
             if refusal.status in (401, 403):
                 self._turned_away = found.token
             if refusal.status == 429:
-                self._not_before = self.wait_until = time.time() + (refusal.wait or SLOW_DOWN)
-                self._held = max(self._held, self.wait_until)
+                self.wait_until = time.time() + (refusal.wait or SLOW_DOWN)
+                self._hold(self.wait_until)
             return self._failed(refusal.why)
         except Exception as error:      # whatever goes wrong, the app carries on
             return self._failed(f"couldn't ask ({error.__class__.__name__})")
         if still is not None and not still(who):
             # Whose numbers these are can't be told: the sign-in was read a moment after the
             # account's name, and one of the two has changed.
-            self._not_before = time.time() + SETTLE
-            self._held = max(self._held, self._not_before)
+            self._hold(time.time() + SETTLE)
             return self._failed("the account signed in changed while asking")
         try:
             save(path, answer, who, time.time())

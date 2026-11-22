@@ -596,7 +596,8 @@ class TallyView(QWidget):
             current = usage.at(now)
             drawn = {limit: Meter(limit.short, limit.tag or limit.short, min(max(limit.percent / 100, 0.0), 1.0),
                                   percent_text(limit),
-                                  ago(limit.seen, now) if current.behind(limit) else
+                                  ("before reset" if current.before_reset(limit) else ago(limit.seen, now))
+                                  if current.behind(limit) else
                                   when(limit.resets_at, now) or limit.detail,
                                   limit.level, current.behind(limit))
                      for limit in current.limits}

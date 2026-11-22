@@ -16,7 +16,8 @@ Three places, all only read here:
   (~/.claude/ctally.d/.usage/<account id>). Where it's newer, it wins for those two. One of
   the two it says nothing of, which the cache lists with nothing used, isn't a limit of the
   plan's any more, and isn't shown. The rest, each model's week, stay as last fetched, and
-  say how old they are once that's well behind the session and the week.
+  say how old they are once that's well behind the session and the week, or that they're from
+  before a reset the week has shown since.
 
 All are an account's. ~/.claude.json names the one signed in, and only its numbers are shown:
 sign in to another, or swap accounts under the sessions that are running, and the limits are
@@ -42,7 +43,7 @@ from .sessions import STATE_DIR, LimitHit, read_limit
 CLAUDE_JSON = Path(os.environ.get("CTALLY_CLAUDE_JSON") or Path.home() / ".claude.json")
 STATUS_LINE = STATE_DIR / ".statusline"
 STALE_AFTER = 3600          # Claude Code itself stops trusting its copy after an hour
-RESET_DROP = 5              # points less used in a window than last read, before it ends: a reset
+RESET_DROP = 5              # points less of the week used than last read, before it ends: a reset
 WARN, ALERT = 75, 90        # percent used: getting close, nearly out
 
 # The older per-window fields, for whatever the server's list of limits doesn't cover.
@@ -94,12 +95,15 @@ class Usage(NamedTuple):
 
     def behind(self, limit: Limit) -> bool:
         """Whether a limit's number is much older than the rest: a model's week, say, which
-        only /usage brings up to date, while every reply brings the session and the week. Or
-        from before a reset that a reply has shown since, however new."""
-        if limit.seen is None:
-            return False
-        return self.fetched_at - limit.seen > STALE_AFTER or (self.reset_seen is not None
-                                                              and limit.seen < self.reset_seen)
+        only /usage brings up to date, while every reply brings the session and the week. Or a
+        week's from before a reset that a reply has shown since, however new."""
+        return limit.seen is not None and (self.fetched_at - limit.seen > STALE_AFTER or self.before_reset(limit))
+
+    def before_reset(self, limit: Limit) -> bool:
+        """Whether a week's number is from before the weeks were reset, as a reply has shown
+        since: a model's week, which only an ask brings anew."""
+        return (self.reset_seen is not None and limit.seen is not None and limit.seen < self.reset_seen
+                and limit.key[:1] == ("week",))
 
     @property
     def compact(self) -> tuple[Limit, ...]:
@@ -136,8 +140,8 @@ def refresh(path: Path | None = None, live: Path | None = None,
         return None
     now = time.time()
     have = newest(parse(config), read_fetched(target))
-    if (have is not None and now - have.fetched_at < fetch.EVERY
-            and not reset_since(have, read_live(live_file(live or STATUS_LINE, who)))):
+    if have is not None and now - have.fetched_at < fetch.EVERY and not (
+            now - have.fetched_at >= fetch.SOON and reset_since(have, read_live(live_file(live or STATUS_LINE, who)))):
         return None
     waiting = fetch.told_to_wait(target, now)
     if waiting:
@@ -244,20 +248,19 @@ def merge(cached: Usage | None, live: Usage | None) -> Usage | None:
 
 
 def reset_since(cached: Usage | None, live: Usage | None) -> bool:
-    """Whether a reply since the cached numbers shows the limits were reset: less of the session
-    or the week used than they said, before that window was due to end. A window only fills up
-    until it ends, so it was reset early, and every model's week likely with it, whose numbers
-    only an ask brings."""
+    """Whether a reply since the cached numbers shows the weeks were reset: less of the week
+    used than they said, or the week ending later, before it was due to end. A week only fills
+    up until it ends, so it was reset early, and every model's week likely with it, whose
+    numbers only an ask brings. Not the session: a long reply can bring numbers from when it
+    began, minutes before an answer, and a busy session window moves that much."""
     if cached is None or live is None or live.fetched_at <= cached.fetched_at:
         return False
-    before = {limit.key: limit for limit in cached.limits}
-    for limit in live.limits:
-        old = before.get(limit.key)
-        if old is None or old.resets_at is None or live.fetched_at >= old.resets_at:
-            continue                # nothing to go by, or it has ended since, as windows do
-        if limit.percent <= old.percent - RESET_DROP:
-            return True
-    return False
+    old = next((limit for limit in cached.limits if limit.key == ("week",)), None)
+    new = next((limit for limit in live.limits if limit.key == ("week",)), None)
+    if old is None or new is None or old.resets_at is None or live.fetched_at >= old.resets_at:
+        return False                # nothing to go by, or it has ended since, as weeks do
+    return (new.percent <= old.percent - RESET_DROP
+            or (new.resets_at is not None and new.resets_at > old.resets_at + 3600))
 
 
 def with_hit(usage: Usage | None, hit: LimitHit | None, now: float, who: str | None = None) -> Usage | None:
@@ -279,8 +282,8 @@ def with_hit(usage: Usage | None, hit: LimitHit | None, now: float, who: str | N
     if current is None:
         _, _, title, short, tag = next(window for window in WINDOWS if window[1] == key)
         current = Limit(key, title, short, tag, 100.0, resets)
-        usage = Usage(_ordered((usage.limits if usage else ()) + (current,)),
-                      usage.fetched_at if usage else hit.noted)
+        usage = (usage._replace(limits=_ordered(usage.limits + (current,))) if usage
+                 else Usage((current,), hit.noted))
     full = current._replace(percent=max(current.percent, 100.0), resets_at=resets, severity="exceeded",
                             seen=max(current.seen or hit.noted, hit.noted))
     return usage._replace(limits=tuple(full if limit.key == key else limit for limit in usage.limits))
@@ -443,6 +446,11 @@ def ago(moment: float, now: float) -> str:
     return f"{int(seconds // 86400)} d ago"
 
 
+def how_old(usage: Usage, limit: Limit, now: float) -> str:
+    """For a number behind the rest: "before a reset", or "as of 9:33 am"."""
+    return "before a reset" if usage.before_reset(limit) else as_of(limit.seen, now)
+
+
 def as_of(moment: float, now: float) -> str:
     """"as of 9:33 am" today, "as of Mon 9:33 am" within the week, "as of Nov 9" before."""
     then, today = time.localtime(moment), time.localtime(now)
@@ -465,7 +473,7 @@ def describe(usage: Usage, now: float) -> list[str]:
         if limit.resets_at is not None:
             parts.append(resets(limit.resets_at, now))
         if current.behind(limit):
-            parts.append(as_of(limit.seen, now))
+            parts.append(how_old(current, limit, now))
         lines.append(f"{limit.title}: {' · '.join(parts)}")
     lines.append(f"Updated {ago(usage.fetched_at, now)}" if not usage.is_stale(now) else
                  f"Updated {ago(usage.fetched_at, now)}: Claude Code refreshes it while a session runs")
@@ -508,12 +516,13 @@ class UsageReader:
                 self._fetched = _Watched(asked, lambda data, _: from_cache(data, None)) if asked else None
             latest, at = self._live.poll(), time.time()
             cached = newest(cached, self._fetched.poll() if self._fetched else None)
+            merged = merge(in_force(cached, latest, at), latest)
             if self.fetcher is not None:
                 self.fetcher.poll(who, asked, cached.fetched_at if cached else None,
                                   latest.fetched_at if latest else None,
                                   lambda who: still_signed_in(self._cache.path, who),
-                                  reset=reset_since(cached, latest))
-            self._usage = with_hit(merge(in_force(cached, latest, at), latest), read_limit(self._hits), at, who)
+                                  reset=merged is not None and merged.reset_seen is not None)
+            self._usage = with_hit(merged, read_limit(self._hits), at, who)
         return self._usage
 
 

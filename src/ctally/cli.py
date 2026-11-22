@@ -158,6 +158,7 @@ def usage(as_json: bool) -> int:
         print(json.dumps({"updated": found.fetched_at, "stale": found.is_stale(now), "limits": [
             {"title": limit.title, "percent": limit.percent, "resets_at": limit.resets_at,
              "level": ("ok", "warning", "critical")[limit.level], "as_of": limit.seen,
+             **({"before_reset": True} if current.before_reset(limit) else {}),
              **({"detail": limit.detail} if limit.detail else {})}
             for limit in current.limits]}, indent=1))
         return 0
@@ -166,7 +167,7 @@ def usage(as_json: bool) -> int:
         filled = min(10, max(0, round(limit.percent / 10)))
         bar = "█" * filled + "░" * (10 - filled)
         after = " · ".join(part for part in (limit.detail or limits.resets(limit.resets_at, now),
-                                             limits.as_of(limit.seen, now) if current.behind(limit) else "") if part)
+                                             limits.how_old(current, limit, now) if current.behind(limit) else "") if part)
         print(f"{limit.title:<{width}}  {bar} {limits.percent_text(limit):>4}  {after}".rstrip())
     described = limits.describe(found, now)
     print("\n".join(described[len(current.limits):]))
