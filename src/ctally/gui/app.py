@@ -152,6 +152,9 @@ class Controller:
         self.view.drag_finished.connect(self.settle_after_drag)
         self.view.layout_changed.connect(self.fit)
         self.view.menu_requested.connect(self.show_menu)
+        self.view.search_started.connect(self._search_started)
+        self.view.search_ended.connect(self._search_ended)
+        self._forward_for_search = False        # CTally came forward for its search box (macOS)
 
         self.poll_timer = QTimer()
         self.poll_timer.setInterval(POLL_MS)
@@ -320,6 +323,26 @@ class Controller:
         self.poll_timer.stop()
         self.frame_timer.stop()
         self.view.hide()
+
+    def _search_started(self, box) -> None:
+        """The search box is about to take the keyboard. On macOS it floats with the
+        indicator, a panel that takes the keyboard without bringing CTally forward; should
+        that be refused, CTally comes forward for it, and goes back once it's done."""
+        if not system.MAC:
+            return
+        mac.float_everywhere(box)
+
+        def check() -> None:
+            if box.isVisible() and not box.isActiveWindow():
+                self._forward_for_search = True
+                mac.activate()
+                box.activateWindow()
+        QTimer.singleShot(250, check)
+
+    def _search_ended(self) -> None:
+        if self._forward_for_search:
+            self._forward_for_search = False
+            mac.hide_app()          # the keyboard back to whatever I was in
 
     def poll(self) -> None:
         self.sessions = self.reader.poll()

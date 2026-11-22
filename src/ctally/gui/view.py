@@ -11,6 +11,13 @@ when a new session starts; the chevron on the bar folds the list away to just th
 More rows than fit (sixteen, or what the screen has room for) scroll, with the wheel or the
 scroll bar beside them, which marks where the sessions waiting on me are.
 
+The open list has a search field next to its rows, for finding one among many: typing narrows
+the rows to the sessions with every word typed in their name, folder or tmux pane, while the
+count bar still counts them all. The indicator never takes the keyboard, so a click on the field
+puts a box of its own over it that does, until Return opens the session picked (the nearest
+match, or one Up and Down move to), Esc clears the search, or a click elsewhere leaves it as
+typed, for its ✕ to clear. Going to a session clears it too.
+
 Clicking a row's line about its agents opens it up for a closer look: a workflow's phases, each
 with its own progress and the agents still at work in it, or each agent and what it's doing.
 Clicking it again folds that away.
@@ -41,7 +48,7 @@ from typing import NamedTuple
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QPainter,
                            QPainterPath, QPen, QPixmap, QRegion)
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QLineEdit, QToolTip, QWidget
 
 from ..sessions import BY_URGENCY, Agents, Context, Session, State
 from ..usage import Usage, ago, describe, percent_text, when
@@ -141,6 +148,7 @@ class Fonts:
         self.usage_when = font(9.5)
         self.meter = font(9, QFont.Weight.DemiBold)
         self.meter_tag = font(8.5, QFont.Weight.Medium)
+        self.search = font(11)
 
 
 def measure(text: str, font: QFont) -> float:
@@ -172,6 +180,61 @@ class Row(NamedTuple):
     agents: str         # "4 agents · Verify", or empty with none running
     ask: str = ""       # what it waits on me for: "Allow Bash(npm publish)?", or empty
     details: tuple = () # its agents up close, a Detail a line, while opened up
+
+
+def matches(row: Row, query: str) -> bool:
+    """Whether a row has every word of a search, whatever their case: in its session's name, its
+    folder (as shown, ~ and all, or in full), its project or its tmux pane."""
+    session = row.session
+    text = " ".join((row.title, session.title or "", row.path, session.path or "", session.label,
+                     row.tmux)).casefold()
+    return all(word in text for word in query.casefold().split())
+
+
+class SearchBox(QLineEdit):
+    """Where a search is typed. The indicator never takes the keyboard, so this is a window of
+    its own, laid over the list's search field, that takes it while it shows."""
+
+    stepped = Signal(bool)          # Up (True) or Down
+    picked = Signal(object)         # Return, and when, by the window system's clock (focus.focus)
+    closed = Signal(bool)           # done with: Esc, which clears the search, or a click elsewhere
+
+    STYLE = ("QLineEdit { background: transparent; border: none; padding: 0;"
+             " color: rgba(255, 255, 255, 235); selection-background-color: rgba(74, 204, 242, 110); }")
+
+    def __init__(self, font: QFont):
+        super().__init__()
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowTitle("CTally Search")
+        self.setFrame(False)
+        self.setFont(font)
+        self.setStyleSheet(SearchBox.STYLE)
+        self._had_keyboard = False
+
+    def showEvent(self, event) -> None:
+        self._had_keyboard = False
+        super().showEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key_Escape:
+            self.closed.emit(True)
+        elif key in (Qt.Key_Return, Qt.Key_Enter):
+            self.picked.emit(event.timestamp())
+        elif key in (Qt.Key_Up, Qt.Key_Down):
+            self.stepped.emit(key == Qt.Key_Up)
+        else:
+            super().keyPressEvent(event)
+
+    def changeEvent(self, event) -> None:
+        """Once it has had the keyboard, losing it means I've gone to something else."""
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange and self.isVisible():
+            if self.isActiveWindow():
+                self._had_keyboard = True
+            elif self._had_keyboard:
+                self.closed.emit(False)
 
 
 def details(agents: Agents | None, limit: int = 8) -> tuple[Detail, ...]:
@@ -217,6 +280,8 @@ class TallyView(QWidget):
     drag_finished = Signal()            # dropped after a drag
     layout_changed = Signal()           # wants another size: a closer look opened or folded
     menu_requested = Signal(QPoint, object)     # a right-click, in global coordinates, and the Session there
+    search_started = Signal(object)     # the search box is up, about to take the keyboard: the SearchBox
+    search_ended = Signal()             # and gone again
 
     SINGLE = Chip(120, 120, 44, 66, 18, False)
     SEVERAL = Chip(124, 140, 33, 52, 13, True)
@@ -243,6 +308,9 @@ class TallyView(QWidget):
     SCROLL_GUTTER = 8       # added beside the rows for the scroll bar, while they scroll
     SCROLL_WIDTH = 4
     SCROLL_MIN_THUMB = 24
+    SEARCH_HEIGHT = 24      # the search field, between the usage limits and the rows
+    CLEAR_SIZE = 16         # its ✕
+    SEARCH_HINT = "Search by name or folder"
 
     # Usage limits.
     USAGE_LINE = 18         # one limit in the list
@@ -261,7 +329,11 @@ class TallyView(QWidget):
         self.fonts = Fonts()
         self._epoch = time.monotonic()
         self._sessions: list[Session] = []
-        self._rows: list[Row] = []
+        self._all_rows: list[Row] = []     # a row for every session
+        self._rows: list[Row] = []         # those shown: all of them, or those a search finds
+        self._query = ""                   # what the list is narrowed to, as typed
+        self._box: SearchBox | None = None # where it's typed
+        self._pick: str | None = None      # the session Return would open, once Up or Down has moved it
         self._row_offsets = [0.0]       # each row's bottom above the first's, and the total last
         self._counts: list[tuple[State, int]] = []
         self._scroll = 0.0              # how far the rows are scrolled, away from the bar
@@ -305,6 +377,8 @@ class TallyView(QWidget):
     @folded.setter
     def folded(self, value: bool) -> None:
         if value != self._folded:
+            if value:
+                self.end_search(clear=True)     # folded away with the field
             self._folded = value
             self._hovered = None
             self._version += 1
@@ -368,6 +442,137 @@ class TallyView(QWidget):
         self._version += 1
         self._recompute()
         self.update()
+        if not self.is_list and (self._query or self.searching):
+            self.end_search(clear=True)         # down to badges: no field to search with
+        else:
+            self._place_box()
+
+    # MARK: Searching
+
+    @property
+    def query(self) -> str:
+        return self._query
+
+    @property
+    def searching(self) -> bool:
+        """Whether the search box is up, taking the keyboard."""
+        return self._box is not None and self._box.isVisible()
+
+    @property
+    def _has_search(self) -> bool:
+        return self.is_list and not self._folded
+
+    def set_query(self, text: str) -> None:
+        """Narrows the list to the sessions with every word of it in their name, folder or
+        tmux pane; "" shows them all."""
+        if text == self._query:
+            return
+        self._query = text
+        self._pick = None
+        self._scroll = 0.0
+        if self._box is not None and self._box.text() != text:
+            self._box.setText(text)
+        self._hovered = None
+        self._version += 1
+        self._recompute()
+        self.update()
+        self._place_box()
+        self.layout_changed.emit()
+
+    def start_search(self) -> None:
+        """Puts the search box over the field, with what's typed so far, to take the keyboard."""
+        if not self._has_search:
+            return
+        if self._box is None:
+            self._box = SearchBox(self.fonts.search)
+            self._box.textEdited.connect(self.set_query)
+            self._box.stepped.connect(self._step)
+            self._box.picked.connect(self._open_pick)
+            self._box.closed.connect(lambda clear: self.end_search(clear=clear))
+        box = self._box
+        box.setText(self._query)
+        box.setWindowOpacity(self.windowOpacity())
+        shown = box.isVisible()
+        box.show()
+        self._place_box()
+        if not shown:
+            self.search_started.emit(box)
+        box.raise_()
+        box.activateWindow()
+        box.setFocus()
+        self._version += 1
+        self.update()
+
+    def end_search(self, clear: bool = False) -> None:
+        """Takes the search box away, giving up the keyboard; the search stays as typed, unless
+        it's cleared."""
+        if self.searching:
+            self._box.hide()
+            self.search_ended.emit()
+        self._pick = None
+        if clear:
+            self.set_query("")
+        self._version += 1
+        self.update()
+
+    @property
+    def _picked(self) -> int | None:
+        """The row Return would open, while typing: the one Up or Down moved to, or else the
+        nearest match."""
+        if not self.searching or not self._rows:
+            return None
+        ids = [row.session.id for row in self._rows]
+        if self._pick in ids:
+            return ids.index(self._pick)
+        return 0 if self._query.strip() else None
+
+    def _step(self, up: bool) -> None:
+        """Up and Down move what Return would open, the way they point on screen."""
+        if not self._rows:
+            return
+        index = self._picked
+        if index is None:
+            index = 0
+        else:
+            further = up != self._grows_down        # away from the field
+            index = min(max(index + (1 if further else -1), 0), len(self._rows) - 1)
+        self._pick = self._rows[index].session.id
+        self._reveal(index)
+        self._version += 1
+        self.update()
+
+    def _reveal(self, index: int) -> None:
+        """Scrolls a row fully into view."""
+        if self._scrolls:
+            top, bottom = self._row_offsets[index], self._row_offsets[index + 1]
+            self._scroll_to(min(max(self._offset, bottom - self._view_height), top))
+
+    def _open_pick(self, when) -> None:
+        index = self._picked
+        if index is None:
+            return
+        session = self._rows[index].session
+        self.end_search(clear=True)
+        self.selected.emit(session, when)
+
+    def _place_box(self) -> None:
+        """Keeps the search box over the field's text, wherever the window has gone."""
+        if not self.searching:
+            return
+        rect = self._search_text_rect.adjusted(-2, 2, 0, -2)
+        self._box.setGeometry(QRect(self.mapToGlobal(rect.topLeft().toPoint()), rect.size().toSize()))
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._place_box()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_box()
+
+    def hideEvent(self, event) -> None:
+        self.end_search()
+        super().hideEvent(event)
 
     def apply_usage(self, usage: Usage | None, now: float | None = None) -> None:
         """The plan's usage limits, or None to show none. Redraws only when what's shown
@@ -412,14 +617,14 @@ class TallyView(QWidget):
         bar = 2 * TallyView.PADDING + TallyView.HEADER_HEIGHT
         if self._folded:
             return QSize(math.ceil(self._bar_width + (self._meter_width + 14 if self._compact else 0)), bar)
-        height = bar + TallyView.HEADER_GAP + self._usage_height + self._view_height
+        height = bar + TallyView.HEADER_GAP + self._usage_height + self._search_height + self._view_height
         width = self._list_width + (TallyView.SCROLL_GUTTER if self._scrolls else 0)
         return QSize(math.ceil(max(width, self._bar_width)), math.ceil(height))
 
     @property
     def is_animating(self) -> bool:
         """False once everything on screen has settled, so redraws can stop."""
-        if not self._rows:
+        if not self._sessions:
             return True                                  # the idle placeholder breathes
         if self.is_list and self._folded:
             return any(self._is_moving(s, TallyView.WASH_DURATION) for s in self._sessions)
@@ -468,7 +673,7 @@ class TallyView(QWidget):
             titles[session.id] = base if seen[base] == 1 else f"{base} {seen[base]}"
 
         home = str(Path.home())
-        self._rows = [Row(session=s,
+        self._all_rows = [Row(session=s,
                           title=titles.get(s.id, ""),
                           path=("~" + s.path[len(home):]) if s.path and (s.path + "/").startswith(home + "/") else (s.path or ""),
                           tmux=s.tmux or "",
@@ -476,11 +681,13 @@ class TallyView(QWidget):
                           ask=s.ask.summary if s.ask else "",
                           details=details(s.agents) if s.id in self._opened else ())
                       for s in self._sessions]
+        self._rows = [r for r in self._all_rows if matches(r, self._query)] if self._query.strip() else self._all_rows
         self._row_offsets = [0.0]
         for row in self._rows:
             self._row_offsets.append(self._row_offsets[-1] + self._row_height(row))
 
         # Wide enough for the longest name or path, within reason; longer ones get shortened.
+        # Every session's, so the list holds its width while a search narrows it.
         f = self.fonts
 
         def agents_width(row: Row) -> float:
@@ -498,7 +705,7 @@ class TallyView(QWidget):
         widest = max((max(measure(r.title, f.title) + 8 + TallyView.STATE_WIDTH,
                           lower_width(r),
                           agents_width(r))
-                      for r in self._rows), default=0)
+                      for r in self._all_rows), default=0)
         wanted = 2 * TallyView.PADDING + TallyView.TEXT_X + widest
         low, high = TallyView.WIDTH_RANGE
         self._usage_width = self._usage_line_width() if self._meters else 0
@@ -591,8 +798,16 @@ class TallyView(QWidget):
         return len(self._meters) * TallyView.USAGE_LINE + TallyView.HEADER_GAP
 
     @property
+    def _search_height(self) -> float:
+        """The search field and the gap past it, in the open list."""
+        return TallyView.SEARCH_HEIGHT + TallyView.HEADER_GAP if self._has_search else 0.0
+
+    @property
     def _rows_height(self) -> float:
-        """Every row's, whether it shows or is scrolled away."""
+        """Every row's, whether it shows or is scrolled away; a search that finds none, a row's
+        worth to say so."""
+        if not self._rows and self._query.strip() and self._has_search:
+            return TallyView.ROW_HEIGHT
         return self._row_offsets[-1]
 
     @property
@@ -601,7 +816,8 @@ class TallyView(QWidget):
         scrolling. Never under a couple of rows, however short the screen."""
         room = TallyView.MAX_ROWS * TallyView.ROW_HEIGHT
         if self._max_height is not None:
-            others = 2 * TallyView.PADDING + TallyView.HEADER_HEIGHT + TallyView.HEADER_GAP + self._usage_height
+            others = (2 * TallyView.PADDING + TallyView.HEADER_HEIGHT + TallyView.HEADER_GAP + self._usage_height
+                      + self._search_height)
             room = min(room, max(2 * TallyView.ROW_HEIGHT, self._max_height - others))
         return min(self._rows_height, room)
 
@@ -636,9 +852,42 @@ class TallyView(QWidget):
 
     @property
     def _rows_edge(self) -> float:
-        """Where the rows start, on the bar's side: past the bar and the usage limits."""
-        beyond = TallyView.PADDING + TallyView.HEADER_HEIGHT + TallyView.HEADER_GAP + self._usage_height
+        """Where the rows start, on the bar's side: past the bar, the usage limits and the
+        search field."""
+        beyond = (TallyView.PADDING + TallyView.HEADER_HEIGHT + TallyView.HEADER_GAP + self._usage_height
+                  + self._search_height)
         return beyond if self._grows_down else self.height() - beyond
+
+    @property
+    def _search_rect(self) -> QRectF:
+        """The search field: past the count bar and the usage limits, next to the rows it
+        narrows."""
+        bar = self._bar_rect
+        beyond = TallyView.PADDING + TallyView.HEADER_HEIGHT + TallyView.HEADER_GAP + self._usage_height
+        y = beyond if self._grows_down else self.height() - beyond - TallyView.SEARCH_HEIGHT
+        return QRectF(bar.x(), y, bar.width(), TallyView.SEARCH_HEIGHT)
+
+    @property
+    def _clear_rect(self) -> QRectF:
+        """The field's ✕, at its end, while there's a search to clear."""
+        field, size = self._search_rect, TallyView.CLEAR_SIZE
+        return QRectF(field.right() - 5 - size, field.center().y() - size / 2, size, size)
+
+    @property
+    def _found_text(self) -> str:
+        """How many a search finds, of how many: "3 of 22"."""
+        return f"{len(self._rows)} of {len(self._sessions)}" if self._query.strip() else ""
+
+    @property
+    def _search_text_rect(self) -> QRectF:
+        """Where what's typed goes: in line with the rows' names, up to how many it finds."""
+        field = self._search_rect
+        right = self._clear_rect.x() - 6 if self._query else field.right() - 8
+        found = self._found_text
+        if found:
+            right -= measure(found, self.fonts.path) + 8
+        left = field.x() + TallyView.TEXT_X
+        return QRectF(left, field.y(), max(right - left, 20.0), field.height())
 
     def _row_rect(self, index: int) -> QRectF:
         """Row 0, the oldest session, next to the bar; each later one further out, and all of
@@ -803,8 +1052,16 @@ class TallyView(QWidget):
             self._scroll_by_thumb(event.position().y() - self._grab)
             return
         if self._press is None or not (event.buttons() & Qt.LeftButton):
-            self._set_over_scroll_bar(self._on_scroll_bar(event.position()))
-            self._set_hovered(self._item_at(event.position()))
+            point = event.position()
+            self._set_over_scroll_bar(self._on_scroll_bar(point))
+            self._set_hovered(self._item_at(point))
+            typing = (self._has_search and self._search_rect.contains(point)
+                      and not (self._query and self._clear_rect.contains(point)))
+            if typing != (self.cursor().shape() == Qt.IBeamCursor):
+                if typing:
+                    self.setCursor(Qt.IBeamCursor)
+                else:
+                    self.unsetCursor()
             return
         start, origin, dragging = self._press
         delta = event.globalPosition() - start
@@ -838,6 +1095,12 @@ class TallyView(QWidget):
         if self.is_list and self._fold_rect().contains(point):
             self.fold_requested.emit(not self._folded)
             return
+        if self._has_search and self._query and self._clear_rect.contains(point):
+            self.end_search(clear=True)
+            return
+        if self._has_search and self._search_rect.contains(point):
+            self.start_search()
+            return
         index = self._item_at(point)
         if index is None:
             return
@@ -847,6 +1110,8 @@ class TallyView(QWidget):
         elif self._agents_at(index, point):
             self.toggle_agents(session.id)
         else:
+            if self._query or self.searching:
+                self.end_search(clear=True)         # found it
             self.selected.emit(session, event.timestamp())
 
     def contextMenuEvent(self, event) -> None:
@@ -1217,9 +1482,11 @@ class TallyView(QWidget):
         if self._folded:
             return
 
-        # Hairlines between the count bar, the usage limits and the rows.
-        half = TallyView.HEADER_GAP / 2 * (-1 if self._grows_down else 1)
-        painter.fillRect(QRectF(bar.x() + 4, self._rows_edge + half - 0.5, bar.width() - 8, 1), white(1, 0.08))
+        # A hairline between the count bar and the usage limits; the search field's own edge
+        # sets the rows off.
+        field = self._search_rect
+        if self._needs(field.adjusted(-2, -2, 2, 2)):
+            self._draw_search(painter, field)
         usage = self._usage_rect()
         if usage is not None:
             beside_bar = bar.bottom() + TallyView.HEADER_GAP / 2 if self._grows_down else bar.y() - TallyView.HEADER_GAP / 2
@@ -1231,18 +1498,62 @@ class TallyView(QWidget):
         if scrolls:
             painter.save()
             painter.setClipRect(self._rows_view)
+        picked = self._picked
         for index, row in enumerate(self._rows):
             if not self._row_shows(index):
                 continue
             rect = self._row_rect(index)
             # Bounces reach a little beyond the row.
             if self._needs(rect.adjusted(-4, -6, 4, 6)):
-                self._draw_row(painter, row, rect, highlighted=index == self._hovered)
+                self._draw_row(painter, row, rect, highlighted=index in (self._hovered, picked))
+        if not self._rows and self._query.strip():
+            view = self._rows_view
+            draw_text(painter, f"No session matches \u201c{self._query.strip()}\u201d",
+                      QRectF(TallyView.PADDING + TallyView.TEXT_X, view.y(), view.width() - 2 * TallyView.PADDING
+                             - TallyView.TEXT_X, view.height()), self.fonts.path, white(1, 0.5))
         if scrolls:
             painter.restore()
             track = self._scroll_track()
             if self._needs(track.adjusted(-3, -3, 3, 3)):
                 self._draw_scroll_bar(painter, track)
+
+    def _draw_search(self, painter: QPainter, field: QRectF) -> None:
+        """The search field: a magnifier in line with the rows' marks, then what's typed (the
+        box shows it while it's up) or a hint, how many it finds, and a ✕ to clear it."""
+        active = self.searching or bool(self._query)
+        painter.setPen(QPen(white(1, 0.24 if active else 0.10), 1))
+        painter.setBrush(white(1, 0.08 if active else 0.04))
+        painter.drawRoundedRect(field.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
+
+        c = QPointF(field.x() + TallyView.MARK_X, field.center().y())
+        pen = QPen(white(1, 0.75 if active else 0.45), 1.4)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(c.x() - 1, c.y() - 1), 4, 4)
+        painter.drawLine(QPointF(c.x() + 1.9, c.y() + 1.9), QPointF(c.x() + 4.8, c.y() + 4.8))
+
+        text = self._search_text_rect
+        if not self.searching:
+            if self._query:
+                draw_text(painter, self._query, text, self.fonts.search, white(1, 0.92))
+            else:
+                draw_text(painter, TallyView.SEARCH_HINT, text, self.fonts.search, white(1, 0.38))
+        found = self._found_text
+        if found:
+            draw_text(painter, found, QRectF(text.right() + 8, field.y(), measure(found, self.fonts.path) + 2,
+                                             field.height()), self.fonts.path, white(1, 0.5))
+        if self._query:
+            clear = self._clear_rect
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(white(1, 0.12))
+            painter.drawEllipse(clear.adjusted(1, 1, -1, -1))
+            pen = QPen(white(1, 0.75), 1.4)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            m = clear.center()
+            painter.drawLine(QPointF(m.x() - 3, m.y() - 3), QPointF(m.x() + 3, m.y() + 3))
+            painter.drawLine(QPointF(m.x() - 3, m.y() + 3), QPointF(m.x() + 3, m.y() - 3))
 
     def _draw_scroll_bar(self, painter: QPainter, track: QRectF) -> None:
         """A groove, the thumb for the rows in view, brighter under the pointer, and a tick

@@ -28,11 +28,14 @@ red at 90%, so you see a session nearing compaction before it gets there. [More 
 
 ## Features
 
-- **Floats above everything** without ever taking keyboard focus; on macOS on every Space and beside
-  full-screen apps too.
+- **Floats above everything** without taking keyboard focus, except while you type in its search field; on
+  macOS on every Space and beside full-screen apps too.
 - **One to three sessions show as big badges**; four or more become a compact list with each session's
   name and directory. Past 16 rows (or the screen's height) it scrolls, with a scroll bar that marks the
   sessions waiting on you. Session names come from `/rename`, or else the title Claude gave the session.
+- **Search the list**: as you type in the field beside the rows, it narrows them to the sessions with every
+  word in their name, folder or tmux pane (`api`, `~/code/web`, `cb-d`), while the count bar still counts them
+  all. Return opens the nearest match, or the one you pick with ↑ and ↓.
 - **Sees subagents and workflows**: while a session's agents run, its row says how many and what they're up
   to (`4 agents · Verify`), with a progress bar for a workflow, and its badge carries the count.
   [More below.](#subagents-and-workflows)
@@ -388,6 +391,7 @@ ctally setup --tmux
 |---|---|
 | Move it | Drag it anywhere. It remembers the spot and grows left from there, and away from the nearer screen edge: up from the bottom half of the screen, down from the top half, where the list unfolds downward. |
 | Go to a session | Click its row (or its badge). |
+| Find a session among many | Click the search field in the list and type part of its name, folder or tmux pane. ↑ and ↓ pick a match, Return opens it, Esc clears the search. Clicking elsewhere leaves the list narrowed; its ✕ clears it. |
 | See what a session's agents are doing | Click the line about its agents; again to fold it. |
 | Answer a session waiting on you | Click the amber line saying what it asks, or right-click the session, and pick a choice. In tmux. |
 | Jump to the session that needs you | In tmux, press prefix + J (set up by `ctally setup --tmux`). Again for the next one. |
