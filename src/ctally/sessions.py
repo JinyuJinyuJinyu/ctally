@@ -1120,9 +1120,12 @@ class StateReader:
             return [self._snapshot(n) for n in sorted(live, key=age)]
         # Nothing is running. A finished turn still deserves to be on screen when I come
         # back; a dead session's "working" means only that it was killed.
-        return [self._snapshot(n) for n in sorted(self.cache, key=age) if self.cache[n].state is State.DONE]
+        return [self._snapshot(n, gone=True) for n in sorted(self.cache, key=age)
+                if self.cache[n].state is State.DONE]
 
-    def _snapshot(self, name: str) -> Session:
+    def _snapshot(self, name: str, gone: bool = False) -> Session:
+        """`gone`: its process is, so the number in its note leads nowhere, or after a restart
+        to whatever process has it now."""
         # Listed but not heard from: the hooks have no note on it, or only one from a process
         # gone since, before the session was resumed in another (after a restart, say).
         if name in self.unheard:
@@ -1143,10 +1146,10 @@ class StateReader:
         # What it asked counts only while it's still waiting on me for it.
         ask = self.asks.get(name) if state is State.WAITING and not limited else None
         # A background job is wherever its terminal is.
-        pid = self.fronts[name].pid if name in self.fronts else entry.pid
+        pid = 0 if gone else self.fronts[name].pid if name in self.fronts else entry.pid
         return Session(id=name, state=state, label=entry.label, pid=pid,
                        title=title, path=path,
-                       tmux=self.locator.location(name, pid),
+                       tmux=None if gone else self.locator.location(name, pid),
                        agents=self.watcher.activity(name, self.names.transcript(name)),
                        limited=limited, ask=ask, context=self.contexts.get(name))
 

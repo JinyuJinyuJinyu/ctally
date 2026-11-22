@@ -391,6 +391,17 @@ def test_a_note_from_before_its_pid_passed_on_is_set_aside(dirs, registry, proce
         ("s", State.IDLE, resumed)]
 
 
+def test_a_finished_session_from_before_a_restart_leads_nowhere(dirs, registry, long_lived, monkeypatch):
+    """With nothing running yet after a restart, its finished turn still shows, but the number
+    in its note is another process's now: neither its pane nor a click goes there."""
+    monkeypatch.setattr(system, "started_after", long_lived)        # the real check
+    monkeypatch.setattr(system, "boot_time", lambda: time.time() - 600)
+    state, projects = dirs
+    write(state, "s", f"done {LIVE} api\n", mtime=time.time() - 3600)     # too new to be cleared away
+    assert [(s.id, s.state, s.pid, s.tmux) for s in StateReader(state, projects, registry).poll()] == [
+        ("s", State.DONE, 0, None)]
+
+
 def test_a_session_the_process_has_left_is_gone(dirs, registry):
     """/clear and /resume move a process on to another session id: of the hook's file and
     Claude Code's list, the one written last says which it's on."""
