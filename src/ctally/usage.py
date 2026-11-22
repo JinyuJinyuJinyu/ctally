@@ -42,6 +42,7 @@ from .sessions import STATE_DIR, LimitHit, read_limit
 CLAUDE_JSON = Path(os.environ.get("CTALLY_CLAUDE_JSON") or Path.home() / ".claude.json")
 STATUS_LINE = STATE_DIR / ".statusline"
 STALE_AFTER = 3600          # Claude Code itself stops trusting its copy after an hour
+RESET_DROP = 5              # points less used in a window than last read, before it ends: a reset
 WARN, ALERT = 75, 90        # percent used: getting close, nearly out
 
 # The older per-window fields, for whatever the server's list of limits doesn't cover.
@@ -78,6 +79,7 @@ class Limit(NamedTuple):
 class Usage(NamedTuple):
     limits: tuple[Limit, ...]
     fetched_at: float           # Unix time
+    reset_seen: float | None = None     # when a reply showed the limits reset since the rest was read
 
     def at(self, now: float) -> Usage:
         """As things stand at `now`: a window whose reset time has passed starts again from
@@ -92,8 +94,12 @@ class Usage(NamedTuple):
 
     def behind(self, limit: Limit) -> bool:
         """Whether a limit's number is much older than the rest: a model's week, say, which
-        only /usage brings up to date, while every reply brings the session and the week."""
-        return limit.seen is not None and self.fetched_at - limit.seen > STALE_AFTER
+        only /usage brings up to date, while every reply brings the session and the week. Or
+        from before a reset that a reply has shown since, however new."""
+        if limit.seen is None:
+            return False
+        return self.fetched_at - limit.seen > STALE_AFTER or (self.reset_seen is not None
+                                                              and limit.seen < self.reset_seen)
 
     @property
     def compact(self) -> tuple[Limit, ...]:
@@ -130,7 +136,8 @@ def refresh(path: Path | None = None, live: Path | None = None,
         return None
     now = time.time()
     have = newest(parse(config), read_fetched(target))
-    if have is not None and now - have.fetched_at < fetch.EVERY:
+    if (have is not None and now - have.fetched_at < fetch.EVERY
+            and not reset_since(have, read_live(live_file(live or STATUS_LINE, who)))):
         return None
     waiting = fetch.told_to_wait(target, now)
     if waiting:
@@ -233,7 +240,24 @@ def merge(cached: Usage | None, live: Usage | None) -> Usage | None:
         return live
     fresh = {limit.key: limit for limit in live.limits}
     limits = [fresh.pop(limit.key, limit) for limit in cached.limits] + list(fresh.values())
-    return Usage(_ordered(limits), live.fetched_at)
+    return Usage(_ordered(limits), live.fetched_at, live.fetched_at if reset_since(cached, live) else None)
+
+
+def reset_since(cached: Usage | None, live: Usage | None) -> bool:
+    """Whether a reply since the cached numbers shows the limits were reset: less of the session
+    or the week used than they said, before that window was due to end. A window only fills up
+    until it ends, so it was reset early, and every model's week likely with it, whose numbers
+    only an ask brings."""
+    if cached is None or live is None or live.fetched_at <= cached.fetched_at:
+        return False
+    before = {limit.key: limit for limit in cached.limits}
+    for limit in live.limits:
+        old = before.get(limit.key)
+        if old is None or old.resets_at is None or live.fetched_at >= old.resets_at:
+            continue                # nothing to go by, or it has ended since, as windows do
+        if limit.percent <= old.percent - RESET_DROP:
+            return True
+    return False
 
 
 def with_hit(usage: Usage | None, hit: LimitHit | None, now: float, who: str | None = None) -> Usage | None:
@@ -487,7 +511,8 @@ class UsageReader:
             if self.fetcher is not None:
                 self.fetcher.poll(who, asked, cached.fetched_at if cached else None,
                                   latest.fetched_at if latest else None,
-                                  lambda who: still_signed_in(self._cache.path, who))
+                                  lambda who: still_signed_in(self._cache.path, who),
+                                  reset=reset_since(cached, latest))
             self._usage = with_hit(merge(in_force(cached, latest, at), latest), read_limit(self._hits), at, who)
         return self._usage
 

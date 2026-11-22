@@ -12,6 +12,9 @@ CTally asks the same place /usage does:
 - At most every five minutes, the time Claude Code itself trusts a copy for, and then only if
   Claude Code has replied since the last answer, or that answer is an hour old. Nothing
   waits on it: the app asks in the background, `ctally usage` asks when it's run.
+- Sooner when a reply shows the limits were reset (less of the week used than the last answer
+  said, say): a model's week in that answer is from before it. Then it asks at once, half a
+  minute after the last ask at the soonest, and early like that once in five minutes.
 - The answer goes in ~/.claude/ctally.d/.fetched/<account id>, in the shape ~/.claude.json
   keeps it in, and usage.py reads both, the newer winning.
 - Told to slow down, it waits as long as it's told, or a quarter of an hour, and `ctally
@@ -25,6 +28,7 @@ from __future__ import annotations
 import getpass
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -44,6 +48,7 @@ EVERY = 300             # as long as Claude Code trusts its own copy of the numb
 QUIET_EVERY = 3600      # with no replies in between, which is all that moves them
 SLOW_DOWN = 900         # told to wait, without being told how long
 SETTLE = 10             # after the account changes, for its sign-in to be in place as well
+SOON = 30               # after the last ask, before asking again because of a reset
 TIMEOUT = 10
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 KEYCHAIN = "Claude Code-credentials"
@@ -196,6 +201,9 @@ class Fetcher:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctally-usage")
         self._asking: Future | None = None
         self._not_before = 0.0
+        self._held = 0.0                        # told to slow down, or the account changed: not before then
+        self._tried = -math.inf                 # when it last asked
+        self._early = -math.inf                 # when it last asked early, for a reset
         self._turned_away: str | None = None    # a token refused, not to be sent again
         self._who: str | None = None            # the account at the last look,
         self._looked = False                    # if there has been one
@@ -203,9 +211,13 @@ class Fetcher:
         self.wait_until = 0.0                   # told to slow down: not before then
         self.problem: str | None = None         # why the last ask didn't work, if it didn't
 
-    def due(self, have: float | None, replied: float | None, now: float) -> bool:
+    def due(self, have: float | None, replied: float | None, now: float, reset: bool = False) -> bool:
         """Whether to ask, given when the newest numbers are from (have) and when Claude Code
-        last replied."""
+        last replied. `reset`: a reply since shows the limits were reset, so a model's week in
+        them is old however new they are; that's asked about at once, if it hasn't been asked
+        early in the last five minutes, and only half a minute after the last ask."""
+        if reset and now >= self._held and now - self._tried >= SOON and now - self._early >= EVERY:
+            return True
         if now < self._not_before:
             return False
         if have is None:
@@ -214,13 +226,13 @@ class Fetcher:
         return age >= EVERY and ((replied is not None and replied > have) or age >= QUIET_EVERY)
 
     def poll(self, who: str | None, path: Path | None, have: float | None, replied: float | None,
-             still: Callable[[str], bool] | None = None) -> None:
+             still: Callable[[str], bool] | None = None, reset: bool = False) -> None:
         now = time.time()
         if who != self._who or not self._looked:
             # Another account than a moment ago: its sign-in may not be in place yet, and the
             # one still there would bring the other account's numbers.
             if self._looked:
-                self._not_before = max(self._not_before, now + SETTLE)
+                self._hold(now + SETTLE)
             self._who, self._looked = who, True
         if who is None or path is None or (self._asking is not None and not self._asking.done()):
             return
@@ -228,9 +240,17 @@ class Fetcher:
         heard = self._heard.get(who)
         if heard is not None and (have is None or heard > have):
             have = heard
-        if self.due(have, replied, now):
+        if self.due(have, replied, now, reset):
+            if now < self._not_before:
+                self._early = now               # ahead of time, for a reset
+            self._tried = now
             self._not_before = now + EVERY      # however it goes, not again straight away
             self._asking = self._pool.submit(self.once, who, path, still)
+
+    def _hold(self, until: float) -> None:
+        """Not before then, a reset or not."""
+        self._held = max(self._held, until)
+        self._not_before = max(self._not_before, until)
 
     def once(self, who: str, path: Path, still: Callable[[str], bool] | None = None) -> bool:
         """Asks now, and saves the answer; False, and why in .problem, if it didn't work out.
@@ -249,6 +269,7 @@ class Fetcher:
                 self._turned_away = found.token
             if refusal.status == 429:
                 self._not_before = self.wait_until = time.time() + (refusal.wait or SLOW_DOWN)
+                self._held = max(self._held, self.wait_until)
             return self._failed(refusal.why)
         except Exception as error:      # whatever goes wrong, the app carries on
             return self._failed(f"couldn't ask ({error.__class__.__name__})")
@@ -256,6 +277,7 @@ class Fetcher:
             # Whose numbers these are can't be told: the sign-in was read a moment after the
             # account's name, and one of the two has changed.
             self._not_before = time.time() + SETTLE
+            self._held = max(self._held, self._not_before)
             return self._failed("the account signed in changed while asking")
         try:
             save(path, answer, who, time.time())

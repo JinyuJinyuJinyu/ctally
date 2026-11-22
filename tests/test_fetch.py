@@ -191,6 +191,21 @@ def test_asks_when_the_numbers_are_old_and_claude_code_has_replied_since():
     assert fetcher.due(now - QUIET_EVERY - 5, None, now)                    # an hour on, ask anyway
 
 
+def test_a_reset_is_told_by_less_used_before_the_window_ends():
+    """A window only fills up until it ends: less used in it than the last answer said, by a
+    reply since, means the limits were reset."""
+    from ctally.usage import Limit, Usage, reset_since
+
+    def week(percent, resets=2_000_000.0):
+        return Limit(("week",), "Current week (all models)", "Week", "7d", percent, resets)
+    answer = Usage((week(65),), 1000.0)
+    assert reset_since(answer, Usage((week(15),), 1100.0))
+    assert not reset_since(answer, Usage((week(62),), 1100.0))                 # a reply a moment behind
+    assert not reset_since(answer, Usage((week(15),), 900.0))                  # from before the answer
+    assert not reset_since(Usage((week(65, 1050.0),), 1000.0), Usage((week(15),), 1100.0))  # a new week
+    assert not reset_since(None, Usage((week(15),), 1100.0)) and not reset_since(answer, None)
+
+
 class Asks:
     """Stands in for sign_in() and ask(): one sign-in, and one answer or refusal per ask."""
 
@@ -322,7 +337,66 @@ def test_the_reader_asks_in_the_background_and_shows_the_answer(own_usage_and_pr
     assert asks.tokens == ["token-1"]                  # once is enough for five minutes
 
 
+def test_a_reset_shown_by_a_reply_is_asked_about_at_once(own_usage_and_prefs, monkeypatch):
+    """The limits are reset: the next reply has the week at 15% where the answer a minute before
+    had 65%, and that answer's 99% of Fable's week is from before the reset. It's shown as that
+    old, and Anthropic is asked at once rather than five minutes on."""
+    home = own_usage_and_prefs
+    claude_json(home, week=65, fable=99, age=60)
+    monkeypatch.setattr(UsageReader, "EVERY", 0.0)
+    asks = Asks(utilization(15, 0))
+    reader = UsageReader(home / ".claude.json", home / ".statusline",
+                         fetcher=Fetcher(asks.sign_in, asks.ask, log=lambda _: None))
+    first = reader.poll()
+    assert percents(first) == [("Week", 65), ("Week · Fable", 99)] and asks.tokens == []
+    (home / ".statusline").write_text(json.dumps({"rate_limits": {
+        "seven_day": {"used_percentage": 15, "resets_at": 4070939400}}}))
+    reset = reader.poll()
+    assert [(l.short, l.percent, reset.behind(l)) for l in reset.limits] == [
+        ("Week", 15, False), ("Week · Fable", 99, True)]
+    reader.fetcher._asking.result(timeout=5)
+    later = reader.poll()
+    assert [(l.short, l.percent, later.behind(l)) for l in later.limits] == [
+        ("Week", 15, False), ("Week · Fable", 0, False)]
+    assert asks.tokens == ["token-1"]
+
+
+def test_a_reset_is_asked_about_once_in_five_minutes_and_never_while_told_to_wait(tmp_path):
+    asks = Asks(utilization(65, 99), utilization(15, 0), utilization(15, 0))
+    fetcher = Fetcher(asks.sign_in, asks.ask, log=lambda _: None)
+    path = tmp_path / "f"
+    fetcher.poll(ACCOUNT, path, None, None)
+    fetcher._asking.result(timeout=5)
+    have = time.time()
+    fetcher.poll(ACCOUNT, path, have, time.time(), reset=True)
+    assert len(asks.tokens) == 1                                # just asked: half a minute first
+    fetcher._tried -= fetch.SOON                                # half a minute on
+    fetcher.poll(ACCOUNT, path, have, time.time(), reset=True)
+    fetcher._asking.result(timeout=5)
+    assert len(asks.tokens) == 2
+    fetcher._tried -= fetch.SOON                                # a reset again, but it's asked early once
+    fetcher.poll(ACCOUNT, path, have, time.time(), reset=True)
+    assert len(asks.tokens) == 2
+    fetcher._tried, fetcher._early = -EVERY, -EVERY             # five minutes on, told to wait
+    fetcher._hold(time.time() + 60)
+    assert not fetcher.due(have, time.time(), time.time(), reset=True)
+
+
 # MARK: ctally usage
+
+def test_ctally_usage_asks_at_once_after_a_reset(own_usage_and_prefs, monkeypatch, capsys):
+    home = own_usage_and_prefs
+    claude_json(home, week=65, fable=99, age=60)
+    asks = Asks(utilization(15, 0))
+    monkeypatch.setattr(fetch, "sign_in", asks.sign_in)
+    monkeypatch.setattr(fetch, "ask", asks.ask)
+    assert cli.main(["usage"]) == 0
+    assert "99%" in capsys.readouterr().out and asks.tokens == []          # a minute old: no need
+    usage.STATUS_LINE.write_text(json.dumps({"rate_limits": {
+        "seven_day": {"used_percentage": 15, "resets_at": 4070939400}}}))
+    assert cli.main(["usage"]) == 0
+    out = capsys.readouterr().out
+    assert "Current week (Fable)       ░░░░░░░░░░   0%" in out and asks.tokens == ["token-1"]
 
 def test_ctally_usage_asks_first_unless_switched_off(own_usage_and_prefs, monkeypatch, capsys):
     from ctally.prefs import Prefs
