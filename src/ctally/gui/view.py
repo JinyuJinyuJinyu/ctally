@@ -50,6 +50,7 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiAppl
                            QPainterPath, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import QLineEdit, QToolTip, QWidget
 
+from .. import system
 from ..sessions import BY_URGENCY, Agents, Context, Session, State
 from ..usage import Usage, ago, describe, percent_text, when
 
@@ -377,9 +378,11 @@ class TallyView(QWidget):
     @folded.setter
     def folded(self, value: bool) -> None:
         if value != self._folded:
-            if value:
-                self.end_search(clear=True)     # folded away with the field
             self._folded = value
+            if value:
+                # Folded away with the field: once folded, so clearing it doesn't first
+                # unfold the window to every row.
+                self.end_search(clear=True)
             self._hovered = None
             self._version += 1
             self.update()
@@ -497,7 +500,11 @@ class TallyView(QWidget):
         self._place_box()
         if not shown:
             self.search_started.emit(box)
-        box.raise_()
+        # On macOS Qt's raise brings the whole app forward, and it stays there once the box is
+        # gone, so what I was typing in never gets the keyboard back. A panel just shown is on
+        # top already.
+        if not system.MAC:
+            box.raise_()
         box.activateWindow()
         box.setFocus()
         self._version += 1
@@ -599,6 +606,7 @@ class TallyView(QWidget):
         self._version += 1
         self._recompute()
         self.update()
+        self._place_box()           # the field moves with the limits, the window's size or not
 
     def settle(self) -> None:
         """Skips every entry animation, as if all of it had happened long ago."""

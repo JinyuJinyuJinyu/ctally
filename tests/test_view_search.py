@@ -134,10 +134,16 @@ SCRIPT = textwrap.dedent('''
         other.close()
         assert click(view, view._clear_rect.center()) == [] and view.query == "" and ids(view) == everyone
 
-        # Folding takes the field away, and the search with it; so does going down to badges.
+        # Folding takes the field away, and the search with it, the window going straight to the
+        # bar rather than first out to every row; so does going down to badges.
         view.set_query("api")
+        sizes = []
+        record = lambda: sizes.append(view.preferred_size())
+        view.layout_changed.connect(record)
         view.folded = True
+        view.layout_changed.disconnect(record)
         assert view.query == "" and not view._has_search
+        assert sizes and all(size == view.preferred_size() for size in sizes), (sizes, view.preferred_size())
         view.folded = False
         view.set_query("api")
         click(view, view._search_rect.center())
@@ -152,6 +158,21 @@ SCRIPT = textwrap.dedent('''
         view.apply(sessions + [Session("new", State.IDLE, "web", 200, "Other", home + "/code/web")])
         assert ids(view) == ["demo-1", "demo-5"]
         view.hide()
+
+    # On macOS the box isn't raised: Qt's raise there brings the whole app forward, and it stays
+    # forward once the box is gone, with the keyboard.
+    from ctally import system
+    from ctally.gui.view import SearchBox
+    raised, was = [], system.MAC
+    SearchBox.raise_ = lambda self: raised.append(self)
+    for mac in (True, False):
+        system.MAC, raised[:] = mac, []
+        view = make()
+        view.start_search()
+        assert view.searching and bool(raised) is not mac, mac
+        view.end_search(clear=True)
+        view.hide()
+    system.MAC = was
 
     print("ok")
 ''')

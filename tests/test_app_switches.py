@@ -126,6 +126,25 @@ SCRIPT = textwrap.dedent('''
     app.processEvents()
     again = Controller(app, QLocalServer())
     assert again.snapshot_timer.interval() == 5 * 60_000 and again.keeper.store.keep_for == 7 * 86400
+
+    # macOS: the search box takes the keyboard as a panel, CTally staying behind; only if macOS
+    # doesn't give it the keyboard (whatever Qt says) does CTally come forward, going back after.
+    from ctally import system
+    from ctally.gui.view import SearchBox
+    calls, was = [], system.MAC
+    mac.activate, mac.hide_app = lambda: calls.append("activate"), lambda: calls.append("hide")
+    system.MAC = True
+    for given in (True, False):
+        calls.clear()
+        mac.has_keyboard = lambda widget, given=given: given
+        box = SearchBox(c.view.fonts.search)
+        box.show()
+        c._search_started(box)
+        until(lambda: calls, timeout=0.6)
+        c._search_ended()
+        box.hide()
+        assert calls == ([] if given else ["activate", "hide"]), (given, calls)
+    system.MAC = was
     print("ok")
 ''')
 

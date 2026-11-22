@@ -70,6 +70,18 @@ def float_everywhere(widget) -> None:
         pass
 
 
+def has_keyboard(widget) -> bool | None:
+    """Whether macOS has given a window the keyboard, or None if it can't tell. Qt counts a
+    window shown as the active one before macOS does, and whether or not it ever does."""
+    window = _window(widget)
+    if window is None:
+        return None
+    try:
+        return bool(window.isKeyWindow())
+    except Exception:
+        return None
+
+
 def follow_active_space(widget) -> None:
     """Opens the settings window on the Space I'm looking at, even beside a full-screen
     terminal, instead of yanking me back to the Space it was last on."""

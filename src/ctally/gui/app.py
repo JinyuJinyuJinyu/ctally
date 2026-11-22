@@ -333,7 +333,7 @@ class Controller:
         mac.float_everywhere(box)
 
         def check() -> None:
-            if box.isVisible() and not box.isActiveWindow():
+            if box.isVisible() and mac.has_keyboard(box) is False:
                 self._forward_for_search = True
                 mac.activate()
                 box.activateWindow()
