@@ -11,7 +11,7 @@ ctally setup --tmux
 The name comes from the *tally light*, the lamp on a broadcast camera that shows it's live, and from tallying
 up your sessions.
 
-![CTally with one session, three sessions, a list of six with each one's context window, a question waiting to be answered, subagents at work and the usage limits, and the list folded](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/overview.png)
+![CTally with one session, three sessions, a list of six with each one's context window, a question waiting to be answered, subagents at work, its search field and the usage limits, and the list folded](https://raw.githubusercontent.com/JinyuJinyuJinyu/ctally/main/docs/overview.png)
 
 Every session gets a hexagon whose glyph and color say what it's doing:
 
@@ -159,6 +159,10 @@ say), and usage credits if you've switched them on.
   (**Exact usage** in Settings), or while it can't get through, and a model's week stays as `/usage` last had
   it. Once that's more than an hour behind the rest, its line is dimmed and says so (`13 h ago`, or
   `as of 9:33 am` in the menu and `ctally usage`).
+- **Weeks reset early** (by Anthropic, say) show at once. The week follows with the next reply, and that
+  reply, with less of the week used than CTally last heard, or the week ending later, before it was due to
+  end, has it ask Anthropic for each model's week at once rather than in five minutes. Until the answer, a
+  model's week from before the reset is dimmed and says `before reset`.
 - **Hitting a limit** shows it at 100% at once, and the sessions it stopped as **limit**. A prompt you send
   before it resets doesn't make them look busy, because it can't get through. A limit reset early starts a new
   window, and the meter follows it from the next reply.
@@ -181,8 +185,8 @@ Where the numbers come from: Claude Code passes the session and week limits to i
 reply, so `ctally setup` adds a status line that hands them to CTally and shows nothing itself (a status
 line you already had keeps showing; CTally's runs it). Everything else comes from asking Anthropic, as
 `/usage` does: the app asks every five minutes, while its limits are on screen and Claude Code has replied
-since the last answer (or that answer is an hour old), and `ctally usage` asks when what CTally has is five
-minutes old. The copy of the `/usage` numbers Claude Code keeps in `~/.claude.json` counts too, when it's the
+since the last answer (or that answer is an hour old), and at once when a reply shows the weeks were reset;
+`ctally usage` asks when what CTally has is five minutes old, or a reset has come since. The copy of the `/usage` numbers Claude Code keeps in `~/.claude.json` counts too, when it's the
 newer. Limits apply to Pro, Max and Team plans; with an API key there are none to show.
 
 Claude Code doesn't say which account a session's numbers are for, and a session keeps handing over the
@@ -469,7 +473,10 @@ Two pieces, connected by a folder:
    aren't re-read. Sessions whose process has exited drop off the display. The exception is when nothing else
    is running: a finished one stays so you can still see it. Leftover files are cleaned up after a day. The
    usage limits it checks every two seconds, the same way, and asks Anthropic for them, on a thread of its
-   own, once they're five minutes old and Claude Code has replied since. The answer goes in
+   own, once they're five minutes old and Claude Code has replied since. A reply with less of the week used
+   than the last answer said (five points less, so a reply a moment behind doesn't count), or the week ending
+   later, before it was due to end, can only follow a reset: then it asks at once, half a minute after its
+   last ask at the soonest, and early like that once in five minutes. The answer goes in
    `~/.claude/ctally.d/.fetched/<account id>`, the way `~/.claude.json` keeps its copy, and the newer of the
    two counts.
 
