@@ -1145,11 +1145,14 @@ class StateReader:
             state = State.WORKING       # what it asked is dismissed, and its agents work on
         # What it asked counts only while it's still waiting on me for it.
         ask = self.asks.get(name) if state is State.WAITING and not limited else None
-        # A background job is wherever its terminal is.
-        pid = 0 if gone else self.fronts[name].pid if name in self.fronts else entry.pid
+        if gone:
+            pid, tmux = 0, None
+        else:
+            # A background job is wherever its terminal is.
+            pid = self.fronts[name].pid if name in self.fronts else entry.pid
+            tmux = self.locator.location(name, pid)
         return Session(id=name, state=state, label=entry.label, pid=pid,
-                       title=title, path=path,
-                       tmux=None if gone else self.locator.location(name, pid),
+                       title=title, path=path, tmux=tmux,
                        agents=self.watcher.activity(name, self.names.transcript(name)),
                        limited=limited, ask=ask, context=self.contexts.get(name))
 

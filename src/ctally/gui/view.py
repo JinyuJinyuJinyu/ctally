@@ -51,6 +51,7 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiAppl
 from PySide6.QtWidgets import QLineEdit, QToolTip, QWidget
 
 from .. import system
+from . import mac
 from ..sessions import BY_URGENCY, Agents, Context, Session, State
 from ..usage import Usage, ago, describe, percent_text, when
 
@@ -400,6 +401,7 @@ class TallyView(QWidget):
             self._hovered = None
             self._version += 1
             self.update()
+            self._place_box()       # the field moves to the other end, whether the window does or not
 
     @property
     def max_height(self) -> int | None:
@@ -501,9 +503,10 @@ class TallyView(QWidget):
         if not shown:
             self.search_started.emit(box)
         # On macOS Qt's raise brings the whole app forward, and it stays there once the box is
-        # gone, so what I was typing in never gets the keyboard back. A panel just shown is on
-        # top already.
-        if not system.MAC:
+        # gone, so what I was typing in never gets the keyboard back.
+        if system.MAC:
+            mac.bring_forward(box)
+        else:
             box.raise_()
         box.activateWindow()
         box.setFocus()

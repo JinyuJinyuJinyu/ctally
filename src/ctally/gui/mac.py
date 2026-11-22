@@ -70,6 +70,18 @@ def float_everywhere(widget) -> None:
         pass
 
 
+def bring_forward(widget) -> None:
+    """In front of the app's other windows at its level, the app staying where it is: Qt's
+    raise brings the whole app forward, for good."""
+    window = _window(widget)
+    if window is None:
+        return
+    try:
+        window.orderFront_(None)
+    except Exception:
+        pass
+
+
 def has_keyboard(widget) -> bool | None:
     """Whether macOS has given a window the keyboard, or None if it can't tell. Qt counts a
     window shown as the active one before macOS does, and whether or not it ever does."""

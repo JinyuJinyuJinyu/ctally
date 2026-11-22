@@ -161,18 +161,31 @@ SCRIPT = textwrap.dedent('''
 
     # On macOS the box isn't raised: Qt's raise there brings the whole app forward, and it stays
     # forward once the box is gone, with the keyboard.
+    # It's brought forward the way AppKit does it, the app staying behind.
     from ctally import system
+    from ctally.gui import mac as macos
     from ctally.gui.view import SearchBox
-    raised, was = [], system.MAC
+    raised, brought, was = [], [], system.MAC
     SearchBox.raise_ = lambda self: raised.append(self)
+    macos.bring_forward = lambda widget: brought.append(widget)
     for mac in (True, False):
-        system.MAC, raised[:] = mac, []
+        system.MAC, raised[:], brought[:] = mac, [], []
         view = make()
         view.start_search()
-        assert view.searching and bool(raised) is not mac, mac
+        assert view.searching and bool(raised) is not mac and bool(brought) is mac, mac
         view.end_search(clear=True)
         view.hide()
     system.MAC = was
+
+    # The box follows the field to the other end when the list turns to grow the other way,
+    # whether the window moves or not.
+    view = make()
+    view.start_search()
+    view.grows_down = True
+    text = view._search_text_rect.adjusted(-2, 2, 0, -2)
+    assert view._box.geometry().topLeft() == view.mapToGlobal(text.topLeft().toPoint())
+    view.end_search(clear=True)
+    view.hide()
 
     print("ok")
 ''')
