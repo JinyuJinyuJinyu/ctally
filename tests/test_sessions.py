@@ -16,6 +16,9 @@ from ctally.sessions import (AgentWatcher, Agents, Ask, Context, Member, Names, 
 
 LIVE = os.getpid()
 
+# Notes here are dated as a test needs, older than the processes they name.
+pytestmark = pytest.mark.usefixtures("long_lived")
+
 
 @pytest.fixture
 def dirs(tmp_path):
@@ -362,6 +365,30 @@ def test_a_pid_passed_on_to_another_process_is_not_that_session(dirs, registry):
     state, projects = dirs
     listed(registry, LIVE, "old", procStart="12345")       # an earlier process, given this pid
     assert StateReader(state, projects, registry).poll() == []
+
+
+def test_a_session_resumed_since_its_note_is_where_the_list_has_it(dirs, registry, processes):
+    """Resumed in a new process, after a restart say, a session sits idle with no word to the
+    hooks until it's next used: their note still names the process from before."""
+    state, projects = dirs
+    write(state, "s", f"done {dead_pid()} api\n")
+    resumed = processes()
+    listed(registry, resumed, "s", started=time.time())
+    assert [(s.id, s.state, s.pid) for s in StateReader(state, projects, registry).poll()] == [
+        ("s", State.IDLE, resumed)]
+
+
+def test_a_note_from_before_its_pid_passed_on_is_set_aside(dirs, registry, processes, long_lived, monkeypatch):
+    """After a restart the hooks' note names a process from before it, whose number another
+    process has now, or a thread of one. The session is where Claude Code's list has it since
+    it was resumed, not in the pane of whatever has the number."""
+    monkeypatch.setattr(system, "started_after", long_lived)        # the real check
+    state, projects = dirs
+    write(state, "s", f"done {LIVE} api\n", mtime=system.boot_time() - 3600)
+    resumed = processes()
+    listed(registry, resumed, "s", started=time.time())
+    assert [(s.id, s.state, s.pid) for s in StateReader(state, projects, registry).poll()] == [
+        ("s", State.IDLE, resumed)]
 
 
 def test_a_session_the_process_has_left_is_gone(dirs, registry):

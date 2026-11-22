@@ -1041,7 +1041,7 @@ class StateReader:
 
         @property
         def alive(self) -> bool:
-            return system.is_alive(self.pid)
+            return system.is_alive(self.pid, since=self.modified)
 
     def __init__(self, directory: Path = STATE_DIR, projects: Path = PROJECTS_DIR, registry: Path | None = None,
                  viewers: Viewers | None = None):
@@ -1123,7 +1123,9 @@ class StateReader:
         return [self._snapshot(n) for n in sorted(self.cache, key=age) if self.cache[n].state is State.DONE]
 
     def _snapshot(self, name: str) -> Session:
-        if name not in self.cache:
+        # Listed but not heard from: the hooks have no note on it, or only one from a process
+        # gone since, before the session was resumed in another (after a restart, say).
+        if name in self.unheard:
             return self._listed(self.unheard[name])
         entry = self.cache[name]
         state, limited = entry.state, entry.limited

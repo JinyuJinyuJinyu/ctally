@@ -45,6 +45,18 @@ def wait_for(check, timeout: float = 5.0, every: float = 0.05):
         time.sleep(every)
 
 
+@pytest.fixture
+def long_lived(monkeypatch):
+    """The hooks' notes a test writes stand for ones a long-running claude wrote, minutes or
+    days ago, but they name this process or one just started. Here a process counts as running
+    since before any note naming it, not as another given its number since. The real check is
+    the fixture's value, for a test of it."""
+    from ctally import system
+    real = system.started_after
+    monkeypatch.setattr(system, "started_after", lambda pid, when: False)
+    return real
+
+
 class Hook:
     """Runs the hook script the way Claude Code does: a state word, JSON on stdin."""
 

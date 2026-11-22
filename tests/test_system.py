@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -17,6 +19,38 @@ def test_is_alive():
     assert not system.is_alive(dead_pid())
     assert system.is_alive(0)                    # no pid recorded: can't disprove it
     assert system.is_alive(1)                    # not ours to signal, but alive
+
+
+def test_a_process_younger_than_the_word_from_it_is_another():
+    """A note names the process that wrote it. One running now with that number that started
+    after the note was written only has the number, passed on since: after a restart, say."""
+    assert system.is_alive(os.getpid(), since=time.time())
+    assert not system.is_alive(os.getpid(), since=system.boot_time() - 3600)
+    assert not system.is_alive(dead_pid(), since=time.time())
+    assert system.is_alive(0, since=time.time())               # no pid recorded: still can't disprove it
+
+
+@pytest.mark.skipif(not system.LINUX, reason="a thread has a number of its own on Linux")
+def test_a_thread_given_a_notes_number_is_not_the_process_that_wrote_it():
+    """As after a restart: a note from a claude process before it, and a thread of one started
+    since has the same number now."""
+    written = time.time() - 10
+    started, stop, number = threading.Event(), threading.Event(), []
+
+    def thread() -> None:
+        number.append(threading.get_native_id())
+        started.set()
+        stop.wait()
+
+    worker = threading.Thread(target=thread)
+    worker.start()
+    try:
+        assert started.wait(5) and number[0] != os.getpid()
+        assert system.is_alive(number[0])                   # it answers to its number as a process would
+        assert not system.is_alive(number[0], since=written)
+    finally:
+        stop.set()
+        worker.join()
 
 
 def test_own_environment():

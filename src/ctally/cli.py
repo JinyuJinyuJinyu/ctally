@@ -84,7 +84,7 @@ def live_sessions() -> list[Live]:
         if len(fields) < 2 or not fields[1].isdigit():
             continue
         pid = int(fields[1])
-        if not system.is_alive(pid):
+        if not system.is_alive(pid, since=modified):
             continue
         state = fields[0] if fields[0] in RANK else "idle"
         if state == "limited" and not (limit and limit.holds(time.time())):
@@ -269,7 +269,7 @@ def snapshot(action: str, number: int | None, dry_run: bool) -> int:
         return 1
     if action == "list":
         picked = store.pick(tmux.sessions())
-        boot = snapshots.boot_time()
+        boot = system.boot_time()
         print("    #  saved                Claude  tmux sessions (panes)")
         for index, (path, data) in enumerate(entries[:20], 1):
             if index > 1 and data["saved_at"] < boot <= entries[index - 2][1]["saved_at"]:

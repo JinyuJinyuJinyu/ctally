@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from typing import NamedTuple
 
 MAC = sys.platform == "darwin"
@@ -21,17 +22,71 @@ class TmuxPane(NamedTuple):
     pane: str       # its pane, "%12"
 
 
-def is_alive(pid: int) -> bool:
-    """A session whose process is gone can no longer be doing anything."""
+def is_alive(pid: int, since: float | None = None) -> bool:
+    """A session whose process is gone can no longer be doing anything.
+
+    `since`, when the process was last heard from (Unix time): one that has started after that
+    only has its number, which passed to it once the one heard from had gone. After a restart
+    that's likely; on Linux even a thread may have it, threads and processes being numbered
+    from the same pool, and a thread answers to its number as a process would."""
     if pid <= 0:
         return True                 # no pid recorded, can't disprove it
     try:
         os.kill(pid, 0)
     except PermissionError:
-        return True                 # alive, just not ours to signal
+        pass                        # alive, just not ours to signal
     except OSError:
         return False
-    return True
+    return since is None or not started_after(pid, since)
+
+
+# Leeway for clocks read different ways, and file times rounded.
+LEEWAY = 2.0
+
+
+def started_after(pid: int, when: float) -> bool:
+    """Whether the process given `pid` now started after `when` (Unix time). On Linux by its
+    own start; elsewhere only a restart of the computer since then tells."""
+    if LINUX:
+        running = age(pid)
+        return running is not None and time.time() - running > when + LEEWAY
+    return when < boot_time() - LEEWAY
+
+
+def age(pid: int) -> float | None:
+    """How long a process has been running, in seconds. Linux only. Measured from the system's
+    uptime rather than the clock, so a clock set since doesn't throw it."""
+    ticks = started(pid)
+    try:
+        with open("/proc/uptime") as f:
+            up = float(f.read().split()[0])
+    except (OSError, IndexError, ValueError):
+        return None
+    return None if ticks is None else up - int(ticks) / os.sysconf("SC_CLK_TCK")
+
+
+_booted: float | None = None
+
+
+def boot_time() -> float:
+    """When the computer started, Unix time, or 0.0 if it can't tell. On macOS it's asked once."""
+    global _booted
+    if MAC:
+        if _booted is None:
+            answer = run(["sysctl", "-n", "kern.boottime"]) or ""
+            try:
+                _booted = float(answer.split("sec =")[1].split(",")[0])
+            except (IndexError, ValueError):
+                return 0.0
+        return _booted
+    try:
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime"):
+                    return float(line.split()[1])
+    except OSError:
+        pass
+    return 0.0
 
 
 def run(args: list[str], timeout: float = 5) -> str | None:

@@ -15,6 +15,9 @@ from conftest import TMUX, dead_pid, sleeper, wait_for
 import ctally.cli
 from ctally import cli, system
 
+# Notes here are dated as a test needs, older than the processes they name.
+pytestmark = pytest.mark.usefixtures("long_lived")
+
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
@@ -74,6 +77,21 @@ def test_sessions_the_hooks_have_not_heard_from_count_too(state, own_usage_and_p
     lines = [line.split() for line in capsys.readouterr().out.splitlines()]
     assert [(line[0], line[-2], line[-1]) for line in lines] == [("waiting", "p", "a"), ("working", "api", "y"),
                                                                  ("idle", "api", "x")]
+
+
+def test_a_note_from_before_its_pid_passed_on_is_set_aside(state, own_usage_and_prefs, outside_tmux, long_lived,
+                                                          monkeypatch):
+    """From before a restart, naming a process whose number another has now: the session is
+    where Claude Code's list has it."""
+    monkeypatch.setattr(system, "started_after", long_lived)        # the real check
+    registry = own_usage_and_prefs / "sessions"
+    registry.mkdir()
+    resumed = outside_tmux()
+    (registry / f"{resumed}.json").write_text(json.dumps({
+        "pid": resumed, "sessionId": "s", "cwd": "/work/api", "kind": "interactive", "status": "idle",
+        "procStart": system.started(resumed), "startedAt": 1000, "updatedAt": 1000}))
+    write(state, "s", f"done {os.getpid()} p\n", mtime=system.boot_time() - 3600)
+    assert [(s.id, s.state, s.pid) for s in cli.live_sessions()] == [("s", "idle", resumed)]
 
 
 def test_a_session_gone_on_in_a_background_job_counts_once(state, own_usage_and_prefs, outside_tmux, capsys):

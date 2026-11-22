@@ -334,28 +334,11 @@ def counts(sessions: list[dict]) -> tuple[int, int]:
 
 # MARK: Keeping them
 
-def boot_time() -> float:
-    if system.MAC:
-        answer = system.run(["sysctl", "-n", "kern.boottime"]) or ""
-        try:
-            return float(answer.split("sec =")[1].split(",")[0])
-        except (IndexError, ValueError):
-            return 0.0
-    try:
-        with open("/proc/stat") as f:
-            for line in f:
-                if line.startswith("btime"):
-                    return float(line.split()[1])
-    except OSError:
-        pass
-    return 0.0
-
-
 def boot_id() -> str:
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     except OSError:
-        return str(int(boot_time()))        # none on macOS: when it started says which boot
+        return str(int(system.boot_time()))        # none on macOS: when it started says which boot
 
 
 def same_boot(marked: str, now: str) -> bool:
@@ -430,7 +413,7 @@ class Snapshots:
         """Deletes the snapshots older than they're kept for (three days, unless set otherwise),
         but never the newest from before the computer last started. Returns those deleted."""
         now = time.time() if now is None else now
-        boot = boot_time() if boot is None else boot
+        boot = system.boot_time() if boot is None else boot
         entries = self.entries()
         keep = next((path for path, data in entries if data["saved_at"] < boot), None)
         gone = []
@@ -456,7 +439,7 @@ class Snapshots:
         now, else the newest."""
         entries = self.entries()
         if not self.restored_this_boot():
-            boot = boot_time() if boot is None else boot
+            boot = system.boot_time() if boot is None else boot
             entries = [(path, data) for path, data in entries if data["saved_at"] < boot] or entries
         for path, data in entries:
             if any(s["name"] not in running for s in data["sessions"]):

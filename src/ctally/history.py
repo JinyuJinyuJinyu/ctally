@@ -136,9 +136,10 @@ def live(directory: Path | None = None) -> dict[str, str]:
     for name in names:
         try:
             fields = (directory / name).read_text(errors="replace").split()
+            modified = (directory / name).stat().st_mtime
         except OSError:
             continue
-        if len(fields) >= 2 and fields[1].isdigit() and system.is_alive(int(fields[1])):
+        if len(fields) >= 2 and fields[1].isdigit() and system.is_alive(int(fields[1]), since=modified):
             found[name] = fields[0]
     return found
 
