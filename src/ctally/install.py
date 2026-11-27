@@ -198,7 +198,7 @@ def install_launcher(ctally: str) -> str:
         f'Exec="{ctally}" run',
         f"Icon={ICON}",
         "Terminal=false",
-        "Categories=Utility;Development;",
+        "Categories=Utility;",
         "Keywords=claude;tally;sessions;",
         "StartupWMClass=CTally",
         "StartupNotify=false",
