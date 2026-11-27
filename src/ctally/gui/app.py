@@ -8,7 +8,7 @@ timers run but the snapshots'. The tray icon's menu also lists your plan's usage
 whenever they're known. While they're looked at, they're asked of Anthropic every few
 minutes, unless that's switched off: see fetch.py.
 
-Snapshots of tmux and its Claude Code sessions, every couple of minutes, are switched on and
+Snapshots of tmux and its Claude Code sessions, every half hour or as set, are switched on and
 off from the same menus and the settings window, which also sets how often they're taken and
 how many days they're kept; the menus offer to restore one when it has a tmux session that
 isn't running, as after a restart. See snapshots.py.
@@ -54,6 +54,7 @@ def run() -> int:
         mac.become_accessory()
     else:
         app.setWindowIcon(QIcon(app_icon(128)))
+        _draw_launcher_icon()
 
     path = prefs.socket_path()
     server = QLocalServer()
@@ -71,6 +72,18 @@ def run() -> int:
     ticker.start(500)
     controller.start(by_hand=bool(sys.stdin and sys.stdin.isatty()))
     return app.exec()
+
+
+def _draw_launcher_icon() -> None:
+    """The icon that CTally's entry among the applications names (install.install_launcher):
+    drawn here, where there's Qt to draw it with, once the entry is there and the icon isn't."""
+    from ..install import ICON, LAUNCHER
+    try:
+        if LAUNCHER.exists() and not ICON.exists():
+            ICON.parent.mkdir(parents=True, exist_ok=True)
+            app_icon(128).save(str(ICON))       # 256 pixels across
+    except OSError:
+        pass
 
 
 def _prefer_xwayland() -> None:
@@ -249,7 +262,7 @@ class Controller:
         return bool(self.prefs["snapshots"])
 
     def set_keep_snapshots(self, on: bool) -> None:
-        """On takes one at once, then one every couple of minutes (as set), and switches off ccsnap's
+        """On takes one at once, then one every half hour (or as set), and switches off ccsnap's
         own timer, which would only do the same."""
         self.prefs["snapshots"] = bool(on)
         if on:

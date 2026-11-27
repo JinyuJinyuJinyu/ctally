@@ -33,7 +33,7 @@ class Prefs:
     ([right, y, "top"]; [right, bottom] from before it could grow down)."""
 
     DEFAULTS = {"enabled": True, "opacity": 0.8, "folded": False, "usage": True, "exact_usage": True,
-                "snapshots": False, "snapshot_minutes": 2, "snapshot_days": 3, "anchor": None}
+                "snapshots": False, "snapshot_minutes": 30, "snapshot_days": 3, "anchor": None}
 
     def __init__(self, path: Path | None = None):
         self.path = path or config_dir() / "prefs.json"

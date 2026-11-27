@@ -12,7 +12,7 @@ from conftest import ROOT
 SCRIPT = '''
 import json, shutil, sys
 sys.path[:0] = [sys.argv[1] + "/src"]
-from ctally import fetch, prefs, sessions, snapshots, usage
+from ctally import fetch, install, prefs, sessions, snapshots, usage
 print(json.dumps({
     "sign-in": str(fetch.CLAUDE_DIR),
     "registry, jobs and transcripts for snapshots": [str(p) for p in snapshots.Places()],
@@ -23,6 +23,7 @@ print(json.dumps({
     "transcripts": str(sessions.PROJECTS_DIR),
     "running sessions": str(sessions.REGISTRY_DIR),
     "settings": str(prefs.config_dir()),
+    "its place among the applications, and its icon": [str(install.LAUNCHER), str(install.ICON)],
     "systemctl": shutil.which("systemctl"),
     "launchctl": shutil.which("launchctl"),
     "tmux server for snapshots": snapshots.Tmux().socket,

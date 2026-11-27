@@ -162,12 +162,14 @@ def test_kept_as_many_days_as_set(tmp_path):
 
 
 def test_how_often_and_how_long_as_set_within_bounds():
-    assert snapshots.minutes(2) == 2 and snapshots.minutes(15) == 15 and snapshots.minutes(7.9) == 7
-    assert snapshots.minutes(0) == 1 and snapshots.minutes(-5) == 1 and snapshots.minutes(500) == 60
-    assert snapshots.minutes(float("inf")) == 60
+    # Half an hour to eight hours: oftener than that fills the folder with little that's new.
+    assert snapshots.minutes(30) == 30 and snapshots.minutes(90) == 90 and snapshots.minutes(240.9) == 240
+    assert snapshots.minutes(0) == 30 and snapshots.minutes(-5) == 30 and snapshots.minutes(5000) == 480
+    assert snapshots.minutes(2) == 30                   # set when it could be every 2 minutes
+    assert snapshots.minutes(float("inf")) == 480
     # A file anyone can edit: what isn't a number is the default.
     for odd in ("10", None, True, [], float("nan")):
-        assert snapshots.minutes(odd) == 2 and snapshots.days(odd) == 3, odd
+        assert snapshots.minutes(odd) == 30 and snapshots.days(odd) == 3, odd
     assert snapshots.days(3) == 3 and snapshots.days(14) == 14
     assert snapshots.days(0) == 1 and snapshots.days(365) == 30
 

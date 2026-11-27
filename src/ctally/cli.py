@@ -19,7 +19,7 @@
                                 waited on you, prompts, turns finished, sessions, limits hit
   ctally snapshot save|list|restore [N] [--dry-run]
                                 snapshots of tmux and its Claude Code sessions, to bring back after
-                                a restart (the app takes one every 2 minutes, or as set, while
+                                a restart (the app takes one every half hour, or as set, while
                                 they're on): take one now, list them, or restore the one marked *
                                 (or number N)
   ctally jump [pane client socket]

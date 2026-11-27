@@ -1,16 +1,19 @@
 """The settings window: CTally on or off, how see-through it is, whether it shows your
 plan's usage limits and asks Anthropic for them, and whether it takes snapshots of tmux for
-after a restart, how often, and how many days it keeps them."""
+after a restart, how often, and how many days it keeps them. Close Window puts it away and
+leaves CTally running; Quit CTally stops it, and says how to start it again."""
 from __future__ import annotations
 
 import math
+import re
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut
+from PySide6.QtGui import (QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut,
+                           QValidator)
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QSlider, QSpinBox, QVBoxLayout, QWidget)
 
-from .. import snapshots, system
+from .. import install, snapshots, system
 from ..sessions import BY_URGENCY
 
 OPACITY_RANGE = (0.3, 1.0)
@@ -94,9 +97,68 @@ class Switch(QAbstractButton):
         p.end()
 
 
+def duration_text(minutes: int) -> str:
+    """Minutes as hours and minutes: "30 min", "1 h", "1 h 30 min"."""
+    hours, rest = divmod(minutes, 60)
+    return " ".join(part for part in (f"{hours} h" if hours else "", f"{rest} min" if rest or not hours else "")
+                    if part)
+
+
+_DURATION = re.compile(r"\s*(?:(\d+(?:[.,]\d+)?)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*(m(?:in(?:ute)?s?)?)?)?\s*",
+                       re.IGNORECASE)
+
+
+def duration_minutes(text: str, most_hours: int) -> int | None:
+    """A time as typed, in minutes: "90", "90 min", "2 h", "1.5h", "1 h 30 min". A bare number
+    no bigger than the most hours there can be is hours: nobody means 4 minutes there."""
+    found = _DURATION.fullmatch(text)
+    if not found or not (found[1] or found[2]):
+        return None
+    hours = float(found[1].replace(",", ".")) if found[1] else 0.0
+    rest = int(found[2]) if found[2] else 0
+    if not found[1] and not found[3] and rest <= most_hours:
+        hours, rest = float(rest), 0
+    return round(hours * 60) + rest
+
+
+class DurationBox(QSpinBox):
+    """A time of half an hour to some hours: kept in minutes, shown as hours and minutes, and
+    stepped by the half hour. Typed, it's taken any way duration_minutes() reads it, and too
+    much or too little is the nearest allowed."""
+
+    def __init__(self, least: int, most: int):
+        super().__init__()
+        self.setRange(least, most)
+        self.setSingleStep(30)
+        # As wide as its longest: Qt allows only for the ends of the range.
+        longest = max((duration_text(m) for m in range(least, most + 1, 30)), key=len)
+        metrics = self.fontMetrics()
+        extra = metrics.horizontalAdvance(longest) - max(metrics.horizontalAdvance(duration_text(m)) for m in (least, most))
+        self.setMinimumWidth(self.sizeHint().width() + max(extra, 0))
+
+    def _typed(self, text: str) -> int | None:
+        return duration_minutes(text, self.maximum() // 60)
+
+    def textFromValue(self, value: int) -> str:
+        return duration_text(value)
+
+    def valueFromText(self, text: str) -> int:
+        minutes = self._typed(text)
+        return self.value() if minutes is None else min(max(minutes, self.minimum()), self.maximum())
+
+    def validate(self, text: str, position: int):
+        minutes = self._typed(text)
+        allowed = minutes is not None and self.minimum() <= minutes <= self.maximum()
+        return (QValidator.Acceptable if allowed else QValidator.Intermediate), text, position
+
+    def fixup(self, text: str) -> str:
+        minutes = self._typed(text)
+        return text if minutes is None else duration_text(min(max(minutes, self.minimum()), self.maximum()))
+
+
 class SettingsWindow(QWidget):
-    """Switch, opacity, usage limits, quit. Closing it with Esc or Cmd/Ctrl-W, like any small
-    panel."""
+    """Switch, opacity, usage limits, snapshots; Close Window and Quit CTally. Closing it with
+    Esc or Cmd/Ctrl-W, like any small panel."""
 
     toggled = Signal(bool)
     opacity_changed = Signal(float)
@@ -185,10 +247,8 @@ class SettingsWindow(QWidget):
         # How often, and for how long. Typed numbers count once they're done with (Return, or
         # moving on), so typing 15 isn't 1 first.
         every_title = QLabel("Every")
-        self.every_box = QSpinBox()
-        self.every_box.setRange(*snapshots.MINUTES)
-        self.every_box.setSuffix(" min")
-        self.every_box.setAccessibleName("Minutes between snapshots")
+        self.every_box = DurationBox(*snapshots.MINUTES)
+        self.every_box.setAccessibleName("Time between snapshots")
         self.every_box.setKeyboardTracking(False)
         self.every_box.valueChanged.connect(self.snapshot_minutes_changed)
         keep_title = QLabel("Keep for")
@@ -200,19 +260,34 @@ class SettingsWindow(QWidget):
         self.keep_box.valueChanged.connect(self._kept)
 
         where = "menu bar" if system.MAC else "top bar"
-        hint = QLabel(f"Off stays off, even after a restart. The hexagon icon in the {where} switches it too.")
+        hint = QLabel(f"Off stays off, even after a restart. The {where}'s hexagon switches it too.")
         hint.setWordWrap(True)
         secondary(hint)
-        quit_ = QPushButton("Quit")
-        quit_.setAutoDefault(False)
-        quit_.clicked.connect(self.quit_requested)
+        # Two buttons that say what they do: put the window away, or stop CTally. One named
+        # Quit alone was taken for the first.
+        self.quit_button = QPushButton("Quit CTally")
+        self.quit_button.setAutoDefault(False)
+        self.quit_button.clicked.connect(self.quit_requested)
+        self.close_button = QPushButton("Close Window")
+        self.close_button.setAutoDefault(False)
+        self.close_button.setDefault(True)
+        self.close_button.clicked.connect(self.close)
+        if system.MAC:
+            again = "run “ctally run” in a terminal"
+        elif install.LAUNCHER.exists():
+            again = "open CTally from your applications, or run “ctally run” in a terminal"
+        else:
+            again = "run “ctally run” in a terminal"
+        self.quit_hint = QLabel(f"Close Window leaves CTally running. Quit CTally stops it: to start it again, {again}.")
+        self.quit_hint.setWordWrap(True)
+        secondary(self.quit_hint)
 
         rule = QFrame()
         rule.setFrameShape(QFrame.HLine)
         rule.setFrameShadow(QFrame.Sunken)
 
-        # The text and slider take the slack, pinning the switch, percentage and Quit to the
-        # right edge. The opacity line is indented to sit under "Show CTally".
+        # The text and slider take the slack, pinning the switch and percentage to the right
+        # edge. The opacity line is indented to sit under "Show CTally".
         row = QHBoxLayout()
         row.setSpacing(12)
         row.addWidget(self.icon)
@@ -248,10 +323,12 @@ class SettingsWindow(QWidget):
         times.addWidget(keep_title)
         times.addWidget(self.keep_box)
         times.addStretch(1)
-        footer = QHBoxLayout()
-        footer.setSpacing(12)
-        footer.addWidget(hint, 1)
-        footer.addWidget(quit_, 0, Qt.AlignVCenter)
+        # Quit to the left, out of the way; Close Window where the hand goes, to the right.
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        buttons.addWidget(self.quit_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self.close_button)
 
         stack = QVBoxLayout(self)
         stack.setContentsMargins(20, 20, 20, 20)
@@ -262,8 +339,10 @@ class SettingsWindow(QWidget):
         stack.addLayout(exact)
         stack.addLayout(keep)
         stack.addLayout(times)
+        stack.addWidget(hint)
         stack.addWidget(rule)
-        stack.addLayout(footer)
+        stack.addWidget(self.quit_hint)
+        stack.addLayout(buttons)
 
         for keys in (QKeySequence(Qt.Key_Escape), QKeySequence("Ctrl+W")):
             QShortcut(keys, self, activated=self.close)

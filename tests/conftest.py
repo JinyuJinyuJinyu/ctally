@@ -93,7 +93,10 @@ def _real_files() -> dict:
     home = Path.home()
     watched = [home / ".claude" / "settings.json", home / ".tmux.conf", home / ".config" / "tmux" / "tmux.conf",
                # there while ccsnap's timer is switched on
-               home / ".config" / "systemd" / "user" / "timers.target.wants" / "ccsnap.timer"]
+               home / ".config" / "systemd" / "user" / "timers.target.wants" / "ccsnap.timer",
+               # CTally at login, and among the applications
+               home / ".config" / "autostart" / "ctally.desktop",
+               home / ".local" / "share" / "applications" / "ctally.desktop"]
     hooks = home / ".claude" / "hooks"
     if hooks.is_dir():
         watched += sorted(hooks.iterdir())
@@ -164,6 +167,8 @@ def own_usage_and_prefs(tmp_path_factory, monkeypatch, stand_ins):
     # ...and so are the snapshots, of a tmux server that isn't running unless a test names its
     # own; and ccsnap's timer stays as it is, whatever asks to switch it off.
     monkeypatch.setenv("CCSNAP_HOME", str(home / "ccsnap"))
+    # Nor is CTally looked for, or put, among the real applications.
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / "share"))
     monkeypatch.setenv("CCSNAP_TMUX_SOCKET", f"ctally-pytest-none-{os.getpid()}")
     monkeypatch.setenv("PATH", f"{stand_ins}{os.pathsep}{os.environ.get('PATH', '')}")
     return home

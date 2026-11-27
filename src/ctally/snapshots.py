@@ -1,11 +1,11 @@
 """Snapshots of tmux and the Claude Code sessions in it, to bring them back after a restart.
 
-While it's switched on, CTally notes every couple of minutes (or as often as it's set to) each
-tmux session: its windows, their layouts and sizes, and each pane's folder and what Claude Code
-runs there, the session and the options it was started with, or the background job the pane
-shows. A snapshot the same as the last isn't saved again. They go after three days (or as many
-as they're set to be kept), except the newest from before the last restart: that's the one to
-bring back, however long the computer was off.
+While it's switched on, CTally notes every half hour (or as often as it's set to, up to every
+eight hours) each tmux session: its windows, their layouts and sizes, and each pane's folder
+and what Claude Code runs there, the session and the options it was started with, or the
+background job the pane shows. A snapshot the same as the last isn't saved again. They go
+after three days (or as many as they're set to be kept), except the newest from before the
+last restart: that's the one to bring back, however long the computer was off.
 
 Restoring makes each tmux session of a snapshot that isn't running now, lays out its windows
 and panes as they were, and in each pane resumes its Claude Code session with the options it
@@ -39,9 +39,9 @@ from typing import Callable, NamedTuple
 
 from . import system
 
-EVERY = 120                 # seconds between snapshots, unless set otherwise
+EVERY = 30 * 60             # seconds between snapshots, unless set otherwise
 KEEP_FOR = 3 * 86400        # how far back they go, unless set otherwise
-MINUTES = (1, 60)           # what the time between them can be set to, in minutes
+MINUTES = (30, 8 * 60)      # what the time between them can be set to, in minutes: half an hour to eight
 DAYS = (1, 30)              # and how long they're kept, in days
 WAIT = 300                  # how long a restore waits for a folder a Claude Code session needs
 MOUNTS = ("/Volumes", "/media", "/run/media", "/mnt")       # where disks are put, on macOS and Linux
@@ -759,7 +759,7 @@ def saved_when(moment: float, now: float) -> str:
 
 
 class Keeper:
-    """For the app: a snapshot when asked (every couple of minutes, or as set, while switched
+    """For the app: a snapshot when asked (every half hour, or as set, while switched
     on), and a restore, each off the main thread and one at a time. What they do goes to the log."""
 
     def __init__(self, store: Snapshots | None = None, tmux: Tmux | None = None, places: Places = Places(),

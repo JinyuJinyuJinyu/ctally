@@ -1,5 +1,6 @@
-"""`ctally setup` and `ctally uninstall`: the Claude Code hooks, tmux, starting at login,
-and moving over from the Swift app CTally used to be on macOS."""
+"""`ctally setup` and `ctally uninstall`: the Claude Code hooks, tmux, starting at login, a
+place among the applications on Linux (to start it again after a Quit), and moving over from
+the Swift app CTally used to be on macOS."""
 from __future__ import annotations
 
 import os
@@ -16,6 +17,10 @@ from .sessions import STATE_DIR
 LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / f"{prefs.APP_ID}.plist"
 AUTOSTART = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "autostart" / "ctally.desktop"
 OLD_APP = Path.home() / "Applications" / "CTally.app"
+# On Linux, CTally among the applications, and the icon that entry names.
+_DATA = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+LAUNCHER = _DATA / "applications" / "ctally.desktop"
+ICON = _DATA / "icons" / "hicolor" / "256x256" / "apps" / "ctally.png"
 
 
 def say(text: str) -> None:
@@ -58,6 +63,10 @@ def setup(tmux: bool, hooks: bool, autostart: bool, launch: bool, statusline: bo
         say(tmux_conf.install(ctally))
     elif system.tmux_binary():
         print("    tmux user? `ctally setup --tmux` adds a jump key (prefix + J) and status-line counts.")
+
+    if system.LINUX:
+        print("==> adding CTally to your applications")
+        say(install_launcher(ctally))
 
     # A running indicator is the old code: let it go, so the new one can take over.
     if prefs.tell_running("quit"):
@@ -102,9 +111,11 @@ def uninstall() -> int:
             print(f"Removed {LAUNCH_AGENT}")
         if OLD_APP.exists():
             retire_old_app()
-    elif AUTOSTART.exists():
-        AUTOSTART.unlink()
-        print(f"Removed {AUTOSTART}")
+    else:
+        for path in (AUTOSTART, LAUNCHER, ICON):
+            if path.exists():
+                path.unlink()
+                print(f"Removed {path}")
 
     try:
         say(claude_hooks.update(install=False))
@@ -171,6 +182,29 @@ def install_autostart(ctally: str, start_now: bool) -> str:
     if start_now:
         start(ctally)
     return f"Starts at login: {AUTOSTART}"
+
+
+def install_launcher(ctally: str) -> str:
+    """Puts CTally among the applications on Linux, so it can be started again after a Quit as
+    any app is: found by name in the Activities overview or the app grid. Its windows go by
+    this entry in the dock, too. The icon it names is drawn by the app as it starts, which has
+    Qt to draw it with: see gui/app.py."""
+    LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+    LAUNCHER.write_text("\n".join([
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=CTally",
+        "Comment=A status light for your Claude Code sessions",
+        f'Exec="{ctally}" run',
+        f"Icon={ICON}",
+        "Terminal=false",
+        "Categories=Utility;Development;",
+        "Keywords=claude;tally;sessions;",
+        "StartupWMClass=CTally",
+        "StartupNotify=false",
+        "",
+    ]))
+    return f"Start it again after a Quit from your applications (search for CTally): {LAUNCHER}"
 
 
 def start(ctally: str) -> None:

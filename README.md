@@ -60,8 +60,8 @@ red at 90%, so you see a session nearing compaction before it gets there. [More 
   with no timers but the snapshots', if they're on.
 - **Settings window** with an on/off switch, an opacity slider (80% by default), switches for the usage
   limits, asking Anthropic for them, and the snapshots, and how often snapshots are taken and how long they're
-  kept.
-- **Snapshots for after a restart**: every two minutes (or as often as you like), your tmux sessions and the
+  kept. **Close Window** puts it away; **Quit CTally** stops CTally, and says how to start it again.
+- **Snapshots for after a restart**: every half hour (or as far apart as eight hours), your tmux sessions and the
   Claude Code sessions in them, and a **Restore Sessions** item in the menus to bring them back.
   [More below.](#snapshots-for-after-a-restart)
 - **Silent**: no sounds, no notifications, no Dock icon.
@@ -278,7 +278,7 @@ $ ctally jump          # inside tmux: go to the session that needs you
 
 ### Snapshots, for after a restart
 
-Switch on **Snapshot Sessions** in CTally's menus (or **Snapshots** in its settings) and every two minutes
+Switch on **Snapshot Sessions** in CTally's menus (or **Snapshots** in its settings) and every half hour
 (or as often as you set) it notes your tmux sessions: their windows and layouts, each pane's folder, and the
 Claude Code session in it with the options it was started with, or the background job it shows. After a
 restart, the menus offer
@@ -305,9 +305,9 @@ background job again (`claude attach <job>`). Their rows turn up in CTally as th
   up are of nothing much) with a tmux session that isn't running now. Once you've restored, it's the newest.
 - **Kept for three days** (or as many as you set), and a snapshot the same as the last isn't saved again. The
   newest from before the last restart stays however old it is, so a week switched off doesn't lose it.
-- **How often, and for how long**: in CTally's settings, under Snapshots, **Every** takes one every 1 to 60
-  minutes (2 by default) and **Keep for** keeps them 1 to 30 days (3 by default). A new time between them
-  counts from now; with fewer days to keep, the older snapshots go when the next one is saved. `ctally
+- **How often, and for how long**: in CTally's settings, under Snapshots, **Every** takes one every half
+  hour to 8 hours (half an hour by default; type `90`, `2 h` or `1 h 30 min`, or step by the half hour) and
+  **Keep for** keeps them 1 to 30 days (3 by default). A new time between them counts from now; with fewer days to keep, the older snapshots go when the next one is saved. `ctally
   snapshot save` keeps them as long as the settings say, too.
 - **They're ccsnap's snapshots**, in the same place and form (`~/.local/state/ccsnap/snapshots`, on macOS
   `~/.ccsnap/snapshots`), so if you used ccsnap, its snapshots are there to restore. Switching CTally's on
@@ -340,13 +340,15 @@ ctally setup            # or: ctally setup --tmux
 ```
 
 pipx puts CTally in an environment of its own, with Qt (PySide6, about 100–400 MB depending on the platform),
-and the `ctally` command in `~/.local/bin`. Then `ctally setup` does four things:
+and the `ctally` command in `~/.local/bin`. Then `ctally setup` does these things:
 
 1. Copies the hook and status line scripts to `~/.claude/hooks/` (`ctally.sh`, `ctally-statusline.sh`).
 2. Adds the hooks and the status line to `~/.claude/settings.json`. It merges with your existing settings and
    backs the file up first. A status line you already had is kept, and still shows.
 3. Starts CTally at login: a LaunchAgent on macOS, an autostart entry (`~/.config/autostart`) on Linux.
-4. Starts CTally now.
+4. On Linux, puts CTally among your applications (`~/.local/share/applications/ctally.desktop`), to start it
+   again after a Quit.
+5. Starts CTally now.
 
 Restart any Claude Code sessions that were already running so they pick up the hooks.
 
@@ -405,7 +407,9 @@ ctally setup --tmux
 | See your usage limits | Hover over them. Hide them with right-click → Hide Usage Limits, or in Settings. |
 | Take snapshots for after a restart | Right-click → Snapshot Sessions (or the menu bar's), or Snapshots in Settings, where **Every** and **Keep for** set how often and for how long. |
 | Bring your sessions back after a restart | Right-click → Restore Sessions, or `ctally snapshot restore`. |
-| Start or stop it | `ctally run` starts it; Quit in its menu stops it. |
+| Put the settings window away | **Close Window**, Esc, or the window's own close button. CTally keeps running. |
+| Stop it | **Quit CTally**, in its settings or its menus. |
+| Start it again | On Ubuntu, open **CTally** from your applications (press Super and type its name). Anywhere, run `ctally run` in a terminal. It also starts when you log in. |
 | Name a session | Run `/rename my-name` in Claude Code. CTally picks the name up within seconds. |
 
 **The first time you click a session** on macOS, macOS asks whether CTally (shown as Python, which runs it) may
@@ -569,8 +573,8 @@ pipx uninstall ctally
 ```
 
 The first removes the hooks and status line in `~/.claude/settings.json` (putting back a status line you had)
-and the block in your tmux config, both after a backup, then the scripts, starting at login, the state files
-and the preferences. Your other Claude Code and
+and the block in your tmux config, both after a backup, then the scripts, starting at login, its place among
+the applications, the state files and the preferences. Your other Claude Code and
 tmux settings are left as they are. The second removes the command and its Qt.
 
 ## Troubleshooting
@@ -585,7 +589,7 @@ tmux settings are left as they are. The second removes the command and its Qt.
 - **prefix + J says "nothing needs you".** That means no session is waiting or done; `ctally list` shows what
   CTally sees. A session started outside tmux can't be jumped to.
 - **CTally is gone.** Use the hexagon icon in the menu bar → Show CTally. If the icon is gone too, it isn't
-  running: run `ctally run`. Its log is `~/Library/Logs/ctally.log` on macOS and
+  running (Quit CTally stops it): open CTally from your applications on Ubuntu, or run `ctally run`. Its log is `~/Library/Logs/ctally.log` on macOS and
   `~/.local/state/ctally/ctally.log` on Linux.
 - **No context gauge.** It needs CTally's status line (not with `--no-statusline`), a version of it from 0.3.3
   on (run `ctally setup` again after upgrading), and a reply in that session since: since it was reopened,
